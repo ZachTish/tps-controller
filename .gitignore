@@ -1,0 +1,9 @@
+node_modules/
+main.js
+*.map
+*.log
+dist/
+build/
+data.json
+.sync-request.json
+.DS_Store

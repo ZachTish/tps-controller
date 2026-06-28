@@ -1,0 +1,1052 @@
+import { App, FuzzySuggestModal, MarkdownView, Notice, TFile, WorkspaceLeaf, moment } from "obsidian";
+import { NOTIFICATION_VIEW_TYPE } from "../views/notification-view";
+import * as logger from "../logger";
+import type { TPSControllerSettings, OverdueItem } from "../types";
+import {
+    parseDate, parseTimeRange, parseDuration, getEffectiveEndTime,
+    formatTemplate, checkStopCondition, hasRequiredStatus,
+    shouldIgnoreForReminder, isAllDayEvent, hasExplicitTimeInValue,
+    getReminderTriggerBase,
+} from "../utils/time-calculation-service";
+import {
+    buildReminderTargetsForFile,
+    buildEffectiveReminderContextForTarget,
+    buildReminderDisplayName,
+} from "./reminder-target-service";
+import { getReminderCandidateFiles } from "./reminder-candidate-service";
+import { TPS_EVENTS, TPS_LEGACY_EVENTS } from "../tps-contracts";
+import { emitFilesUpdated } from "../tps-gcm-api";
+
+/**
+ * Handles overdue reminder detection, the notification sidebar view,
+ * and file-level actions (snooze, open, mark complete/won't-do).
+ */
+export class OverdueService {
+    constructor(
+        private app: App,
+        private getSettings: () => TPSControllerSettings,
+    ) {
+    }
+
+    async openNotificationModal(): Promise<void> {
+        const { workspace } = this.app;
+        let leaf: WorkspaceLeaf | null = null;
+        const leaves = workspace.getLeavesOfType(NOTIFICATION_VIEW_TYPE);
+        if (leaves.length > 0) {
+            leaf = leaves[0];
+        } else {
+            const rightLeaf = workspace.getRightLeaf(false);
+            if (rightLeaf) {
+                leaf = rightLeaf;
+                await leaf.setViewState({ type: NOTIFICATION_VIEW_TYPE, active: true });
+            } else {
+                logger.error("[TPS Controller] Failed to get right leaf");
+            }
+        }
+        if (leaf) workspace.revealLeaf(leaf);
+    }
+
+    async getOverdueItems(): Promise<OverdueItem[]> {
+        const settings = this.getSettings();
+        const now = Date.now();
+        const overdueItems: OverdueItem[] = [];
+        const reminders = settings.reminders || [];
+        if (!reminders.length) return overdueItems;
+
+        const ignorePaths = settings.globalIgnorePaths || [];
+        const ignoreTags = settings.globalIgnoreTags || [];
+        const ignoreStatuses = settings.globalIgnoreStatuses || [];
+        const snoozeKey = settings.snoozeProperty || "reminderSnooze";
+        const candidateResult = await getReminderCandidateFiles(
+            this.app,
+            settings,
+            reminders.filter((reminder) => reminder.enabled).map((reminder) => reminder.property),
+        );
+        const files = candidateResult.files;
+
+        for (const file of files) {
+            const cache = this.app.metadataCache.getFileCache(file);
+            const fm = (cache?.frontmatter || {}) as Record<string, unknown>;
+            const targets = await buildReminderTargetsForFile(this.app, file, fm, settings);
+
+            for (const target of targets) {
+                for (const reminder of reminders) {
+                    if (!reminder.enabled) continue;
+                    if (!this.reminderIncludesSource(reminder, target.sourceType)) continue;
+
+                    const ctx = buildEffectiveReminderContextForTarget(target, fm, reminder.property, settings);
+                    if (!ctx) continue;
+                    const effectiveFm = ctx.frontmatter;
+                    const propertyValue = ctx.propertyValue;
+
+                    if (shouldIgnoreForReminder(file, cache, effectiveFm, reminder, ignorePaths, ignoreTags, ignoreStatuses)) continue;
+                    if (!hasRequiredStatus(effectiveFm, reminder)) continue;
+
+                    let snoozedUntil: number | undefined;
+                    const snoozeVal = effectiveFm[snoozeKey];
+                    if (snoozeVal) {
+                        const snoozeTime = parseDate(snoozeVal);
+                        if (snoozeTime && now < snoozeTime) snoozedUntil = snoozeTime;
+                    }
+
+                    const { start: propertyTime, end: rangeEndTime } = parseTimeRange(propertyValue);
+                    if (!propertyTime) continue;
+                    const effectiveEndTime = getEffectiveEndTime(propertyTime, rangeEndTime, effectiveFm);
+                    if (reminder.mode === "timeblock" && effectiveEndTime && !reminder.triggerAtEnd && now > effectiveEndTime) {
+                        continue;
+                    }
+
+                    const stopped = reminder.stopConditions.some((cond) => checkStopCondition(effectiveFm, cond));
+                    if (stopped) continue;
+
+                    const isAllDaySafe = isAllDayEvent(propertyValue, effectiveFm) &&
+                        (!hasExplicitTimeInValue(propertyValue) || String(effectiveFm?.allDay ?? '').toLowerCase() === 'true');
+
+                    // Respect allDayFilter — must match event's all-day nature before continuing.
+                    if (reminder.allDayFilter && reminder.allDayFilter !== 'any') {
+                        if (reminder.allDayFilter === 'true' && !isAllDaySafe) continue;
+                        if (reminder.allDayFilter === 'false' && isAllDaySafe) continue;
+                    }
+                    const effectiveAllDayBaseTime = reminder.allDayBaseTime || settings.defaultAllDayBaseTime;
+                    const finalTriggerBase = getReminderTriggerBase(
+                        propertyTime,
+                        effectiveEndTime,
+                        isAllDaySafe,
+                        reminder.triggerAtEnd,
+                        effectiveAllDayBaseTime,
+                    );
+                    if (!finalTriggerBase) continue;
+
+                    let offsetMs = reminder.offsetMinutes * 60 * 1000;
+                    if (reminder.useSmartOffset && reminder.smartOffsetProperty) {
+                        const durationMins = parseDuration(effectiveFm[reminder.smartOffsetProperty]);
+                        const smartMs = durationMins * 60 * 1000;
+                        offsetMs = reminder.smartOffsetOperator === "subtract" ? -smartMs : smartMs;
+                    }
+
+                    const triggerTime = finalTriggerBase + offsetMs;
+                    // Never show items before their trigger time — applies to both timed and all-day events.
+                    if (now < triggerTime) continue;
+                    if (reminder.repeatEndAt === "trigger-base" && now > finalTriggerBase) continue;
+                    // For all-day events, include past days too — if stop conditions haven't been met the
+                    // item is still "open" and should surface until explicitly completed or snoozed.
+
+                    const diff = this.formatTimeDiff(now - finalTriggerBase);
+                    const vars: Record<string, string> = {
+                        filename: buildReminderDisplayName(file, target),
+                        time: moment(finalTriggerBase).format("HH:mm"),
+                        remaining: diff,
+                        duration: String(effectiveFm["duration"] ?? ""),
+                    };
+                    overdueItems.push({
+                        file,
+                        reminder,
+                        propertyTime: finalTriggerBase,
+                        diff,
+                        id: reminder.id,
+                        sourceKey: target.sourceKey,
+                        sourceType: target.sourceType,
+                        targetKind: target.targetKind || (target.sourceType === "external-event" ? "external-event" : "note"),
+                        taskTitle: target.taskTitle,
+                        taskRawLine: target.taskRawLine,
+                        taskLine: target.taskLine,
+                        reminderProperty: reminder.property,
+                        reminderPropertySource: this.getReminderPropertySource(target, reminder.property),
+                        noteTitle: target.noteTitle,
+                        title: formatTemplate(reminder.title, vars),
+                        body: formatTemplate(reminder.body, vars),
+                        snoozedUntil,
+                        isAllDay: isAllDaySafe,
+                        status: String(effectiveFm[this.getSettings().statusKey] ?? effectiveFm['status'] ?? ''),
+                        icon: String(effectiveFm["icon"] ?? ""),
+                        color: effectiveFm['color'] ? String(effectiveFm['color']) : '',
+                    });
+                }
+            }
+        }
+
+        const sortDirection = this.getSettings().notificationSortDirection === "desc" ? -1 : 1;
+        overdueItems.sort((a, b) => {
+            const delta = a.propertyTime - b.propertyTime;
+            if (delta !== 0) return delta * sortDirection;
+            return String(a.sourceKey || a.file.path).localeCompare(String(b.sourceKey || b.file.path)) * sortDirection;
+        });
+
+        const seenKeys = new Set<string>();
+        const deduplicated: OverdueItem[] = [];
+        const taskBackedReminderKeys = new Set(
+            overdueItems
+                .filter((item) => item.targetKind === "task")
+                .map((item) => `${item.file.path}::${item.reminder.id}`),
+        );
+        const visibleOverdueItems = overdueItems.filter((item) => {
+            if (item.targetKind !== "note") return true;
+            return !taskBackedReminderKeys.has(`${item.file.path}::${item.reminder.id}`);
+        });
+
+        for (const item of visibleOverdueItems) {
+            const key = item.sourceKey || item.file.path;
+            if (seenKeys.has(key)) continue;
+            seenKeys.add(key);
+            deduplicated.push(item);
+        }
+
+        // Annotate each deduplicated item with its next upcoming trigger time.
+        // Two-phase approach:
+        // 1. First check if the CURRENT reminder (that created this item) will fire again
+        // 2. If not, show when the next DIFFERENT reminder will start
+        for (const item of deduplicated) {
+            const cache = this.app.metadataCache.getFileCache(item.file);
+            const fm = (cache?.frontmatter || {}) as Record<string, unknown>;
+            
+            const currentReminderId = item.reminder.id;
+            const currentReminderLabel = item.reminder.label || item.reminder.id;
+            
+            let nextTime: number | undefined;
+            let nextLabel: string | undefined;
+            let isRepeatingCurrent = false;
+            let intervalMins: number | undefined;
+
+            const target: import('./reminder-target-service').ReminderEvaluationTarget = {
+                sourceKey: item.sourceKey || item.file.path,
+                sourceType: item.sourceType || 'file',
+                targetKind: item.targetKind,
+                taskTitle: item.taskTitle,
+                taskLine: item.taskLine,
+                noteTitle: item.noteTitle,
+            };
+
+            // PHASE 1: Check if the CURRENT reminder will fire again
+            const currentReminder = reminders.find(r => r.id === currentReminderId);
+            if (currentReminder?.enabled) {
+                const reminder = currentReminder;
+                const ctx = buildEffectiveReminderContextForTarget(target, fm, reminder.property, settings);
+                if (ctx && 
+                    !shouldIgnoreForReminder(item.file, cache, ctx.frontmatter, reminder, ignorePaths, ignoreTags, ignoreStatuses) &&
+                    hasRequiredStatus(ctx.frontmatter, reminder) &&
+                    !reminder.stopConditions.some((cond) => checkStopCondition(ctx.frontmatter, cond))) {
+                    
+                    const { start: pt, end: ret } = parseTimeRange(ctx.propertyValue);
+                    if (pt) {
+                        const eet = getEffectiveEndTime(pt, ret, ctx.frontmatter);
+                        const isAllDayCtx = isAllDayEvent(ctx.propertyValue, ctx.frontmatter) &&
+                            (!hasExplicitTimeInValue(ctx.propertyValue) || String(ctx.frontmatter?.allDay ?? '').toLowerCase() === 'true');
+                        const effectiveBase = reminder.allDayBaseTime || settings.defaultAllDayBaseTime;
+                        const base = getReminderTriggerBase(pt, eet, isAllDayCtx, reminder.triggerAtEnd, effectiveBase);
+                        if (!base) continue;
+                        if (reminder.allDayFilter && reminder.allDayFilter !== 'any') {
+                            if ((reminder.allDayFilter === 'true' && !isAllDayCtx) ||
+                                (reminder.allDayFilter === 'false' && isAllDayCtx)) {
+                                // Skip
+                            } else {
+                                let offMs = reminder.offsetMinutes * 60 * 1000;
+                                if (reminder.useSmartOffset && reminder.smartOffsetProperty) {
+                                    const dm = parseDuration(ctx.frontmatter[reminder.smartOffsetProperty]);
+                                    const sm = dm * 60 * 1000;
+                                    offMs = reminder.smartOffsetOperator === 'subtract' ? -sm : sm;
+                                }
+                                const tTime = base + offMs;
+                                const isRepeating = !!(reminder.repeatUntilComplete && reminder.repeatIntervalMinutes > 0);
+                                
+                                if (isRepeating) {
+                                    // Repeating reminder - compute next occurrence
+                                    const intervalMs = (reminder.repeatIntervalMinutes || 0) * 60 * 1000;
+                                    let nextRepeat = tTime;
+                                    if (intervalMs > 0 && nextRepeat <= now) {
+                                        const elapsed = now - nextRepeat;
+                                        const cycles = Math.floor(elapsed / intervalMs) + 1;
+                                        nextRepeat = nextRepeat + cycles * intervalMs;
+                                    }
+                                    nextTime = nextRepeat;
+                                    nextLabel = currentReminderLabel;
+                                    isRepeatingCurrent = true;
+                                    intervalMins = reminder.repeatIntervalMinutes;
+                                    logger.log(`[TPS-Controller Annotation] ${item.file.basename}: Current reminder repeating, nextTime=${new Date(nextRepeat).toLocaleTimeString()}, intervalMins=${intervalMins}`);
+                                } else if (now < tTime) {
+                                    // Future non-repeating trigger
+                                    nextTime = tTime;
+                                    nextLabel = currentReminderLabel;
+                                    logger.log(`[TPS-Controller Annotation] ${item.file.basename}: Current reminder future, nextTime=${new Date(tTime).toLocaleTimeString()}`);
+                                }
+                            }
+                        } else {
+                            // No allDayFilter restriction
+                            let offMs = reminder.offsetMinutes * 60 * 1000;
+                            if (reminder.useSmartOffset && reminder.smartOffsetProperty) {
+                                const dm = parseDuration(ctx.frontmatter[reminder.smartOffsetProperty]);
+                                const sm = dm * 60 * 1000;
+                                offMs = reminder.smartOffsetOperator === 'subtract' ? -sm : sm;
+                            }
+                            const tTime = base + offMs;
+                            const isRepeating = !!(reminder.repeatUntilComplete && reminder.repeatIntervalMinutes > 0);
+                            
+                            if (isRepeating) {
+                                // Repeating reminder - compute next occurrence
+                                const intervalMs = (reminder.repeatIntervalMinutes || 0) * 60 * 1000;
+                                let nextRepeat = tTime;
+                                if (intervalMs > 0 && nextRepeat <= now) {
+                                    const elapsed = now - nextRepeat;
+                                    const cycles = Math.floor(elapsed / intervalMs) + 1;
+                                    nextRepeat = nextRepeat + cycles * intervalMs;
+                                }
+                                nextTime = nextRepeat;
+                                nextLabel = currentReminderLabel;
+                                isRepeatingCurrent = true;
+                                intervalMins = reminder.repeatIntervalMinutes;
+                                logger.log(`[TPS-Controller Annotation] ${item.file.basename}: Current reminder repeating, nextTime=${new Date(nextRepeat).toLocaleTimeString()}, intervalMins=${intervalMins}`);
+                            } else if (now < tTime) {
+                                // Future non-repeating trigger
+                                nextTime = tTime;
+                                nextLabel = currentReminderLabel;
+                                logger.log(`[TPS-Controller Annotation] ${item.file.basename}: Current reminder future, nextTime=${new Date(tTime).toLocaleTimeString()}`);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // PHASE 2: If current reminder won't fire again, look for next DIFFERENT reminder
+            if (nextTime === undefined) {
+                for (const reminder of reminders) {
+                    if (!reminder.enabled) continue;
+                    // Skip the current reminder - we want to see what's NEXT
+                    if (reminder.id === currentReminderId) continue;
+                    const ctx = buildEffectiveReminderContextForTarget(target, fm, reminder.property, settings);
+                    if (!ctx) continue;
+                    if (shouldIgnoreForReminder(item.file, cache, ctx.frontmatter, reminder, ignorePaths, ignoreTags, ignoreStatuses)) continue;
+                    if (!hasRequiredStatus(ctx.frontmatter, reminder)) continue;
+                    if (reminder.stopConditions.some((cond) => checkStopCondition(ctx.frontmatter, cond))) continue;
+                    const { start: pt, end: ret } = parseTimeRange(ctx.propertyValue);
+                    if (!pt) continue;
+                    const eet = getEffectiveEndTime(pt, ret, ctx.frontmatter);
+                    const isAllDayCtx = isAllDayEvent(ctx.propertyValue, ctx.frontmatter) &&
+                        (!hasExplicitTimeInValue(ctx.propertyValue) || String(ctx.frontmatter?.allDay ?? '').toLowerCase() === 'true');
+                    if (reminder.allDayFilter && reminder.allDayFilter !== 'any') {
+                        if (reminder.allDayFilter === 'true' && !isAllDayCtx) continue;
+                        if (reminder.allDayFilter === 'false' && isAllDayCtx) continue;
+                    }
+                    const effectiveBase = reminder.allDayBaseTime || settings.defaultAllDayBaseTime;
+                    const base = getReminderTriggerBase(pt, eet, isAllDayCtx, reminder.triggerAtEnd, effectiveBase);
+                    if (!base) continue;
+                    let offMs = reminder.offsetMinutes * 60 * 1000;
+                    if (reminder.useSmartOffset && reminder.smartOffsetProperty) {
+                        const dm = parseDuration(ctx.frontmatter[reminder.smartOffsetProperty]);
+                        const sm = dm * 60 * 1000;
+                        offMs = reminder.smartOffsetOperator === 'subtract' ? -sm : sm;
+                    }
+                    const tTime = base + offMs;
+                    
+                    // Only consider FUTURE triggers (not currently firing)
+                    if (now < tTime) {
+                        if (nextTime === undefined || tTime < nextTime) {
+                            nextTime = tTime;
+                            nextLabel = reminder.label || reminder.id;
+                            logger.log(`[TPS-Controller Annotation] ${item.file.basename}: Next different reminder at ${new Date(tTime).toLocaleTimeString()}, label=${nextLabel}`);
+                        }
+                    }
+                }
+            }
+            
+            // Set the annotation fields
+            if (nextTime !== undefined) {
+                item.nextTriggerTime = nextTime;
+                item.nextRuleLabel = nextLabel;
+                item.isRepeating = isRepeatingCurrent;
+                if (isRepeatingCurrent) {
+                    item.nextReminderIntervalMinutes = intervalMins;
+                }
+            }
+        }
+
+        return deduplicated;
+    }
+
+    private reminderIncludesSource(
+        reminder: TPSControllerSettings["reminders"][number],
+        sourceType: "file" | "external-event",
+    ): boolean {
+        const configured = Array.isArray(reminder.sourceTypes) ? reminder.sourceTypes.filter(Boolean) : [];
+        if (configured.length > 0) return configured.includes(sourceType);
+        if (sourceType === "external-event") return !!reminder.includeUnmatchedExternalEvents;
+        return sourceType === "file";
+    }
+
+    private getReminderPropertySource(
+        target: import('./reminder-target-service').ReminderEvaluationTarget,
+        reminderProperty: string,
+    ): OverdueItem["reminderPropertySource"] {
+        if (target.sourceType === "external-event") return "external-event";
+        if (target.targetKind !== "task") return "note";
+        const normalizedReminderProperty = String(reminderProperty || "").trim().toLowerCase();
+        const taskKeys = new Set((target.taskPropertyKeys || []).map((key) => String(key || "").trim().toLowerCase()));
+        return normalizedReminderProperty && taskKeys.has(normalizedReminderProperty) ? "task" : "note";
+    }
+
+    private formatTimeDiff(diffMs: number): string {
+        const diffMins = Math.floor(diffMs / 60000);
+        if (diffMins < 0) {
+            const absM = Math.abs(diffMins);
+            if (absM < 60) return `in ${absM} min`;
+            if (absM < 1440) return `in ${Math.floor(absM / 60)}h ${absM % 60}m`;
+            const d = Math.floor(absM / 1440);
+            return `in ${d}d ${Math.floor((absM % 1440) / 60)}h ${absM % 60}m`;
+        }
+        if (diffMins < 60) return `${diffMins} min ago`;
+        if (diffMins < 1440) return `${Math.floor(diffMins / 60)}h ${diffMins % 60}m ago`;
+        const d = Math.floor(diffMins / 1440);
+        return `${d}d ${Math.floor((diffMins % 1440) / 60)}h ${diffMins % 60}m ago`;
+    }
+
+    private getGcmBulkEditService(): any | null {
+        const plugins = (this.app as any)?.plugins;
+        const plugin =
+            plugins?.getPlugin?.("tps-global-context-menu") ||
+            plugins?.plugins?.["tps-global-context-menu"] ||
+            plugins?.getPlugin?.("TPS-Global-Context-Menu (Dev)") ||
+            plugins?.plugins?.["TPS-Global-Context-Menu (Dev)"];
+        return plugin?.bulkEditService || plugin?.api?.bulkEditService || null;
+    }
+
+    async setItemStatus(item: OverdueItem, status: string | null): Promise<void> {
+        if (item.targetKind === "task" && typeof item.taskLine === "number") {
+            await this.updateTaskLineProperties(item, this.buildTaskStatusPatch(status));
+            return;
+        }
+
+        const bulkEditService = this.getGcmBulkEditService();
+        if (bulkEditService) {
+            if (status == null) {
+                if (typeof bulkEditService.updateFrontmatter === "function") {
+                    await bulkEditService.updateFrontmatter([item.file], { status: null });
+                    this.triggerFilesUpdated([item.file.path]);
+                    return;
+                }
+            } else if (typeof bulkEditService.setStatus === "function") {
+                await bulkEditService.setStatus([item.file], status);
+                this.triggerFilesUpdated([item.file.path]);
+                return;
+            } else if (typeof bulkEditService.updateFrontmatter === "function") {
+                await bulkEditService.updateFrontmatter([item.file], { status });
+                this.triggerFilesUpdated([item.file.path]);
+                return;
+            }
+        }
+
+        const now = (window as any).moment
+            ? (window as any).moment().format('YYYY-MM-DD HH:mm:ss')
+            : new Date().toISOString().replace('T', ' ').slice(0, 19);
+        const normalized = String(status || "").trim().toLowerCase();
+        const isDone = normalized === "complete" || normalized === "wont-do";
+
+        await this.app.fileManager.processFrontMatter(item.file, (fm) => {
+            if (status == null) {
+                delete fm.status;
+            } else {
+                fm.status = status;
+            }
+            const cdKey = Object.keys(fm).find((k) => k.toLowerCase() === 'completeddate');
+            if (isDone) {
+                fm[cdKey || "completedDate"] = now;
+            } else if (cdKey) {
+                delete fm[cdKey];
+            }
+        });
+        this.triggerFilesUpdated([item.file.path]);
+    }
+
+    async snoozeItem(item: OverdueItem, minutes: number): Promise<void> {
+        if (item.targetKind === "task" && typeof item.taskLine === "number") {
+            const snoozeKey = this.getSettings().snoozeProperty || "reminderSnooze";
+            const snoozeTimeStr = minutes > 0
+                ? moment().add(minutes, "minutes").format("YYYY-MM-DD HH:mm")
+                : "";
+            await this.updateTaskLineProperties(item, { [snoozeKey]: snoozeTimeStr || null });
+            return;
+        }
+        await this.snoozeFile(item.file, minutes);
+    }
+
+    async markItemComplete(item: OverdueItem): Promise<void> {
+        await this.setItemStatus(item, "complete");
+    }
+
+    async markItemWontDo(item: OverdueItem): Promise<void> {
+        await this.setItemStatus(item, "wont-do");
+    }
+
+    async resolveTaskReminder(item: OverdueItem): Promise<boolean> {
+        const property = item.reminderProperty || item.reminder.property || this.getSettings().startProperty || "scheduled";
+        logger.debug("[NotificationMove] resolve reminder task action", {
+            path: item.file?.path,
+            targetKind: item.targetKind,
+            taskLine: item.taskLine,
+            taskTitle: item.taskTitle,
+            reminderPropertySource: item.reminderPropertySource,
+            property,
+        });
+        if (item.targetKind !== "task" || typeof item.taskLine !== "number") {
+            await this.clearFileReminderProperty(item.file, property);
+            new Notice(`Cleared ${property}.`);
+            return true;
+        }
+
+        if (item.reminderPropertySource === "task") {
+            const changed = await this.updateTaskLineProperties(item, { [property]: null });
+            if (changed) new Notice(`Cleared ${property} from task.`);
+            return changed;
+        }
+
+        const targetFile = await this.promptTargetFile();
+        if (!targetFile) {
+            logger.debug("[NotificationMove] target selection canceled", {
+                path: item.file?.path,
+                taskTitle: item.taskTitle,
+            });
+            return false;
+        }
+        logger.debug("[NotificationMove] target selected", {
+            sourcePath: item.file?.path,
+            targetPath: targetFile.path,
+            taskLine: item.taskLine,
+            taskTitle: item.taskTitle,
+        });
+        return this.moveTaskToFile(item, targetFile);
+    }
+
+    private async clearFileReminderProperty(file: TFile, property: string): Promise<void> {
+        const normalized = String(property || "").trim().toLowerCase();
+        await this.app.fileManager.processFrontMatter(file, (fm) => {
+            const key = Object.keys(fm).find((candidate) => candidate.trim().toLowerCase() === normalized) || property;
+            delete fm[key];
+        });
+        this.triggerFilesUpdated([file.path]);
+    }
+
+    private buildTaskStatusPatch(status: string | null): Record<string, string | null> {
+        const now = (window as any).moment
+            ? (window as any).moment().format('YYYY-MM-DD HH:mm:ss')
+            : new Date().toISOString().replace('T', ' ').slice(0, 19);
+        const statusKey = this.getSettings().statusKey || "status";
+        const normalized = String(status || "").trim().toLowerCase();
+        const isDone = normalized === "complete" || normalized === "wont-do";
+        return {
+            [statusKey]: status,
+            completedDate: isDone ? now : null,
+        };
+    }
+
+    private async updateTaskLineProperties(item: OverdueItem, patch: Record<string, string | null>): Promise<boolean> {
+        if (typeof item.taskLine !== "number" || !Number.isFinite(item.taskLine)) return false;
+        const raw = await this.app.vault.cachedRead(item.file);
+        const lines = raw.split(/\r?\n/);
+        const resolvedIndex = this.findCurrentTaskLineIndex(lines, item);
+        if (resolvedIndex < 0 || resolvedIndex >= lines.length) {
+            logger.warn("[NotificationMove] task line update target not found", {
+                path: item.file?.path,
+                taskLine: item.taskLine,
+                taskTitle: item.taskTitle,
+                taskRawLine: item.taskRawLine,
+            });
+            new Notice("Could not find the task line to update.");
+            return false;
+        }
+        lines[resolvedIndex] = this.applyTaskCheckboxState(
+            this.applyInlinePropertyPatch(lines[resolvedIndex], patch),
+            patch[this.getSettings().statusKey || "status"] ?? patch.status ?? null,
+        );
+        await this.app.vault.modify(item.file, lines.join("\n"));
+        item.taskLine = resolvedIndex;
+        item.taskRawLine = lines[resolvedIndex];
+        this.triggerFilesUpdated([item.file.path]);
+        return true;
+    }
+
+    private promptTargetFile(): Promise<TFile | null> {
+        return new Promise((resolve) => {
+            new TargetFileSuggestModal(this.app, resolve).open();
+        });
+    }
+
+    private async moveTaskToFile(item: OverdueItem, targetFile: TFile): Promise<boolean> {
+        if (!(targetFile instanceof TFile) || targetFile.extension?.toLowerCase() !== "md") {
+            new Notice("Choose a Markdown file.");
+            return false;
+        }
+
+        const sourceFile = item.file;
+        const sourceContent = await this.app.vault.cachedRead(sourceFile);
+        const sourceParts = this.splitContent(sourceContent);
+        const sourceIndex = this.findCurrentTaskLineIndex(sourceParts.lines, item);
+        if (sourceIndex < 0) {
+            logger.warn("[NotificationMove] task line move source not found", {
+                sourcePath: sourceFile.path,
+                targetPath: targetFile.path,
+                taskLine: item.taskLine,
+                taskTitle: item.taskTitle,
+                taskRawLine: item.taskRawLine,
+            });
+            new Notice("Could not find the task line to move.");
+            return false;
+        }
+
+        const block = this.extractTaskBlock(sourceParts.lines, sourceIndex);
+        if (!block.length) {
+            logger.warn("[NotificationMove] task block move source not found", {
+                sourcePath: sourceFile.path,
+                targetPath: targetFile.path,
+                sourceIndex,
+                taskTitle: item.taskTitle,
+            });
+            new Notice("Could not find the task block to move.");
+            return false;
+        }
+
+        if (targetFile.path === sourceFile.path) {
+            const nextLines = [...sourceParts.lines];
+            nextLines.splice(sourceIndex, block.length);
+            const inserted = this.insertTaskBlockAfterFrontmatter(nextLines, block);
+            await this.app.vault.modify(sourceFile, this.joinContent(inserted.lines, sourceParts.newline, true));
+            this.triggerFilesUpdated([sourceFile.path]);
+            item.taskLine = inserted.lineIndex;
+            item.taskRawLine = block[0];
+            new Notice(`Moved task to the top of ${sourceFile.basename}.`);
+            return true;
+        }
+
+        let targetInsertLine = -1;
+        await this.app.vault.process(targetFile, (content) => {
+            const parts = this.splitContent(content);
+            const inserted = this.insertTaskBlockAfterFrontmatter(parts.lines, block);
+            targetInsertLine = inserted.lineIndex;
+            return this.joinContent(inserted.lines, parts.newline, true);
+        });
+
+        if (this.isDailyNoteSourceFile(sourceFile)) {
+            const scratchpadBlock = this.buildDailyNoteScratchpadMovedTaskBlock(block);
+            let preserved = false;
+            await this.app.vault.process(sourceFile, (content) => {
+                const parts = this.splitContent(content);
+                const index = this.findCurrentTaskLineIndex(parts.lines, item);
+                if (index < 0) return content;
+                const currentBlock = this.extractTaskBlock(parts.lines, index);
+                if (!currentBlock.length) return content;
+                const nextLines = [...parts.lines];
+                nextLines.splice(index, currentBlock.length, ...scratchpadBlock);
+                preserved = true;
+                return this.joinContent(nextLines, parts.newline, parts.endsWithNewline);
+            });
+
+            this.triggerFilesUpdated([sourceFile.path, targetFile.path]);
+            new Notice(preserved
+                ? `Copied task to ${targetFile.basename}; kept a checked scratchpad copy in ${sourceFile.basename}.`
+                : `Copied task to ${targetFile.basename}; the original daily-note line changed before it could be marked.`);
+            logger.debug("[NotificationMove] daily-note scratchpad move complete", {
+                sourcePath: sourceFile.path,
+                targetPath: targetFile.path,
+                insertedLine: targetInsertLine,
+                preservedSource: preserved,
+                taskTitle: item.taskTitle,
+            });
+            return preserved;
+        }
+
+        let removed = false;
+        await this.app.vault.process(sourceFile, (content) => {
+            const parts = this.splitContent(content);
+            const index = this.findCurrentTaskLineIndex(parts.lines, item);
+            if (index < 0) return content;
+            const currentBlock = this.extractTaskBlock(parts.lines, index);
+            if (!currentBlock.length) return content;
+            const nextLines = [...parts.lines];
+            nextLines.splice(index, currentBlock.length);
+            removed = true;
+            return this.joinContent(nextLines, parts.newline, parts.endsWithNewline);
+        });
+
+        item.file = targetFile;
+        item.taskLine = Math.max(0, targetInsertLine);
+        item.taskRawLine = block[0];
+        item.noteTitle = targetFile.basename;
+        this.triggerFilesUpdated([sourceFile.path, targetFile.path]);
+        new Notice(removed
+            ? `Moved task to ${targetFile.basename}.`
+            : `Copied task to ${targetFile.basename}; the original line changed before it could be removed.`);
+        logger.debug("[NotificationMove] move complete", {
+            sourcePath: sourceFile.path,
+            targetPath: targetFile.path,
+            insertedLine: targetInsertLine,
+            removedSource: removed,
+            taskTitle: item.taskTitle,
+        });
+        return removed;
+    }
+
+    private isDailyNoteSourceFile(file: TFile): boolean {
+        const folder = this.normalizeDailyNoteFolder(this.getDailyNoteFolder());
+        const expectedPath = folder ? `${folder}/${file.basename}.md` : `${file.basename}.md`;
+        if (file.path !== expectedPath) return false;
+        const format = this.getDailyNoteDateFormat();
+        const parsed = moment(file.basename, format, true);
+        return parsed?.isValid?.() && parsed.isValid();
+    }
+
+    private getDailyNoteFolder(): string {
+        try {
+            const folder = String((this.app as any).internalPlugins?.plugins?.["daily-notes"]?.instance?.options?.folder || "").trim();
+            if (folder) return folder;
+        } catch {
+            // Fall through to historical default.
+        }
+        return "System/Dailynotes";
+    }
+
+    private getDailyNoteDateFormat(): string {
+        try {
+            const format = String((this.app as any).internalPlugins?.plugins?.["daily-notes"]?.instance?.options?.format || "").trim();
+            if (format) return format;
+        } catch {
+            // Fall through to Obsidian default.
+        }
+        return "YYYY-MM-DD";
+    }
+
+    private normalizeDailyNoteFolder(folder: string): string {
+        return String(folder || "")
+            .trim()
+            .replace(/\\/g, "/")
+            .replace(/^\/+|\/+$/g, "");
+    }
+
+    private buildDailyNoteScratchpadMovedTaskBlock(block: string[]): string[] {
+        const cleanBlock = [...block];
+        while (cleanBlock.length && !cleanBlock[0].trim()) cleanBlock.shift();
+        while (cleanBlock.length && !cleanBlock[cleanBlock.length - 1].trim()) cleanBlock.pop();
+        if (!cleanBlock.length) return cleanBlock;
+        return [
+            this.applyInlinePropertyPatch(
+                this.applyTaskCheckboxState(cleanBlock[0], "complete"),
+                { completedDate: "null" },
+            ),
+            ...cleanBlock.slice(1),
+        ];
+    }
+
+    private splitContent(content: string): { lines: string[]; newline: string; endsWithNewline: boolean } {
+        const newline = content.includes("\r\n") ? "\r\n" : "\n";
+        const endsWithNewline = /\r?\n$/.test(content);
+        const lines = content.split(/\r?\n/);
+        if (endsWithNewline) lines.pop();
+        return { lines, newline, endsWithNewline };
+    }
+
+    private joinContent(lines: string[], newline: string, endsWithNewline: boolean): string {
+        return `${lines.join(newline)}${endsWithNewline ? newline : ""}`;
+    }
+
+    private findCurrentTaskLineIndex(lines: string[], item: OverdueItem): number {
+        const preferredIndex = typeof item.taskLine === "number" && Number.isFinite(item.taskLine)
+            ? Math.max(0, Math.floor(item.taskLine))
+            : -1;
+        if (preferredIndex >= 0 && this.isSameTaskLine(lines[preferredIndex] || "", item)) return preferredIndex;
+
+        const rawLine = String(item.taskRawLine || "");
+        if (rawLine) {
+            const exactIndex = lines.findIndex((line) => line === rawLine && this.isTaskLine(line || ""));
+            if (exactIndex >= 0) return exactIndex;
+        }
+
+        const normalizedTitle = this.normalizeTaskText(item.taskTitle || "");
+        if (!normalizedTitle) return -1;
+        return lines.findIndex((line) => this.isTaskLine(line || "") && this.normalizeTaskText(this.cleanTaskLineTitle(line || "")) === normalizedTitle);
+    }
+
+    private isSameTaskLine(line: string, item: OverdueItem): boolean {
+        if (!this.isTaskLine(line || "")) return false;
+        const rawLine = String(item.taskRawLine || "");
+        if (rawLine && line === rawLine) return true;
+        const normalizedTitle = this.normalizeTaskText(item.taskTitle || "");
+        return !!normalizedTitle && this.normalizeTaskText(this.cleanTaskLineTitle(line || "")) === normalizedTitle;
+    }
+
+    private extractTaskBlock(lines: string[], startIndex: number): string[] {
+        if (!this.isTaskLine(lines[startIndex] || "")) return [];
+        const sourceIndent = this.getIndentWidth(lines[startIndex] || "");
+        let end = startIndex + 1;
+        while (end < lines.length) {
+            const line = lines[end] || "";
+            if (!line.trim()) {
+                const nextNonBlank = this.findNextNonBlank(lines, end + 1);
+                if (nextNonBlank >= 0 && this.getIndentWidth(lines[nextNonBlank] || "") > sourceIndent) {
+                    end += 1;
+                    continue;
+                }
+                break;
+            }
+            if (this.getIndentWidth(line) > sourceIndent) {
+                end += 1;
+                continue;
+            }
+            break;
+        }
+        return lines.slice(startIndex, end);
+    }
+
+    private insertTaskBlockAfterFrontmatter(lines: string[], block: string[]): { lines: string[]; lineIndex: number } {
+        const cleanBlock = [...block];
+        while (cleanBlock.length && !cleanBlock[0].trim()) cleanBlock.shift();
+        while (cleanBlock.length && !cleanBlock[cleanBlock.length - 1].trim()) cleanBlock.pop();
+        const insertIndex = this.findAfterFrontmatterIndex(lines);
+        const before = lines.slice(0, insertIndex);
+        const after = lines.slice(insertIndex);
+        while (after.length > 0 && after[0].trim() === "") after.shift();
+        const lineIndex = before.length > 0 ? before.length + 1 : 0;
+        return {
+            lines: before.length > 0
+                ? [...before, "", ...cleanBlock, ...(after.length > 0 ? ["", ...after] : [])]
+                : [...cleanBlock, ...(after.length > 0 ? ["", ...after] : [])],
+            lineIndex,
+        };
+    }
+
+    private findAfterFrontmatterIndex(lines: string[]): number {
+        if ((lines[0] || "").trim() !== "---") return 0;
+        for (let i = 1; i < lines.length; i += 1) {
+            if ((lines[i] || "").trim() === "---") return i + 1;
+        }
+        return 0;
+    }
+
+    private findNextNonBlank(lines: string[], startIndex: number): number {
+        for (let i = startIndex; i < lines.length; i += 1) {
+            if ((lines[i] || "").trim()) return i;
+        }
+        return -1;
+    }
+
+    private isTaskLine(line: string): boolean {
+        return /^\s*(?:[-*+]|\d+[.)])\s+\[[^\]]?]\s+/.test(line);
+    }
+
+    private getIndentWidth(line: string): number {
+        return String(line || "").match(/^[\t ]*/)?.[0].replace(/\t/g, "    ").length ?? 0;
+    }
+
+    private cleanTaskLineTitle(line: string): string {
+        return line
+            .replace(/^\s*(?:[-*+]|\d+[.)])\s+\[[^\]]?]\s+/, "")
+            .replace(/(?:<span\b[^>]*data-tps-inline-props="[^"]*"[^>]*>\s*<\/span>|<!--\s*tps-inline-props:[\s\S]*?\s*-->|\s*%%\s*tps-inline-props:[\s\S]*?\s*%%)/g, "")
+            .replace(/\[\^tps-inline:[^\]]+]/g, "")
+            .replace(/\[[^\[\]:]+::\s*[^\]]+\]/g, "")
+            .replace(/#[\w/-]+/g, "")
+            .replace(/\s+/g, " ")
+            .trim();
+    }
+
+    private normalizeTaskText(value: string): string {
+        return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+    }
+
+    private applyTaskCheckboxState(line: string, status: string | null): string {
+        const normalized = String(status || "").trim().toLowerCase();
+        if (!normalized) return line;
+
+        const marker = normalized === "complete" || normalized === "completed" || normalized === "done"
+            ? "x"
+            : normalized === "wont-do" || normalized === "wont do" || normalized === "cancelled" || normalized === "canceled"
+                ? "-"
+                : normalized === "working" || normalized === "in-progress" || normalized === "inprogress"
+                    ? "/"
+                    : normalized === "holding" || normalized === "blocked" || normalized === "waiting"
+                        ? "?"
+                        : " ";
+
+        return line.replace(/^(\s*(?:[-*+]|\d+[.)])\s+\[)[^\]]?(\]\s+)/, `$1${marker}$2`);
+    }
+
+    private applyInlinePropertyPatch(line: string, patch: Record<string, string | null>): string {
+        let next = line;
+        for (const [key, rawValue] of Object.entries(patch)) {
+            const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const propRegex = new RegExp(`\\s*\\[${escapedKey}\\s*::\\s*[^\\]]*\\]`, "i");
+            if (rawValue == null || String(rawValue).trim() === "") {
+                next = next.replace(propRegex, "");
+                continue;
+            }
+            const token = `[${key}:: ${String(rawValue).trim()}]`;
+            if (propRegex.test(next)) {
+                next = next.replace(propRegex, ` ${token}`);
+            } else {
+                next = `${next.trimEnd()} ${token}`;
+            }
+        }
+        return next.replace(/\s+$/g, "");
+    }
+
+    async snoozeFile(file: TFile, minutes: number): Promise<void> {
+        const snoozeKey = this.getSettings().snoozeProperty || "reminderSnooze";
+        const snoozeTimeStr = minutes > 0
+            ? moment().add(minutes, "minutes").format("YYYY-MM-DD HH:mm")
+            : "";
+        await this.app.fileManager.processFrontMatter(file, (fm) => {
+            fm[snoozeKey] = snoozeTimeStr;
+        });
+    }
+
+    openFile(file: TFile): void {
+        void this.openFileAtLine(file);
+    }
+
+    async openItem(item: OverdueItem): Promise<void> {
+        await this.openFileAtLine(item.file, item.taskLine);
+    }
+
+    private async openFileAtLine(file: TFile, lineNumber?: number): Promise<void> {
+        const leaf = this.app.workspace.getLeaf(false);
+        if (!leaf) return;
+
+        const safeLine = typeof lineNumber === "number" && Number.isFinite(lineNumber)
+            ? Math.max(0, Math.floor(lineNumber))
+            : undefined;
+        await leaf.openFile(file, {
+            active: true,
+            eState: safeLine !== undefined ? { line: safeLine } : undefined,
+        });
+        this.app.workspace.revealLeaf(leaf);
+
+        if (safeLine !== undefined) {
+            await this.revealEditorLine(leaf, safeLine);
+        }
+    }
+
+    private async revealEditorLine(leaf: WorkspaceLeaf, lineNumber: number): Promise<void> {
+        for (let attempt = 0; attempt < 6; attempt++) {
+            const view = leaf.view;
+            const editor = view instanceof MarkdownView ? view.editor : (view as any)?.editor;
+            if (editor) {
+                const safeLine = Math.max(0, Math.min(lineNumber, Math.max(0, editor.lineCount() - 1)));
+                const lineText = editor.getLine(safeLine) || "";
+                const from = { line: safeLine, ch: 0 };
+                const to = { line: safeLine, ch: Math.max(0, lineText.length) };
+                editor.focus();
+                editor.setSelection(from, to);
+                editor.scrollIntoView({ from, to }, true);
+                if (view instanceof MarkdownView) this.flashEditorLine(view, safeLine);
+                return;
+            }
+            await new Promise((resolve) => window.setTimeout(resolve, 50));
+        }
+    }
+
+    private flashEditorLine(view: MarkdownView, lineNumber: number): void {
+        const editorView = (view.editor as any)?.cm;
+        if (!editorView?.state?.doc || typeof editorView.domAtPos !== "function") return;
+
+        const run = () => {
+            try {
+                const docLine = editorView.state.doc.line(Math.max(1, lineNumber + 1));
+                const domAtLine = editorView.domAtPos(docLine.from);
+                const node = domAtLine?.node;
+                const element = node instanceof HTMLElement ? node : node?.parentElement;
+                const lineEl =
+                    element?.closest?.(".cm-line") ||
+                    view.contentEl.querySelector<HTMLElement>(".cm-line.cm-active");
+                if (!(lineEl instanceof HTMLElement)) return;
+
+                const previous = {
+                    backgroundColor: lineEl.style.backgroundColor,
+                    boxShadow: lineEl.style.boxShadow,
+                    borderRadius: lineEl.style.borderRadius,
+                    transition: lineEl.style.transition,
+                };
+
+                lineEl.style.transition = "background-color 220ms ease, box-shadow 220ms ease";
+                lineEl.style.backgroundColor = "color-mix(in srgb, var(--interactive-accent) 24%, transparent)";
+                lineEl.style.boxShadow = "inset 3px 0 0 var(--interactive-accent)";
+                lineEl.style.borderRadius = "4px";
+
+                window.setTimeout(() => {
+                    lineEl.style.backgroundColor = previous.backgroundColor;
+                    lineEl.style.boxShadow = previous.boxShadow;
+                    lineEl.style.borderRadius = previous.borderRadius;
+                    lineEl.style.transition = previous.transition;
+                }, 1400);
+            } catch {
+                // Ignore stale editor positions while Obsidian is changing leaves.
+            }
+        };
+
+        window.requestAnimationFrame(() => window.requestAnimationFrame(run));
+    }
+
+    async markFileComplete(file: TFile): Promise<void> {
+        const bulkEditService = this.getGcmBulkEditService();
+        if (typeof bulkEditService?.setStatus === "function") {
+            await bulkEditService.setStatus([file], "complete");
+            this.triggerFilesUpdated([file.path]);
+            return;
+        }
+
+        const now = (window as any).moment
+            ? (window as any).moment().format('YYYY-MM-DD HH:mm:ss')
+            : new Date().toISOString().replace('T', ' ').slice(0, 19);
+        await this.app.fileManager.processFrontMatter(file, (fm) => {
+            fm.status = 'complete';
+            fm.completedDate = now;
+        });
+        this.triggerFilesUpdated([file.path]);
+    }
+
+    async markFileWontDo(file: TFile): Promise<void> {
+        const now = (window as any).moment
+            ? (window as any).moment().format('YYYY-MM-DD HH:mm:ss')
+            : new Date().toISOString().replace('T', ' ').slice(0, 19);
+        await this.app.fileManager.processFrontMatter(file, (fm) => {
+            fm.status = 'wont-do';
+            fm.completedDate = now;
+        });
+        this.triggerFilesUpdated([file.path]);
+    }
+
+    private triggerFilesUpdated(paths: string[]): void {
+        emitFilesUpdated(this.app, paths, "tps-controller");
+    }
+}
+
+class TargetFileSuggestModal extends FuzzySuggestModal<TFile> {
+    private didChoose = false;
+    private didSettle = false;
+
+    constructor(
+        app: App,
+        private readonly onChoose: (file: TFile | null) => void,
+    ) {
+        super(app);
+        this.setPlaceholder("Move task to note...");
+    }
+
+    getItems(): TFile[] {
+        return this.app.vault.getMarkdownFiles().sort((a, b) => a.path.localeCompare(b.path));
+    }
+
+    getItemText(item: TFile): string {
+        return item.path;
+    }
+
+    onChooseItem(item: TFile): void {
+        this.didChoose = true;
+        this.settle(item);
+    }
+
+    onClose(): void {
+        super.onClose();
+        window.setTimeout(() => {
+            if (!this.didChoose) this.settle(null);
+        }, 0);
+    }
+
+    private settle(file: TFile | null): void {
+        if (this.didSettle) return;
+        this.didSettle = true;
+        this.onChoose(file);
+    }
+}

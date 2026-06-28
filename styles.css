@@ -1,0 +1,275 @@
+/* TPS Controller Mode - UI Lockdown */
+
+/* When in controller mode, hide most of the UI and show a warning overlay */
+body.tps-controller-mode {
+    /* Hide the main editor area */
+    .workspace-split.mod-root > .workspace-tabs {
+        display: none !important;
+    }
+
+    /* Hide the left sidebar (file explorer, etc) */
+    .workspace-split.mod-left-split {
+        display: none !important;
+    }
+
+    /* Hide the right sidebar (outline, backlinks, etc) */
+    .workspace-split.mod-right-split {
+        display: none !important;
+    }
+
+    /* Hide the ribbon (left sidebar icons) */
+    .workspace-ribbon {
+        display: none !important;
+    }
+
+    /* Keep status bar visible so user can see controller status */
+    .status-bar {
+        display: flex !important;
+    }
+
+    /* Add a large warning overlay */
+    .workspace::before {
+        content: '⚙️ CONTROLLER MODE';
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        font-size: 3rem;
+        font-weight: bold;
+        color: var(--text-muted);
+        text-align: center;
+        z-index: 1000;
+        pointer-events: none;
+    }
+
+    .workspace::after {
+        content: 'This vault is running automation in the background.\AOpen the settings to switch to User mode.';
+        white-space: pre-line;
+        position: fixed;
+        top: 60%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        font-size: 1.2rem;
+        color: var(--text-muted);
+        text-align: center;
+        max-width: 600px;
+        z-index: 1000;
+        pointer-events: none;
+        line-height: 1.6;
+    }
+}
+
+/* =======================================================================
+   Settings Tab Styles
+   ======================================================================= */
+
+/* ── Collapsible Settings Sections ─────────────────────────────────────── */
+
+.tps-collapsible-section {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+
+.tps-collapsible-section-summary {
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+  list-style: none;
+}
+
+.tps-collapsible-section-summary::-webkit-details-marker {
+  display: none;
+}
+
+.tps-collapsible-section-summary::before {
+  content: '▶';
+  font-size: 0.65em;
+  transition: transform 0.15s ease;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.tps-collapsible-section[open] > .tps-collapsible-section-summary::before {
+  transform: rotate(90deg);
+}
+
+.tps-collapsible-section-summary:hover {
+  color: var(--interactive-accent);
+}
+
+.tps-collapsible-section[open] > .tps-collapsible-section-summary {
+  margin-bottom: 8px;
+}
+
+.tps-collapsible-section-title { flex: 1; }
+
+.tps-collapsible-section-description {
+  margin: 4px 0 8px 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.tps-collapsible-section-content { padding-top: 4px; }
+
+/* Nested subsections */
+.tps-collapsible-subsection {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: color-mix(in srgb, var(--background-secondary) 40%, transparent);
+}
+
+.tps-collapsible-subsection > summary {
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+
+.tps-collapsible-subsection > summary:hover {
+  color: var(--interactive-accent);
+}
+
+/* ── Device Role description ────────────────────────────────────────────── */
+
+.tps-controller-role-desc {
+  margin-bottom: 10px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--background-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.tps-role-controller {
+  color: var(--text-success);
+  font-weight: bold;
+}
+
+.tps-role-user {
+  color: var(--text-muted);
+  font-weight: bold;
+}
+
+.tps-role-hint {
+  color: var(--text-muted);
+}
+
+/* ── Reminder Rules ─────────────────────────────────────────────────────── */
+
+.tps-controller-reminder-rule {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: color-mix(in srgb, var(--background-secondary) 28%, transparent);
+}
+
+.tps-controller-reminder-rule > summary {
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  list-style: none;
+}
+
+.tps-controller-reminder-rule > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tps-rule-summary-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+  flex: 1;
+}
+
+.tps-rule-label {
+  font-weight: 600;
+}
+
+.tps-rule-desc {
+  color: var(--text-muted);
+  font-size: 0.85em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.tps-rule-summary-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tps-rule-summary-btn {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 5px;
+  background: var(--background-primary);
+  color: var(--text-muted);
+  padding: 2px 6px;
+  cursor: pointer;
+  line-height: 1.1;
+}
+
+.tps-rule-summary-btn:hover {
+  color: var(--text-normal);
+  border-color: var(--interactive-accent);
+}
+
+.tps-rule-content {
+  margin-top: 10px;
+}
+
+.tps-reminder-rules-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+  align-items: center;
+}
+
+.tps-reminder-rules-filter {
+  flex: 1;
+  min-width: 220px;
+}
+
+.tps-reminder-rules-toolbar-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* Sub-group details inside a reminder rule */
+.tps-rule-content details {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+
+.tps-rule-content details > summary {
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tps-rule-content details > div {
+  margin-top: 8px;
+}
+
+/* ── Empty state ────────────────────────────────────────────────────────── */
+
+.tps-empty-state {
+  padding: 12px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
