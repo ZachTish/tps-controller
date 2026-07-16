@@ -285,6 +285,40 @@ export function hasRequiredStatus(fm: any, reminder: PropertyReminder): boolean 
     return statuses.some((s) => required.includes(s));
 }
 
+export function normalizeCheckboxState(value: unknown): string {
+    const raw = String(value ?? "").trim().toLowerCase();
+    if (!raw || raw === "space" || raw === "blank" || raw === "empty" || raw === "open" || raw === "todo") {
+        return " ";
+    }
+    if (raw === "complete" || raw === "completed" || raw === "done") return "x";
+    if (raw === "working" || raw === "in-progress" || raw === "inprogress") return "/";
+    if (raw === "holding" || raw === "hold" || raw === "waiting") return "?";
+    if (raw === "wont-do" || raw === "wontdo" || raw === "cancelled" || raw === "canceled") return "-";
+    return raw;
+}
+
+export function getCheckboxStates(fm: any): string[] {
+    const candidates = [
+        fm?.checkboxState,
+        fm?.taskCheckboxState,
+        fm?.checkbox,
+        fm?.taskCheckbox,
+    ];
+    return [...new Set(candidates
+        .filter((value) => value !== undefined && value !== null)
+        .map((value) => normalizeCheckboxState(value))
+        .filter((value) => value === " " || !!value))];
+}
+
+export function hasRequiredCheckboxState(fm: any, reminder: PropertyReminder): boolean {
+    if (!reminder.requiredCheckboxStates || reminder.requiredCheckboxStates.length === 0) return true;
+    const required = reminder.requiredCheckboxStates.map((s) => normalizeCheckboxState(s)).filter((s) => s === " " || !!s);
+    if (required.length === 0) return true;
+    const states = getCheckboxStates(fm);
+    if (states.length === 0) return false;
+    return states.some((s) => required.includes(s));
+}
+
 /**
  * Check if a file/reminder should be ignored based on per-reminder or global settings.
  * Pass the global fallback arrays from settings for when the reminder doesn't have its own.
@@ -296,7 +330,8 @@ export function shouldIgnoreForReminder(
     reminder: PropertyReminder,
     globalIgnorePaths: string[],
     globalIgnoreTags: string[],
-    globalIgnoreStatuses: string[]
+    globalIgnoreStatuses: string[],
+    globalIgnoreCheckboxStates: string[] = []
 ): boolean {
     // Always merge global paths with per-reminder paths so global protections
     // (vault root, _ folders, etc.) apply even when a reminder overrides the list.
@@ -312,6 +347,10 @@ export function shouldIgnoreForReminder(
     const ignoreStatuses = Array.isArray(reminder.ignoreStatuses)
         ? [...new Set([...reminder.ignoreStatuses, ...globalStatuses])]
         : globalStatuses;
+    const globalCheckboxStates = Array.isArray(globalIgnoreCheckboxStates) ? globalIgnoreCheckboxStates : [];
+    const ignoreCheckboxStates = Array.isArray(reminder.ignoreCheckboxStates)
+        ? [...new Set([...reminder.ignoreCheckboxStates, ...globalCheckboxStates])]
+        : globalCheckboxStates;
 
     const normPath = normalizeComparablePath(file.path);
     const normBase = normalizeComparablePath(file.basename);
@@ -329,6 +368,14 @@ export function shouldIgnoreForReminder(
     const statuses = new Set<string>(getStatuses(fm));
     const normalizedIgnoreStatuses = ignoreStatuses.map(s => normalizeStatus(s)).filter(Boolean);
     if (normalizedIgnoreStatuses.some(s => statuses.has(s))) {
+        return true;
+    }
+
+    const checkboxStates = new Set<string>(getCheckboxStates(fm));
+    const normalizedIgnoreCheckboxStates = ignoreCheckboxStates
+        .map(s => normalizeCheckboxState(s))
+        .filter(s => s === " " || !!s);
+    if (normalizedIgnoreCheckboxStates.some(s => checkboxStates.has(s))) {
         return true;
     }
 

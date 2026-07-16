@@ -49,4 +49,5 @@ export interface TPSControllerApi<TSettings = unknown, TExternalCalendarConfig =
 export interface TPSNotifierApi {
   sendNotification?: (title: string, body: string, file?: unknown) => Promise<void>;
   sendMessage?: (text: string, file?: unknown, title?: string) => Promise<void>;
+  dryRunMessage?: (text: string, file?: unknown, title?: string) => unknown;
 }

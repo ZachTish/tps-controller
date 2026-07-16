@@ -17,6 +17,7 @@ export class SnoozeModal extends Modal {
     }
 
     onOpen() {
+    this.modalEl.addClass("tps-keyboard-aware-modal");
         const { contentEl } = this;
         contentEl.createEl("h2", { text: "Snooze Reminder" });
 

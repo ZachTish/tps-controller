@@ -15,6 +15,11 @@ export class SyncConflictWatcher {
     public updateConfig(archiveFolder: string, eventIdKey?: string) {
         this.archiveFolder = (archiveFolder || "System/Archive").trim();
         if (eventIdKey) this.eventIdKey = eventIdKey;
+        logger.flow("SyncConflictWatcher", "config:updated", {
+            archiveFolder: this.archiveFolder,
+            duplicateFolder: this.getDuplicateArchiveFolder(),
+            eventIdKey: this.eventIdKey,
+        });
     }
 
     private getDuplicateArchiveFolder(): string {
@@ -33,23 +38,26 @@ export class SyncConflictWatcher {
     }
 
     public start() {
+        logger.flow("SyncConflictWatcher", "start", {
+            archiveFolder: this.archiveFolder,
+            duplicateFolder: this.getDuplicateArchiveFolder(),
+            eventIdKey: this.eventIdKey,
+        });
         // 1. Listen for new files being created or renamed by Sync
         this.events.push(
             this.app.vault.on("create", async (file) => {
                 if (file instanceof TFile && file.extension === "md") {
-                    await this.checkAndArchiveIfConflict(file);
+                    await this.checkAndArchiveIfConflict(file, "vault-create");
                 }
             })
         );
         this.events.push(
             this.app.vault.on("rename", async (file) => {
                 if (file instanceof TFile && file.extension === "md") {
-                    await this.checkAndArchiveIfConflict(file);
+                    await this.checkAndArchiveIfConflict(file, "vault-rename");
                 }
             })
         );
-
-        logger.log("🔍 SyncConflictWatcher: Started listening for file conflicts.");
 
         // 2. Do an initial sweep to catch any created while Obsidian was closed.
         // Must wait for metadataCache to be fully populated: hasCalendarIdentity()
@@ -60,6 +68,7 @@ export class SyncConflictWatcher {
         const runStartupSweep = () => {
             if (startupSweepDone) return;
             startupSweepDone = true;
+            logger.flow("SyncConflictWatcher", "startup-sweep:scheduled");
             void this.sweepVaultForConflicts();
         };
         this.events.push(
@@ -72,32 +81,50 @@ export class SyncConflictWatcher {
 
     public stop() {
         this.events.forEach(e => this.app.vault.offref(e));
+        const removedListeners = this.events.length;
         this.events = [];
-        logger.log("🔍 SyncConflictWatcher: Stopped.");
+        logger.flow("SyncConflictWatcher", "stop", { removedListeners });
     }
 
     /**
      * Scans the entire vault ONCE at startup to catch any offline sync conflicts.
      */
     public async sweepVaultForConflicts() {
-        if (this.isSweeping) return;
+        if (this.isSweeping) {
+            logger.flow("SyncConflictWatcher", "sweep:skip-already-running");
+            return;
+        }
         this.isSweeping = true;
+        const duplicateFolder = this.getDuplicateArchiveFolder();
+        let scanned = 0;
+        let conflictNamed = 0;
+        let archivedCount = 0;
         try {
             const files = this.app.vault.getMarkdownFiles();
-            let archivedCount = 0;
+            logger.flow("SyncConflictWatcher", "sweep:start", {
+                files: files.length,
+                duplicateFolder,
+            });
 
             for (const file of files) {
                 // Quick ignore for our own archive folder
                 if (this.isInDuplicateArchiveFolder(file.path)) continue;
+                scanned++;
+                if (this.isConflictName(file.basename)) conflictNamed++;
 
-                const archived = await this.checkAndArchiveIfConflict(file);
+                const archived = await this.checkAndArchiveIfConflict(file, "startup-sweep");
                 if (archived) archivedCount++;
             }
 
             if (archivedCount > 0) {
                 new Notice(`Controller: Archived ${archivedCount} sync conflicts on startup.`);
-                logger.warn(`🔍 SyncConflictWatcher: Swept and archived ${archivedCount} offline conflicts.`);
             }
+            logger.flow("SyncConflictWatcher", "sweep:done", {
+                scanned,
+                conflictNamed,
+                archived: archivedCount,
+                duplicateFolder,
+            });
         } finally {
             this.isSweeping = false;
         }
@@ -107,34 +134,60 @@ export class SyncConflictWatcher {
      * Checks if a file has a conflict-style name and if its canonical parent exists.
      * If so, safely archives it.
      */
-    private async checkAndArchiveIfConflict(file: TFile): Promise<boolean> {
+    private async checkAndArchiveIfConflict(file: TFile, cause: "vault-create" | "vault-rename" | "startup-sweep"): Promise<boolean> {
         // Must match standard Sync conflict patterns
         if (!this.isConflictName(file.basename)) return false;
+        logger.flow("SyncConflictWatcher", "check:start", {
+            cause,
+            path: file.path,
+            basename: file.basename,
+        });
 
         // Prevent recursive archiving of the archive itself
-        if (this.isInDuplicateArchiveFolder(file.path)) return false;
+        if (this.isInDuplicateArchiveFolder(file.path)) {
+            logger.flow("SyncConflictWatcher", "check:skip-duplicate-folder", { cause, path: file.path });
+            return false;
+        }
 
         // Skip files that have a calendar event identity key in frontmatter.
         // These are auto-created meeting notes — let AutoCreateService manage them.
         // Archiving them here would cause delete+recreate loops.
         if (this.hasCalendarIdentity(file)) {
-            logger.log(`🔍 SyncConflictWatcher: Skipping conflict-named file with calendar identity: ${file.path}`);
+            logger.flow("SyncConflictWatcher", "check:skip-calendar-identity", {
+                cause,
+                path: file.path,
+                eventIdKey: this.eventIdKey,
+            });
             return false;
         }
 
         const canonicalBaseName = this.getCanonicalBaseName(file.basename);
-        if (!canonicalBaseName) return false;
+        if (!canonicalBaseName) {
+            logger.flow("SyncConflictWatcher", "check:skip-no-canonical-name", { cause, path: file.path });
+            return false;
+        }
 
         const parentPath = file.parent?.path || "";
         const expectedCanonicalPath = normalizePath(parentPath === "/" ? `${canonicalBaseName}.md` : `${parentPath}/${canonicalBaseName}.md`);
 
         const canonicalFile = this.app.vault.getAbstractFileByPath(expectedCanonicalPath);
+        logger.flow("SyncConflictWatcher", "check:canonical-resolved", {
+            cause,
+            path: file.path,
+            expectedCanonicalPath,
+            canonicalExists: canonicalFile instanceof TFile,
+        });
 
         // Only archive this conflict IF the canonical note is still safely in the vault
         if (canonicalFile && canonicalFile instanceof TFile) {
-            return await this.archiveDuplicate(file);
+            return await this.archiveDuplicate(file, cause, expectedCanonicalPath);
         }
 
+        logger.flow("SyncConflictWatcher", "check:skip-missing-canonical", {
+            cause,
+            path: file.path,
+            expectedCanonicalPath,
+        });
         return false;
     }
 
@@ -164,8 +217,13 @@ export class SyncConflictWatcher {
             .trim();
     }
 
-    private async archiveDuplicate(file: TFile): Promise<boolean> {
+    private async archiveDuplicate(
+        file: TFile,
+        cause: "vault-create" | "vault-rename" | "startup-sweep",
+        expectedCanonicalPath: string,
+    ): Promise<boolean> {
         const dupFolder = this.getDuplicateArchiveFolder();
+        const originalPath = file.path;
         try {
             await this.ensureFolderExists(dupFolder);
             const baseName = this.getCanonicalBaseName(file.basename);
@@ -173,16 +231,37 @@ export class SyncConflictWatcher {
             let newPath = normalizePath(`${dupFolder}/${baseName} duplicate.${file.extension}`);
             let counter = 1;
             while (this.app.vault.getAbstractFileByPath(newPath)) {
-                if (this.app.vault.getAbstractFileByPath(newPath) === file) return true; // Already here
+                if (this.app.vault.getAbstractFileByPath(newPath) === file) {
+                    logger.flow("SyncConflictWatcher", "archive:already-target", { cause, path: file.path, newPath });
+                    return true;
+                }
                 newPath = normalizePath(`${dupFolder}/${baseName} duplicate ${counter}.${file.extension}`);
                 counter++;
             }
 
+            logger.flow("SyncConflictWatcher", "archive:start", {
+                cause,
+                path: originalPath,
+                expectedCanonicalPath,
+                targetPath: newPath,
+                collisionCount: counter - 1,
+            });
             await this.app.vault.rename(file, newPath);
-            logger.warn(`🔍 SyncConflictWatcher: Archived conflict ${file.name} -> ${newPath}`);
+            logger.flowWarn("SyncConflictWatcher", "archive:done", {
+                cause,
+                originalPath,
+                targetPath: newPath,
+                expectedCanonicalPath,
+                collisionCount: counter - 1,
+            });
             return true;
         } catch (error) {
-            logger.error(`🔍 SyncConflictWatcher: Failed to archive duplicate ${file.path}`, error);
+            logger.flowError("SyncConflictWatcher", "archive:failed", error, {
+                cause,
+                path: originalPath,
+                expectedCanonicalPath,
+                duplicateFolder: dupFolder,
+            });
             return false;
         }
     }
@@ -198,10 +277,12 @@ export class SyncConflictWatcher {
             }
             try {
                 await this.app.vault.createFolder(normalizedPath);
+                logger.flow("SyncConflictWatcher", "folder:created", { path: normalizedPath });
             } catch (e: any) {
                 if (!(typeof e.message === "string" && e.message.toLowerCase().includes("already exists"))) {
                     throw e;
                 }
+                logger.flow("SyncConflictWatcher", "folder:create-raced", { path: normalizedPath });
             }
         }
     }

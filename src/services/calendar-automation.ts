@@ -59,9 +59,13 @@ export class CalendarAutomationService {
 
         const minutes = Math.max(1, settings.syncIntervalMinutes || 5);
         const intervalMs = minutes * 60 * 1000;
-        logger.log(`📅 Calendar sync interval: ${minutes} min`);
+        logger.flow("CalendarSync", "loop:start", {
+            intervalMinutes: minutes,
+            scanRoots: initialScanRoots.length,
+            calendars: settings.externalCalendars?.length || 0,
+        });
         this.calendarSyncIntervalId = window.setInterval(() => {
-            logger.log("⏲️ CALENDAR SYNC TICK");
+            logger.flow("CalendarSync", "loop:tick");
             void this.runSync();
         }, intervalMs);
     }
@@ -70,110 +74,133 @@ export class CalendarAutomationService {
         if (this.calendarSyncIntervalId !== null) {
             window.clearInterval(this.calendarSyncIntervalId);
             this.calendarSyncIntervalId = null;
+            logger.flow("CalendarSync", "loop:stopped");
         }
     }
 
     async runSync(force = false, options: { backfillPastEvents?: boolean } = {}): Promise<void> {
-        logger.log(`📅 RUN CALENDAR SYNC (force=${force}, backfillPastEvents=${options.backfillPastEvents === true})...`);
-        this.app.workspace.trigger(TPS_EVENTS.CALENDAR_SYNC_STARTED as any, {
-            sourcePluginId: "tps-controller",
-            timestamp: Date.now(),
+        await logger.timeAsync("CalendarSync", "run", {
             force,
-        });
-        const readiness = this.getSyncReadiness();
-        if (!readiness.ready) {
-            logger.warn(`📅 Skipping calendar sync: ${readiness.reason}`);
-            if (force) new Notice(`Calendar Sync skipped: ${readiness.reason}`);
-            return;
-        }
+            backfillPastEvents: options.backfillPastEvents === true,
+        }, async () => {
+            this.app.workspace.trigger(TPS_EVENTS.CALENDAR_SYNC_STARTED as any, {
+                sourcePluginId: "tps-controller",
+                timestamp: Date.now(),
+                force,
+            });
+            const readiness = this.getSyncReadiness();
+            logger.flow("CalendarSync", "readiness", readiness);
+            if (!readiness.ready) {
+                logger.flowWarn("CalendarSync", "skip:not-ready", { reason: readiness.reason, force });
+                if (force) new Notice(`Calendar Sync skipped: ${readiness.reason}`);
+                return;
+            }
 
-        const settings = this.getSettings();
+            const settings = this.getSettings();
 
-        let calendars: ExternalCalendarConfig[] = settings.externalCalendars || [];
+            let calendars: ExternalCalendarConfig[] = settings.externalCalendars || [];
+            let calendarSource = "controller-settings";
 
-        if (!calendars.length) {
-            const calPlugin = this.getCalendarPlugin();
-            if (calPlugin) {
-                const calSettings = calPlugin.getSettings?.();
-                if (calSettings?.externalCalendars?.length) {
-                    calendars = calSettings.externalCalendars;
-                    logger.log(`📅 Using ${calendars.length} calendars from Calendar Plugin (fallback).`);
+            if (!calendars.length) {
+                const calPlugin = this.getCalendarPlugin();
+                if (calPlugin) {
+                    const calSettings = calPlugin.getSettings?.();
+                    if (calSettings?.externalCalendars?.length) {
+                        calendars = calSettings.externalCalendars;
+                        calendarSource = "calendar-plugin-fallback";
+                        logger.flow("CalendarSync", "calendars:fallback", { calendars: calendars.length });
+                    }
                 }
             }
-        }
 
-        const urls: string[] = Array.from(new Set(
-            calendars
-                .filter((c) => c.enabled !== false)
-                .map((c) => normalizeCalendarUrl(c.url))
-                .filter(Boolean)
-        ));
+            const urls: string[] = Array.from(new Set(
+                calendars
+                    .filter((c) => c.enabled !== false)
+                    .map((c) => normalizeCalendarUrl(c.url))
+                    .filter(Boolean)
+            ));
+            logger.flow("CalendarSync", "calendars:resolved", {
+                source: calendarSource,
+                calendars: calendars.length,
+                enabledUrls: urls.length,
+            });
 
-        if (!urls.length) {
-            logger.log("⚠️ No calendar URLs configured, skipping sync.");
-            if (force) new Notice("Calendar Sync skipped: no calendar URLs are configured.");
-            return;
-        }
+            if (!urls.length) {
+                logger.flowWarn("CalendarSync", "skip:no-urls", { calendars: calendars.length, force });
+                if (force) new Notice("Calendar Sync skipped: no calendar URLs are configured.");
+                return;
+            }
 
-        const scanRoots = this.buildScanRoots(calendars, settings.archiveFolder);
-        if (!scanRoots.length) {
-            logger.warn("📅 Skipping calendar sync: no scoped calendar folders configured (vault-wide scan is disabled).");
-            if (force) new Notice("Calendar Sync skipped: no calendar note folder is configured.");
-            return;
-        }
+            const scanRoots = this.buildScanRoots(calendars, settings.archiveFolder);
+            logger.flow("CalendarSync", "scan-roots:resolved", {
+                scanRoots: scanRoots.length,
+                archiveFolder: settings.archiveFolder || "",
+            });
+            if (!scanRoots.length) {
+                logger.flowWarn("CalendarSync", "skip:no-scan-roots", { force });
+                if (force) new Notice("Calendar Sync skipped: no calendar note folder is configured.");
+                return;
+            }
 
-        const calendarConfigs: Record<string, any> = Object.fromEntries(
-            calendars
-                .filter((c) => c.url)
-                .map((c) => [
-                    normalizeCalendarUrl(c.url),
-                    {
-                        mode: c.autoCreateMode || "note",
-                        taskDestination: c.autoCreateTaskDestination || "daily-note",
-                        taskTargetPath: this.resolveTaskTargetPath(c),
-                        typeFolder: c.autoCreateTypeFolder || "",
-                        folder: c.autoCreateFolder || "",
-                        tag: normalizeCalendarTag(c.autoCreateTag || ""),
-                        template: c.autoCreateTemplate || "",
-                        autoCreateEnabled: c.autoCreateEnabled !== false,
-                    },
-                ])
-        );
+            const calendarConfigs: Record<string, any> = Object.fromEntries(
+                calendars
+                    .filter((c) => c.url)
+                    .map((c) => [
+                        normalizeCalendarUrl(c.url),
+                        {
+                            mode: c.autoCreateMode || "note",
+                            taskDestination: c.autoCreateTaskDestination || "daily-note",
+                            taskTargetPath: this.resolveTaskTargetPath(c),
+                            typeFolder: c.autoCreateTypeFolder || "",
+                            folder: c.autoCreateFolder || "",
+                            tag: normalizeCalendarTag(c.autoCreateTag || ""),
+                            template: c.autoCreateTemplate || "",
+                            autoCreateEnabled: c.autoCreateEnabled !== false,
+                        },
+                    ])
+            );
+            logger.flow("CalendarSync", "auto-create-configs", {
+                configs: Object.keys(calendarConfigs).length,
+                noteMode: Object.values(calendarConfigs).filter((config: any) => config.mode !== "task").length,
+                taskMode: Object.values(calendarConfigs).filter((config: any) => config.mode === "task").length,
+                disabled: Object.values(calendarConfigs).filter((config: any) => config.autoCreateEnabled === false).length,
+            });
 
-        this.autoCreateService.updateConfig({
-            allowAutoCreate: true,
-            noLossSyncMode: settings.noLossSyncMode ?? true,
-            eventIdKey: settings.eventIdKey,
-            uidKey: settings.uidKey,
-            titleKey: settings.titleKey,
-            statusKey: settings.statusKey,
-            previousStatusKey: settings.previousStatusKey,
-            startProperty: settings.startProperty,
-            endProperty: settings.endProperty,
-            syncOnEventDelete: settings.syncOnEventDelete,
-            archiveFolder: settings.archiveFolder,
-            globalIgnorePaths: settings.globalIgnorePaths || [],
-            canceledStatusValue: settings.canceledStatusValue,
-            scanRootFolders: scanRoots,
+            this.autoCreateService.updateConfig({
+                allowAutoCreate: true,
+                noLossSyncMode: settings.noLossSyncMode ?? true,
+                eventIdKey: settings.eventIdKey,
+                uidKey: settings.uidKey,
+                titleKey: settings.titleKey,
+                statusKey: settings.statusKey,
+                previousStatusKey: settings.previousStatusKey,
+                startProperty: settings.startProperty,
+                endProperty: settings.endProperty,
+                syncOnEventDelete: settings.syncOnEventDelete,
+                archiveFolder: settings.archiveFolder,
+                globalIgnorePaths: settings.globalIgnorePaths || [],
+                canceledStatusValue: settings.canceledStatusValue,
+                scanRootFolders: scanRoots,
+            });
+
+            await this.autoCreateService.checkAndCreateMeetingNotes(
+                this.externalCalendarService,
+                urls,
+                settings.externalCalendarFilter,
+                calendarConfigs,
+                force,
+                { backfillPastEvents: options.backfillPastEvents === true },
+            );
+
+            await this.onSyncComplete();
+            this.app.workspace.trigger(TPS_EVENTS.CALENDAR_SYNC_COMPLETED as any, {
+                sourcePluginId: "tps-controller",
+                timestamp: Date.now(),
+                force,
+                urlCount: urls.length,
+            });
+            logger.flow("CalendarSync", "run:completed", { force, urlCount: urls.length, scanRoots: scanRoots.length });
         });
-
-        await this.autoCreateService.checkAndCreateMeetingNotes(
-            this.externalCalendarService,
-            urls,
-            settings.externalCalendarFilter,
-            calendarConfigs,
-            force,
-            { backfillPastEvents: options.backfillPastEvents === true },
-        );
-
-        await this.onSyncComplete();
-        this.app.workspace.trigger(TPS_EVENTS.CALENDAR_SYNC_COMPLETED as any, {
-            sourcePluginId: "tps-controller",
-            timestamp: Date.now(),
-            force,
-            urlCount: urls.length,
-        });
-        logger.log("✅ CALENDAR SYNC COMPLETED");
     }
 
     private buildScanRoots(calendars: ExternalCalendarConfig[], archiveFolder: string): string[] {
@@ -223,7 +250,7 @@ export class CalendarAutomationService {
             ? this.normalizeTaskTargetPath(calendar.autoCreateTaskTargetPath)
             : "";
         if (explicit) return explicit;
-        return calendar.autoCreateTaskDestination === "event-note" ? "Calendar.md" : "";
+        return "";
     }
 
     private normalizeTaskTargetPath(value: string): string {
@@ -231,7 +258,7 @@ export class CalendarAutomationService {
             .trim()
             .replace(/^\[\[|\]\]$/g, "")
             .replace(/^\/+/, ""));
-        if (!normalized) return "";
+        if (!normalized || normalized === "." || normalized === ".md" || normalized.endsWith("/.md")) return "";
         return normalized.toLowerCase().endsWith(".md") ? normalized : `${normalized}.md`;
     }
 

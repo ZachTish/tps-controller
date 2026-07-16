@@ -23,3 +23,7 @@ test('shared TPS contract keeps legacy aliases for migration', () => {
   assert.equal(hasExportedValue('CALENDAR_SETTINGS_CHANGED', 'tps-calendar-settings-changed'), true);
   assert.equal(hasExportedValue('CALENDAR_EXPLICIT_REFRESH', 'tps-calendar-explicit-refresh'), true);
 });
+
+test('shared notifier API includes non-sending dry-run preparation', () => {
+  assert.match(source, /dryRunMessage\?: \(text: string, file\?: unknown, title\?: string\) => unknown/);
+});

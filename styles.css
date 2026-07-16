@@ -1,61 +1,29 @@
-/* TPS Controller Mode - UI Lockdown */
+/* TPS Controller Mode - Status Indicator */
 
-/* When in controller mode, hide most of the UI and show a warning overlay */
+/* Controller mode runs automation, but it must not hide normal Obsidian editing UI. */
 body.tps-controller-mode {
-    /* Hide the main editor area */
-    .workspace-split.mod-root > .workspace-tabs {
-        display: none !important;
-    }
-
-    /* Hide the left sidebar (file explorer, etc) */
-    .workspace-split.mod-left-split {
-        display: none !important;
-    }
-
-    /* Hide the right sidebar (outline, backlinks, etc) */
-    .workspace-split.mod-right-split {
-        display: none !important;
-    }
-
-    /* Hide the ribbon (left sidebar icons) */
-    .workspace-ribbon {
-        display: none !important;
-    }
-
     /* Keep status bar visible so user can see controller status */
     .status-bar {
         display: flex !important;
     }
 
-    /* Add a large warning overlay */
+    /* Add a small non-blocking status badge. */
     .workspace::before {
-        content: '⚙️ CONTROLLER MODE';
+        content: 'CONTROLLER';
         position: fixed;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        font-size: 3rem;
-        font-weight: bold;
+        right: 12px;
+        bottom: 28px;
+        z-index: 50;
+        padding: 2px 7px;
+        border: 1px solid var(--background-modifier-border);
+        border-radius: 6px;
+        background: var(--background-secondary);
         color: var(--text-muted);
-        text-align: center;
-        z-index: 1000;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
         pointer-events: none;
-    }
-
-    .workspace::after {
-        content: 'This vault is running automation in the background.\AOpen the settings to switch to User mode.';
-        white-space: pre-line;
-        position: fixed;
-        top: 60%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        font-size: 1.2rem;
-        color: var(--text-muted);
-        text-align: center;
-        max-width: 600px;
-        z-index: 1000;
-        pointer-events: none;
-        line-height: 1.6;
+        opacity: 0.72;
     }
 }
 
@@ -248,21 +216,21 @@ body.tps-controller-mode {
   gap: 6px;
 }
 
-/* Sub-group details inside a reminder rule */
-.tps-rule-content details {
+/* Flat groups inside a reminder rule keep the overall settings hierarchy at two levels. */
+.tps-rule-group {
   border: 1px solid var(--background-modifier-border);
   border-radius: 6px;
   padding: 8px 10px;
   margin-bottom: 8px;
 }
 
-.tps-rule-content details > summary {
+.tps-rule-group-heading {
   font-weight: 600;
-  cursor: pointer;
+  margin: 0 0 8px;
 }
 
-.tps-rule-content details > div {
-  margin-top: 8px;
+.tps-rule-group-content {
+  margin-top: 0;
 }
 
 /* ── Empty state ────────────────────────────────────────────────────────── */

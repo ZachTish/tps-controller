@@ -1,6 +1,7 @@
 import esbuild from "esbuild";
 import process from "process";
 import builtins from "builtin-modules";
+import { runtimeDeployPlugin } from "../deploy-runtime.mjs";
 
 const banner =
     `/*
@@ -17,6 +18,7 @@ const context = await esbuild.context({
     },
     entryPoints: ["src/main.ts"],
     bundle: true,
+    platform: "node",
     external: [
         "obsidian",
         "electron",
@@ -31,14 +33,16 @@ const context = await esbuild.context({
         "@lezer/common",
         "@lezer/highlight",
         "@lezer/lr",
-        ...builtins],
+        ...builtins,
+        ...builtins.map((moduleName) => `node:${moduleName}`)],
     format: "cjs",
-    target: "es2018",
+    target: "es2020",
     logLevel: "info",
     sourcemap: prod ? false : "inline",
     treeShaking: true,
     outfile: "main.js",
     minify: prod,
+    plugins: [runtimeDeployPlugin("TPS-Controller (Dev)")],
 });
 
 if (prod) {

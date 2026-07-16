@@ -1,6 +1,7 @@
 import { Modal, App, TFile, debounce, setIcon, moment, Menu } from 'obsidian';
 import type TPSControllerPlugin from '../main';
 import type { OverdueItem } from '../types';
+import * as logger from '../logger';
 
 export class OverdueItemsModal extends Modal {
     plugin: TPSControllerPlugin;
@@ -16,6 +17,7 @@ export class OverdueItemsModal extends Modal {
     }
 
     async onOpen() {
+    this.modalEl.addClass("tps-keyboard-aware-modal");
         const { contentEl, titleEl } = this;
         titleEl.setText('Overdue Items');
 
@@ -140,7 +142,10 @@ export class OverdueItemsModal extends Modal {
                             this.refreshDebounced();
                         } catch (error) {
                             this.suppressedItemKeys.delete(this.getItemKey(item));
-                            console.error(`[TPS Controller] Failed reminder action: ${label}`, error);
+                            logger.flowError('OverdueModal', 'action-failed', error, {
+                                action: label,
+                                path: item.file?.path || '',
+                            });
                             await this.refresh();
                         }
                     })();

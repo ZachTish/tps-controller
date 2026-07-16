@@ -9,6 +9,7 @@ const duplicateCleanupSource = readFileSync(new URL('../src/services/external-ca
 const settingsTabSource = readFileSync(new URL('../src/settings-tab.ts', import.meta.url), 'utf8');
 const calendarAutomationSource = readFileSync(new URL('../src/services/calendar-automation.ts', import.meta.url), 'utf8');
 const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+const parentChildSource = readFileSync(new URL('../src/services/parent-child-link.ts', import.meta.url), 'utf8');
 
 test('external reminder synthetic frontmatter uses externalId instead of legacy calendar identity triplet', () => {
   assert.match(source, /externalId: buildCalendarExternalId\(null, event\)/);
@@ -19,7 +20,11 @@ test('external reminder synthetic frontmatter uses externalId instead of legacy 
 
 test('Controller external event note creation writes tpsId and externalId instead of legacy identity triplet', () => {
   assert.match(createSource, /ensureInternalIdInFrontmatter\(app, frontmatter\)/);
-  assert.match(createSource, /frontmatter\.externalId = buildCalendarExternalId\(app, event\)/);
+  assert.match(createSource, /const externalId = buildCalendarExternalId\(app, event\)/);
+  assert.match(createSource, /frontmatter\.externalId = externalId/);
+  assert.match(createSource, /if \(event\.isAllDay\) \{\s*frontmatter\["allDay"\] = true;/);
+  assert.doesNotMatch(createSource, /frontmatter\["allDay"\] = !!event\.isAllDay/);
+  assert.doesNotMatch(createSource, /setFrontmatterValueCaseInsensitive\(fm, "folderPath"/);
   assert.doesNotMatch(createSource, /frontmatter\[eventIdKey\] = event\.id/);
   assert.doesNotMatch(createSource, /frontmatter\[uidKey\] = event\.uid/);
   assert.doesNotMatch(createSource, /frontmatter\[sourceUrlKey\] = event\.sourceUrl/);
@@ -34,6 +39,13 @@ test('Controller auto-create repair writes externalId and removes legacy identit
   assert.match(autoCreateSource, /this\.deleteFrontmatterKeyIfPresent\(obj, "tpsCalendarSourceUrl"\)/);
   assert.doesNotMatch(autoCreateSource, /fm\[this\.config\.eventIdKey\] = event\.id/);
   assert.doesNotMatch(autoCreateSource, /fm\[this\.config\.sourceUrlKey\] = normalizedSourceUrl/);
+  assert.match(autoCreateSource, /if \(event\.isAllDay\) \{[\s\S]*fm\[allDayKey\] = true;[\s\S]*this\.deleteFrontmatterKeyIfPresent\(fm, "allDay"\)/);
+  assert.doesNotMatch(autoCreateSource, /fm\.allDay = event\.isAllDay/);
+});
+
+test('Controller parent-child linking does not duplicate the child folder in frontmatter', () => {
+  assert.match(parentChildSource, /setFrontmatterValueCaseInsensitive\(fm, parentKey, parentLink\)/);
+  assert.doesNotMatch(parentChildSource, /setFrontmatterValueCaseInsensitive\(fm, "folderPath"/);
 });
 
 test('Controller duplicate cleanup groups only by externalId or source-scoped legacy event id', () => {
@@ -57,8 +69,12 @@ test('external calendar task target note setting commits full normalized paths',
   assert.doesNotMatch(targetSettingSource, /\.onChange\(async \(val\) => \{\s*calendar\.autoCreateTaskTargetPath = val\.trim\(\);\s*await save\(\);/);
   assert.match(calendarAutomationSource, /private normalizeTaskTargetPath\(value: string\): string/);
   assert.match(calendarAutomationSource, /this\.normalizeTaskTargetPath\(calendar\.autoCreateTaskTargetPath\)/);
+  assert.doesNotMatch(calendarAutomationSource, /Calendar\.md/);
   assert.match(mainSource, /const normalizeTaskTargetPathSetting = \(value: string\): string/);
   assert.match(mainSource, /normalizeTaskTargetPathSetting\(rest\.autoCreateTaskTargetPath\)/);
+  assert.match(settingsTabSource, /normalized === "\.md"/);
+  assert.match(calendarAutomationSource, /normalized === "\.md"/);
+  assert.match(mainSource, /normalized === "\.md"/);
 });
 
 test('task-mode calendar sync stores external identity in hidden comment metadata', () => {

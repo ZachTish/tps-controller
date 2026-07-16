@@ -41,6 +41,46 @@ export interface ExternalCalendarConfig {
     autoCreateTemplate?: string;
 }
 
+export interface TwoStageArchiveRule {
+    enabled: boolean;
+    sourceFolder: string;
+    destinationFolder: string;
+    cadence: "daily" | "weekly" | "monthly-end";
+    checkIntervalMinutes: number;
+    weeklyDay: number;
+    runTime: string;
+    lastRunKey: string;
+}
+
+export interface S3agleAttachmentAutomationSettings {
+    enabled: boolean;
+    runOnActiveNoteOpen: boolean;
+    runOnActiveNoteModify: boolean;
+    runOnPaste: boolean;
+    runAfterCommandIds: string[];
+    debounceSeconds: number;
+    cooldownMinutes: number;
+    archiveUploadedSources: boolean;
+    allowedAttachmentExtensions: string[];
+    ignoredAttachmentExtensions: string[];
+    makeUploadedObjectsPublic: boolean;
+    accessKeySecretName: string;
+    secretKeySecretName: string;
+    region: string;
+    bucket: string;
+    folder: string;
+    endpoint: string;
+    useBucketSubdomain: boolean;
+    contentUrl: string;
+    hashFileName: boolean;
+    hashSeed: number;
+    archiveUnreferencedBucketObjects: boolean;
+    bucketArchivePrefix: string;
+    bucketArchiveCheckIntervalMinutes: number;
+    bucketArchiveOrphanDelayMinutes: number;
+    bucketArchiveLastRunAt: number;
+}
+
 
 
 // ============================================================================
@@ -63,10 +103,12 @@ export interface PropertyReminder {
     ignorePaths?: string[];
     ignoreTags?: string[];
     ignoreStatuses?: string[];
+    ignoreCheckboxStates?: string[];
     useSmartOffset?: boolean;
     smartOffsetProperty?: string;
     smartOffsetOperator?: "add" | "subtract";
     requiredStatuses?: string[];
+    requiredCheckboxStates?: string[];
     requiredPaths?: string[];
     allDayFilter?: "any" | "true" | "false";
     allDayBaseTime?: string;
@@ -128,6 +170,8 @@ export interface TPSControllerSettings {
     canceledStatusValue: string;
     externalCalendarFilter: string;
     externalCalendars: ExternalCalendarConfig[];
+    twoStageArchive: TwoStageArchiveRule;
+    s3agleAttachmentAutomation: S3agleAttachmentAutomationSettings;
 
 
     // Frontmatter Key Names (shared with Calendar for sync)
@@ -149,6 +193,7 @@ export interface TPSControllerSettings {
     globalIgnorePaths: string[];
     globalIgnoreTags: string[];
     globalIgnoreStatuses: string[];
+    globalIgnoreCheckboxStates: string[];
     snoozeProperty: string;
     snoozeOptions: { label: string; minutes: number }[];
     notificationSortDirection: "asc" | "desc";
@@ -170,6 +215,44 @@ export const DEFAULT_CONTROLLER_SETTINGS: TPSControllerSettings = {
     canceledStatusValue: "cancelled",
     externalCalendarFilter: "",
     externalCalendars: [],
+    twoStageArchive: {
+        enabled: false,
+        sourceFolder: "Archive",
+        destinationFolder: "_archive",
+        cadence: "monthly-end",
+        checkIntervalMinutes: 60,
+        weeklyDay: 0,
+        runTime: "23:55",
+        lastRunKey: "",
+    },
+    s3agleAttachmentAutomation: {
+        enabled: false,
+        runOnActiveNoteOpen: true,
+        runOnActiveNoteModify: true,
+        runOnPaste: true,
+        runAfterCommandIds: [],
+        debounceSeconds: 10,
+        cooldownMinutes: 10,
+        archiveUploadedSources: true,
+        allowedAttachmentExtensions: [],
+        ignoredAttachmentExtensions: [],
+        makeUploadedObjectsPublic: true,
+        accessKeySecretName: "tps-controller-s3-access-key",
+        secretKeySecretName: "tps-controller-s3-secret-key",
+        region: "us-east-1",
+        bucket: "",
+        folder: "",
+        endpoint: "",
+        useBucketSubdomain: false,
+        contentUrl: "",
+        hashFileName: false,
+        hashSeed: 0,
+        archiveUnreferencedBucketObjects: false,
+        bucketArchivePrefix: "_archive/s3/{YYYY}/{MM}/{DD}",
+        bucketArchiveCheckIntervalMinutes: 60,
+        bucketArchiveOrphanDelayMinutes: 60,
+        bucketArchiveLastRunAt: 0,
+    },
 
 
     // Frontmatter Keys
@@ -191,6 +274,7 @@ export const DEFAULT_CONTROLLER_SETTINGS: TPSControllerSettings = {
     globalIgnorePaths: ["System/"],
     globalIgnoreTags: ["archive", "template"],
     globalIgnoreStatuses: ["complete", "wont-do"],
+    globalIgnoreCheckboxStates: ["x", "-"],
     snoozeProperty: "reminderSnooze",
     notificationSortDirection: "asc",
     defaultAllDayBaseTime: "09:00",

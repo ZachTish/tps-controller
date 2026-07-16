@@ -1,4 +1,5 @@
 import { App } from "obsidian";
+import * as logger from "./logger";
 
 export type DeviceRole = "controller" | "user";
 
@@ -24,9 +25,9 @@ export class DeviceRoleManager {
             // New device or undefined state: Default to Passive Replica
             this._currentRole = "user";
             window.localStorage.setItem(this.storageKey, "user");
-            console.log("[TPS Controller] New device detected. Defaulting to 'user' (Passive).");
+            logger.flow("DeviceRole", "default-user", { storageKey: this.storageKey });
         }
-        console.log(`[TPS Controller] Device Role initialized: ${this._currentRole}`);
+        logger.flow("DeviceRole", "initialized", { role: this._currentRole });
     }
 
     public get role(): DeviceRole {
@@ -40,7 +41,7 @@ export class DeviceRoleManager {
     public setRole(role: DeviceRole) {
         this._currentRole = role;
         window.localStorage.setItem(this.storageKey, role);
-        console.log(`[TPS Controller] Device role set to: ${role}`);
+        logger.flow("DeviceRole", "set", { role });
         if (this.onRoleChange) {
             this.onRoleChange(role);
         }

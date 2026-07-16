@@ -60,6 +60,48 @@ export function error(message?: any, ...rest: any[]): void {
     console.error(`${PLUGIN_PREFIX} ${msg}`, ...rest);
 }
 
+export function errorSummary(err: unknown): string {
+    if (err instanceof Error) return `${err.name}: ${err.message}`;
+    if (typeof err === "string") return err;
+    try { return JSON.stringify(err); } catch { return String(err); }
+}
+
+export function flow(scope: string, event: string, data?: Record<string, unknown>): void {
+    info(`[${scope}] ${event}`, data || {});
+}
+
+export function flowWarn(scope: string, event: string, data?: Record<string, unknown>): void {
+    warn(`[${scope}] ${event}`, data || {});
+}
+
+export function flowError(scope: string, event: string, err: unknown, data?: Record<string, unknown>): void {
+    error(`[${scope}] ${event}`, { ...(data || {}), error: errorSummary(err) }, err);
+}
+
+function nowMs(): number {
+    return typeof performance !== "undefined" && typeof performance.now === "function"
+        ? performance.now()
+        : Date.now();
+}
+
+export async function timeAsync<T>(
+    scope: string,
+    event: string,
+    data: Record<string, unknown>,
+    action: () => Promise<T>,
+): Promise<T> {
+    const start = nowMs();
+    flow(scope, `${event}:start`, data);
+    try {
+        const result = await action();
+        flow(scope, `${event}:done`, { ...data, durationMs: Math.round(nowMs() - start) });
+        return result;
+    } catch (err) {
+        flowError(scope, `${event}:failed`, err, { ...data, durationMs: Math.round(nowMs() - start) });
+        throw err;
+    }
+}
+
 export interface ScopedLogger {
     log(message?: any, ...rest: any[]): void;
     debug(message?: any, ...rest: any[]): void;

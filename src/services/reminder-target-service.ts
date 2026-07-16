@@ -160,16 +160,25 @@ function parseTaskReminderLine(line: string): { title: string; properties: Recor
 
     const properties = parseInlineProperties(line);
     const marker = String(taskMatch[1] || " ").trim().toLowerCase();
+    const checkboxState = normalizeTaskCheckboxState(taskMatch[1]);
     const markerStatus = getStatusFromTaskMarker(marker);
     const parsedStatus = typeof properties.status === "string" ? properties.status.trim() : properties.status;
     if (parsedStatus) properties.inlineStatus = parsedStatus;
     properties.status = markerStatus;
     properties.checkboxStatus = markerStatus;
+    properties.checkboxState = checkboxState;
+    properties.taskCheckboxState = checkboxState;
     properties.taskStatus = markerStatus;
 
     const title = cleanTaskTitle(line);
     if (!title) return null;
     return { title, properties };
+}
+
+function normalizeTaskCheckboxState(value: unknown): string {
+    const raw = String(value ?? "");
+    const trimmed = raw.trim().toLowerCase();
+    return trimmed || " ";
 }
 
 function getStatusFromTaskMarker(marker: string): string {

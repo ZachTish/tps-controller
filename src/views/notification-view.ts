@@ -4,6 +4,7 @@ import { SnoozeModal } from '../modals/snooze-modal';
 import * as logger from '../logger';
 import { TPS_EVENTS, TPS_LEGACY_EVENTS } from '../tps-contracts';
 import { emitFilesUpdated } from '../tps-gcm-api';
+import { buildNotificationItemsSignature } from './notification-view-signature';
 
 export const NOTIFICATION_VIEW_TYPE = 'tps-notification-view';
 
@@ -29,7 +30,7 @@ export class NotificationView extends ItemView {
     private refreshDebounced: () => void;
     private isRefreshing = false;
     private refreshPending = false;
-    private lastRenderedSignature = '';
+    private lastRenderedSignature = '\u0000';
 
     constructor(leaf: WorkspaceLeaf, plugin: TPSControllerRemindersAPI) {
         super(leaf);
@@ -175,7 +176,7 @@ export class NotificationView extends ItemView {
         const started = performance.now();
         try {
             const nextItems = await this.plugin.getOverdueItems();
-            const nextSignature = this.buildItemsSignature(nextItems);
+            const nextSignature = buildNotificationItemsSignature(nextItems);
             if (nextSignature !== this.lastRenderedSignature) {
                 this.items = nextItems;
                 this.lastRenderedSignature = nextSignature;
@@ -197,20 +198,6 @@ export class NotificationView extends ItemView {
                 this.refreshDebounced();
             }
         }
-    }
-
-    private buildItemsSignature(items: OverdueItem[]): string {
-        return items.map((item) => [
-            this.itemKey(item),
-            item.file.path,
-            item.targetKind || '',
-            item.taskLine ?? '',
-            item.status || '',
-            item.snoozedUntil ?? '',
-            item.nextTriggerTime ?? '',
-            item.nextRuleLabel || '',
-            item.isRepeating ? '1' : '0',
-        ].join('\u001f')).join('\u001e');
     }
 
     draw() {
@@ -424,7 +411,10 @@ export class NotificationView extends ItemView {
                             if (changed) this.removeItemOptimistically(item);
                             this.refreshDebounced();
                         } catch (error) {
-                            console.error('[TPS Controller] Failed resolving task reminder', error);
+                            logger.flowError('NotificationView', 'resolve-task-reminder-failed', error, {
+                                path: item.file?.path || '',
+                                sourceType: item.sourceType || '',
+                            });
                             new Notice('Could not move or clear the reminder task.');
                             this.refreshDebounced();
                         }
@@ -475,19 +465,22 @@ export class NotificationView extends ItemView {
                         ? (window as any).moment().format('YYYY-MM-DD HH:mm:ss')
                         : new Date().toISOString().replace('T', ' ').slice(0, 19);
                     const writeStatus = async (newStatus: string | null) => {
+                        const isStatusClear = newStatus == null || String(newStatus).trim() === '';
+                        const resolvedStatus = isStatusClear ? null : newStatus;
                         if (this.plugin.setOverdueItemStatus) {
-                            await this.plugin.setOverdueItemStatus(item, newStatus);
+                            await this.plugin.setOverdueItemStatus(item, resolvedStatus);
                             return;
                         }
                         const statusService = gcmServices?.status;
-                        if (newStatus !== '' && typeof statusService?.setFileStatus === 'function') {
-                            await statusService.setFileStatus(item.file, newStatus);
+                        if (!isStatusClear && typeof statusService?.setFileStatus === 'function') {
+                            await statusService.setFileStatus(item.file, resolvedStatus);
                             return;
                         }
-                        if (newStatus === '' && typeof gcmServices?.frontmatter?.process === 'function') {
+                        if (isStatusClear && typeof gcmServices?.frontmatter?.process === 'function') {
                             const statusKey = statusService?.getStatusPropertyKey?.() || 'status';
                             await gcmServices.frontmatter.process(item.file, (fm: Record<string, unknown>) => {
-                                fm[statusKey] = '';
+                                const existingStatusKey = Object.keys(fm).find((key) => key.trim().toLowerCase() === statusKey.trim().toLowerCase());
+                                if (existingStatusKey) delete fm[existingStatusKey];
                                 const cdKey = Object.keys(fm).find((k) => k.toLowerCase() === 'completeddate');
                                 if (cdKey) delete fm[cdKey];
                             });
@@ -495,13 +488,15 @@ export class NotificationView extends ItemView {
                             return;
                         }
                         await this.app.fileManager.processFrontMatter(item.file, (fm) => {
-                            if (newStatus == null) {
-                                delete fm.status;
+                            const statusKey = statusService?.getStatusPropertyKey?.() || 'status';
+                            const existingStatusKey = Object.keys(fm).find((key) => key.trim().toLowerCase() === statusKey.trim().toLowerCase());
+                            if (isStatusClear) {
+                                if (existingStatusKey) delete fm[existingStatusKey];
                                 const cdKey = Object.keys(fm).find((k) => k.toLowerCase() === 'completeddate');
                                 if (cdKey) delete fm[cdKey];
                             } else {
-                                fm.status = newStatus;
-                                if (doneStatuses.has(newStatus.trim().toLowerCase())) {
+                                fm[existingStatusKey || statusKey] = resolvedStatus;
+                                if (doneStatuses.has(String(resolvedStatus).trim().toLowerCase())) {
                                     fm.completedDate = nowStamp();
                                 } else {
                                     const cdKey = Object.keys(fm).find((k) => k.toLowerCase() === 'completeddate');
@@ -522,7 +517,10 @@ export class NotificationView extends ItemView {
                             await writeStatus(newStatus);
                             this.refreshDebounced();
                         } catch (error) {
-                            console.error('[TPS Controller] Failed updating overdue status', error);
+                            logger.flowError('NotificationView', 'update-overdue-status-failed', error, {
+                                path: item.file?.path || '',
+                                status: newStatus || '',
+                            });
                             this.refreshDebounced();
                         }
                     };
@@ -557,7 +555,10 @@ export class NotificationView extends ItemView {
                         else await this.plugin.markFileComplete(item.file);
                         this.refreshDebounced();
                     } catch (error) {
-                        console.error('[TPS Controller] Failed completing overdue item', error);
+                        logger.flowError('NotificationView', 'complete-overdue-item-failed', error, {
+                            path: item.file?.path || '',
+                            sourceType: item.sourceType || '',
+                        });
                         this.refreshDebounced();
                     }
                 })();
@@ -571,7 +572,10 @@ export class NotificationView extends ItemView {
                         else await this.plugin.markFileWontDo(item.file);
                         this.refreshDebounced();
                     } catch (error) {
-                        console.error('[TPS Controller] Failed marking overdue item wont-do', error);
+                        logger.flowError('NotificationView', 'wont-do-overdue-item-failed', error, {
+                            path: item.file?.path || '',
+                            sourceType: item.sourceType || '',
+                        });
                         this.refreshDebounced();
                     }
                 })();
@@ -587,6 +591,11 @@ export class NotificationView extends ItemView {
                 paragraph.style.display = 'inline';
                 paragraph.style.margin = '0';
             });
+            container.querySelectorAll<HTMLElement>('a.internal-link, a[href^="app://obsidian.md/"]').forEach((link) => {
+                if (!this.resolveRenderedInternalLink(link, sourcePath)) {
+                    link.replaceWith(document.createTextNode(link.textContent || ''));
+                }
+            });
             container.querySelectorAll<HTMLElement>('a.internal-link, a.external-link').forEach((link) => {
                 link.addClass('tps-notification-title-link');
                 link.addEventListener('click', (event) => {
@@ -598,15 +607,40 @@ export class NotificationView extends ItemView {
         });
     }
 
+    private resolveRenderedInternalLink(link: HTMLElement, sourcePath: string): TFile | null {
+        const rawTarget = link.getAttribute('data-href') || link.getAttribute('href') || '';
+        const resolutionTarget = this.getRenderedInternalLinkResolutionTarget(rawTarget);
+        if (!resolutionTarget) return null;
+        return this.app.metadataCache.getFirstLinkpathDest(resolutionTarget, sourcePath)
+            || this.app.metadataCache.getFirstLinkpathDest(resolutionTarget.replace(/\.md$/i, ''), sourcePath)
+            || null;
+    }
+
+    private getRenderedInternalLinkResolutionTarget(rawTarget: string): string {
+        return this.normalizeRenderedInternalLink(rawTarget)
+            .replace(/#.*/, '')
+            .trim();
+    }
+
+    private normalizeRenderedInternalLink(rawTarget: string): string {
+        const withoutScheme = String(rawTarget || '').replace(/^app:\/\/obsidian\.md\//, '').trim();
+        if (!withoutScheme) return '';
+        try {
+            return decodeURIComponent(withoutScheme);
+        } catch {
+            return withoutScheme;
+        }
+    }
+
     private openRenderedTitleLink(link: HTMLElement, sourcePath: string): void {
         const linkText = link.getAttribute('data-href') || link.getAttribute('href') || link.textContent || '';
-        const normalized = linkText.replace(/^app:\/\/obsidian\.md\//, '').trim();
+        const normalized = this.normalizeRenderedInternalLink(linkText);
         if (!normalized) return;
         if (link.hasClass('external-link') || /^[a-z][a-z0-9+.-]*:/i.test(normalized)) {
             window.open(normalized);
             return;
         }
-        void this.app.workspace.openLinkText(decodeURIComponent(normalized), sourcePath, false);
+        void this.app.workspace.openLinkText(normalized, sourcePath, false);
     }
 
     private showContextMenu(e: MouseEvent, item: OverdueItem) {
@@ -630,6 +664,7 @@ class ConfirmClearScheduledModal extends Modal {
     }
 
     onOpen(): void {
+      this.modalEl.addClass("tps-keyboard-aware-modal");
         const { contentEl } = this;
         contentEl.empty();
         contentEl.createEl('h2', { text: 'Clear scheduled?' });

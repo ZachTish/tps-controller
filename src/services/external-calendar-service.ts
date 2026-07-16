@@ -45,6 +45,9 @@ export class ExternalCalendarService {
   ): Promise<ExternalCalendarFetchResult> {
     const normalizedUrl = this.normalizeUrl(calendarUrl);
     if (!normalizedUrl) {
+      logger.flowWarn("ExternalCalendar", "fetch:invalid-url", {
+        hasUrl: !!calendarUrl,
+      });
       return {
         events: [],
         ok: false,
@@ -55,10 +58,22 @@ export class ExternalCalendarService {
     }
 
     const cacheKey = this.getCacheKey(normalizedUrl, rangeStart, rangeEnd, includeCancelled);
+    const context = {
+      url: normalizedUrl,
+      rangeStart: rangeStart?.toISOString() || "",
+      rangeEnd: rangeEnd?.toISOString() || "",
+      includeCancelled,
+      forceRefresh,
+    };
 
     // Check cache
     const cached = this.cache.get(cacheKey);
     if (!forceRefresh && cached && Date.now() < cached.expiry) {
+      logger.flow("ExternalCalendar", "fetch:cache-hit", {
+        ...context,
+        events: cached.events.length,
+        expiresInMs: cached.expiry - Date.now(),
+      });
       return {
         events: cached.events,
         ok: true,
@@ -67,6 +82,8 @@ export class ExternalCalendarService {
       };
     }
 
+    const startedAt = Date.now();
+    logger.flow("ExternalCalendar", "fetch:start", context);
     try {
       const fetchPromise = requestUrl({
         url: normalizedUrl,
@@ -79,9 +96,14 @@ export class ExternalCalendarService {
         setTimeout(() => reject(new Error(`Fetch timed out after ${this.FETCH_TIMEOUT_MS}ms`)), this.FETCH_TIMEOUT_MS)
       );
       const response = await Promise.race([fetchPromise, timeoutPromise]);
+      const fetchDurationMs = Date.now() - startedAt;
 
       if (response.status !== 200) {
-        logger.error('[ExternalCalendar] Failed to fetch calendar:', response.status);
+        logger.flowError("ExternalCalendar", "fetch:bad-status", new Error(`Unexpected status code: ${response.status}`), {
+          ...context,
+          statusCode: response.status,
+          durationMs: fetchDurationMs,
+        });
         return {
           events: [],
           ok: false,
@@ -103,6 +125,14 @@ export class ExternalCalendarService {
         expiry: Date.now() + this.CACHE_TTL,
       });
 
+      logger.flow("ExternalCalendar", "fetch:done", {
+        ...context,
+        statusCode: response.status,
+        durationMs: Date.now() - startedAt,
+        bytes: response.text?.length || 0,
+        events: events.length,
+        cacheTtlMs: this.CACHE_TTL,
+      });
       return {
         events,
         ok: true,
@@ -110,7 +140,10 @@ export class ExternalCalendarService {
         fromCache: false,
       };
     } catch (error) {
-      logger.error('[ExternalCalendar] Error fetching calendar:', error);
+      logger.flowError("ExternalCalendar", "fetch:failed", error, {
+        ...context,
+        durationMs: Date.now() - startedAt,
+      });
       return {
         events: [],
         ok: false,
@@ -122,7 +155,9 @@ export class ExternalCalendarService {
   }
 
   clearCache(): void {
+    const entries = this.cache.size;
     this.cache.clear();
+    logger.flow("ExternalCalendar", "cache:cleared", { entries });
   }
 
   private normalizeUrl(url: string | null | undefined): string | null {

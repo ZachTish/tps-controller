@@ -1,4 +1,4 @@
-import { App, Notice, PluginSettingTab, Setting, debounce, normalizePath } from 'obsidian';
+import { App, Notice, PluginSettingTab, SecretComponent, Setting, debounce, normalizePath } from 'obsidian';
 import type TPSControllerPlugin from './main';
 import type { PropertyReminder, ExternalCalendarConfig } from './types';
 import { normalizeCalendarUrl } from './utils';
@@ -10,7 +10,7 @@ const normalizeTaskTargetNotePath = (value: string): string => {
         .trim()
         .replace(/^\[\[|\]\]$/g, "")
         .replace(/^\/+/, ""));
-    if (!normalized) return "";
+    if (!normalized || normalized === "." || normalized === ".md" || normalized.endsWith("/.md")) return "";
     return normalized.toLowerCase().endsWith(".md") ? normalized : `${normalized}.md`;
 };
 const createCollapsibleSection = (
@@ -66,27 +66,9 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             text: 'This is the suite-level owner for background automation, calendar sync, reminders, and shared calendar field mappings. Other TPS plugins should stay focused on UI and local interaction.',
             cls: 'setting-item-description'
         });
-
-        const createMainCategory = (title: 'Features' | 'Rules' | 'Interaction' | 'UI Display', defaultOpen = true): HTMLElement => {
-            const details = containerEl.createEl('details', { cls: 'tps-settings-main-category' });
-            if (defaultOpen) details.setAttr('open', 'true');
-            const summary = details.createEl('summary', { cls: 'tps-settings-main-summary' });
-            summary.createEl('h3', { text: title });
-            return details.createDiv({ cls: 'tps-settings-main-content' });
-        };
-
-        const featuresCategory = createMainCategory('Features');
-        const rulesCategory = createMainCategory('Rules');
-        const interactionCategory = createMainCategory('Interaction');
-        const uiDisplayCategory = createMainCategory('UI Display');
-
         // ── Device Role ─────────────────────────────────────────────
-        const roleSection = createCollapsibleSection(
-            featuresCategory,
-            'Device Role',
-            'Choose whether this device runs suite-level automation or stays in normal user mode.',
-            false
-        );
+        const roleSection = containerEl.createDiv({ cls: 'tps-settings-core' });
+        new Setting(roleSection).setName('Core settings').setHeading();
 
         const roleDesc = roleSection.createDiv({ cls: 'tps-controller-role-desc' });
         const updateRoleDesc = (role: string) => {
@@ -97,7 +79,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     ${isCtrl ? '🟢 Controller (Background Automation)' : '⚪ User (Normal Use)'}
                 </span>
                 <br><small class="tps-role-hint">
-                    ${isCtrl ? 'This device runs automation (calendar sync, reminders, and maintenance). UI is locked down.' : 'This device is in normal user mode — no automation runs.'}
+                    ${isCtrl ? 'This device runs automation (calendar sync, reminders, and maintenance) while keeping the normal Obsidian UI available.' : 'This device is in normal user mode — no automation runs.'}
                 </small>
             `;
         };
@@ -118,8 +100,8 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
         // ── External Calendars ─────────────────────────────────────
         const extCalSection = createCollapsibleSection(
-            featuresCategory,
-            'External Calendars',
+            containerEl,
+            'External Calendar Feeds and Sync Destinations',
             'Calendar sources and auto-create destinations. These are the controller settings most users will change first.',
             false
         );
@@ -171,10 +153,450 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     btn.setDisabled(false);
                 }));
 
+        // ── Two-Stage Archive ─────────────────────────────────────
+        const twoStageArchiveSection = createCollapsibleSection(
+            containerEl,
+            'Archive to _archive Move Schedule',
+            'Controller-owned folder sweep for moving files from an active archive folder into a deeper cold archive on a schedule.',
+            false
+        );
+
+        new Setting(twoStageArchiveSection)
+            .setName('Enable Two-Stage Archive')
+            .setDesc('When this device is Controller, periodically moves files from the source folder into the destination folder.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.twoStageArchive?.enabled === true)
+                .onChange(async (value) => {
+                    this.plugin.settings.twoStageArchive.enabled = value;
+                    await this.plugin.saveSettings();
+                    this.plugin.restartTwoStageArchiveLoop();
+                }));
+
+        new Setting(twoStageArchiveSection)
+            .setName('Source Folder')
+            .setDesc('Files under this folder are moved when the archive rule runs.')
+            .addText(text => text
+                .setPlaceholder('Archive')
+                .setValue(this.plugin.settings.twoStageArchive.sourceFolder)
+                .onChange((value) => {
+                    this.plugin.settings.twoStageArchive.sourceFolder = normalizePath(value.trim().replace(/^\/+|\/+$/g, '')) || 'Archive';
+                    void debouncedSave();
+                }));
+
+        new Setting(twoStageArchiveSection)
+            .setName('Destination Folder')
+            .setDesc('Files are moved here, preserving their relative paths from the source folder.')
+            .addText(text => text
+                .setPlaceholder('_archive')
+                .setValue(this.plugin.settings.twoStageArchive.destinationFolder)
+                .onChange((value) => {
+                    this.plugin.settings.twoStageArchive.destinationFolder = normalizePath(value.trim().replace(/^\/+|\/+$/g, '')) || '_archive';
+                    void debouncedSave();
+                }));
+
+        new Setting(twoStageArchiveSection)
+            .setName('Cadence')
+            .setDesc('Monthly end runs once on the last day of the month after the configured run time.')
+            .addDropdown(drop => drop
+                .addOption('monthly-end', 'End of month')
+                .addOption('weekly', 'Weekly')
+                .addOption('daily', 'Daily')
+                .setValue(this.plugin.settings.twoStageArchive.cadence)
+                .onChange(async (value) => {
+                    this.plugin.settings.twoStageArchive.cadence = value as any;
+                    await this.plugin.saveSettings();
+                    this.plugin.restartTwoStageArchiveLoop();
+                }));
+
+        new Setting(twoStageArchiveSection)
+            .setName('Weekly Day')
+            .setDesc('Used only for weekly cadence.')
+            .addDropdown(drop => drop
+                .addOption('0', 'Sunday')
+                .addOption('1', 'Monday')
+                .addOption('2', 'Tuesday')
+                .addOption('3', 'Wednesday')
+                .addOption('4', 'Thursday')
+                .addOption('5', 'Friday')
+                .addOption('6', 'Saturday')
+                .setValue(String(this.plugin.settings.twoStageArchive.weeklyDay ?? 0))
+                .onChange(async (value) => {
+                    this.plugin.settings.twoStageArchive.weeklyDay = Number(value);
+                    await this.plugin.saveSettings();
+                    this.plugin.restartTwoStageArchiveLoop();
+                }));
+
+        new Setting(twoStageArchiveSection)
+            .setName('Run Time')
+            .setDesc('Local time in HH:mm. For your Archive to _archive flow, leave this near the end of the day.')
+            .addText(text => text
+                .setPlaceholder('23:55')
+                .setValue(this.plugin.settings.twoStageArchive.runTime)
+                .onChange((value) => {
+                    this.plugin.settings.twoStageArchive.runTime = value.trim() || '23:55';
+                    void debouncedSave();
+                }));
+
+        new Setting(twoStageArchiveSection)
+            .setName('Check Interval (minutes)')
+            .setDesc('How often Controller checks whether the archive rule is due.')
+            .addSlider(slider => slider
+                .setLimits(1, 240, 1)
+                .setValue(this.plugin.settings.twoStageArchive.checkIntervalMinutes)
+                .setDynamicTooltip()
+                .onChange(async (value) => {
+                    this.plugin.settings.twoStageArchive.checkIntervalMinutes = value;
+                    await this.plugin.saveSettings();
+                    this.plugin.restartTwoStageArchiveLoop();
+                }));
+
+        new Setting(twoStageArchiveSection)
+            .setName('Run Two-Stage Archive Now')
+            .setDesc('Runs the folder move immediately on the Controller device.')
+            .addButton(btn => btn
+                .setButtonText('Run Now')
+                .onClick(async () => {
+                    if (!this.plugin.deviceRoleManager.isController()) {
+                        new Notice('Two-stage archive runs on the Controller device.');
+                        return;
+                    }
+                    btn.setDisabled(true);
+                    btn.setButtonText('Running...');
+                    try {
+                        const result = await this.plugin.runTwoStageArchiveNow();
+                        new Notice(`Two-stage archive: moved ${result.movedCount}, skipped ${result.skippedCount}.`);
+                    } catch (error) {
+                        new Notice(`Two-stage archive failed: ${(error as Error).message}`);
+                    }
+                    btn.setButtonText('Run Now');
+                    btn.setDisabled(false);
+                }));
+
+        // ── S3 Attachment Upload Automation ────────────────────────
+        const s3agleSection = createCollapsibleSection(
+            containerEl,
+            'S3 Attachment Upload Automation',
+            'Uploads active-note local attachments directly to S3-compatible storage, rewrites links, then asks the controller device to archive successfully replaced source files.',
+            false
+        );
+
+        new Setting(s3agleSection)
+            .setName('Enable S3 Attachment Upload Automation')
+            .setDesc('When enabled, this device watches the active note and uploads local attachment links directly to S3-compatible storage.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.s3agleAttachmentAutomation?.enabled === true)
+                .onChange(async (value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.enabled = value;
+                    await this.plugin.saveSettings();
+                    this.plugin.restartS3agleAttachmentAutomation();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('Run on Note Open')
+            .setDesc('Checks the active note shortly after it is opened.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.s3agleAttachmentAutomation.runOnActiveNoteOpen !== false)
+                .onChange(async (value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.runOnActiveNoteOpen = value;
+                    await this.plugin.saveSettings();
+                    this.plugin.restartS3agleAttachmentAutomation();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('Run on Active Note Changes')
+            .setDesc('Checks the active note after it is modified and the debounce delay has passed.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.s3agleAttachmentAutomation.runOnActiveNoteModify !== false)
+                .onChange(async (value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.runOnActiveNoteModify = value;
+                    await this.plugin.saveSettings();
+                    this.plugin.restartS3agleAttachmentAutomation();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('Run on Paste')
+            .setDesc('Checks the active note shortly after a paste event so newly pasted attachments can be uploaded.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.s3agleAttachmentAutomation.runOnPaste !== false)
+                .onChange(async (value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.runOnPaste = value;
+                    await this.plugin.saveSettings();
+                    this.plugin.restartS3agleAttachmentAutomation();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('Run After Commands')
+            .setDesc('Comma-separated command IDs that should trigger this after they run, such as a Linter command or another workflow command.')
+            .addTextArea(text => text
+                .setPlaceholder('obsidian-linter:lint-file')
+                .setValue((this.plugin.settings.s3agleAttachmentAutomation.runAfterCommandIds || []).join(', '))
+                .onChange((value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.runAfterCommandIds = value
+                        .split(',')
+                        .map(id => id.trim())
+                        .filter(Boolean);
+                    void debouncedSave();
+                    this.plugin.restartS3agleAttachmentAutomation();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('S3 Endpoint')
+            .setDesc('S3-compatible endpoint URL.')
+            .addText(text => text
+                .setPlaceholder('https://storage.googleapis.com')
+                .setValue(this.plugin.settings.s3agleAttachmentAutomation.endpoint || '')
+                .onChange((value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.endpoint = value.trim();
+                    void debouncedSave();
+                    this.plugin.restartS3agleAttachmentAutomation();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('S3 Bucket')
+            .setDesc('Bucket used for uploaded attachments.')
+            .addText(text => text
+                .setValue(this.plugin.settings.s3agleAttachmentAutomation.bucket || '')
+                .onChange((value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.bucket = value.trim();
+                    void debouncedSave();
+                    this.plugin.restartS3agleAttachmentAutomation();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('S3 Region')
+            .setDesc('Region value passed to the S3-compatible client.')
+            .addText(text => text
+                .setValue(this.plugin.settings.s3agleAttachmentAutomation.region || '')
+                .onChange((value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.region = value.trim();
+                    void debouncedSave();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('S3 Folder')
+            .setDesc('Optional object key prefix for uploaded attachments.')
+            .addText(text => text
+                .setValue(this.plugin.settings.s3agleAttachmentAutomation.folder || '')
+                .onChange((value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.folder = value.trim();
+                    void debouncedSave();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('Use Bucket Subdomain URLs')
+            .setDesc('Build links as https://bucket.endpoint/key instead of https://endpoint/bucket/key.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.s3agleAttachmentAutomation.useBucketSubdomain === true)
+                .onChange(async (value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.useBucketSubdomain = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('Content URL')
+            .setDesc('Optional public/read endpoint for generated links. Leave blank to use the S3 endpoint.')
+            .addText(text => text
+                .setValue(this.plugin.settings.s3agleAttachmentAutomation.contentUrl || '')
+                .onChange((value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.contentUrl = value.trim();
+                    void debouncedSave();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('Access Key')
+            .setDesc('Select or create a device-local Obsidian secret containing a scoped S3 access key.')
+            .addComponent(element => new SecretComponent(this.app, element)
+                .setValue(this.plugin.settings.s3agleAttachmentAutomation.accessKeySecretName || '')
+                .onChange(async (value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.accessKeySecretName = value.trim();
+                    await this.plugin.saveSettings();
+                    this.plugin.restartS3agleAttachmentAutomation();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('Secret Key')
+            .setDesc('Select or create a separate device-local Obsidian secret containing the S3 secret key.')
+            .addComponent(element => new SecretComponent(this.app, element)
+                .setValue(this.plugin.settings.s3agleAttachmentAutomation.secretKeySecretName || '')
+                .onChange(async (value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.secretKeySecretName = value.trim();
+                    await this.plugin.saveSettings();
+                    this.plugin.restartS3agleAttachmentAutomation();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('Archive Uploaded Source Files')
+            .setDesc('After a local attachment link is rewritten to S3, ask the controller device to move the source attachment file into the configured archive folder.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.s3agleAttachmentAutomation.archiveUploadedSources !== false)
+                .onChange(async (value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.archiveUploadedSources = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('Make Uploaded Objects Public')
+            .setDesc('Applies a public-read ACL before rewriting notes. Keep this on for Obsidian embeds unless the bucket is public by policy.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.s3agleAttachmentAutomation.makeUploadedObjectsPublic !== false)
+                .onChange(async (value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.makeUploadedObjectsPublic = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('Allowed Attachment Extensions')
+            .setDesc('Comma-separated extensions to upload. Leave blank to allow all except ignored extensions.')
+            .addText(text => text
+                .setPlaceholder('png, jpg, jpeg, gif, webp, svg, heic, heif')
+                .setValue((this.plugin.settings.s3agleAttachmentAutomation.allowedAttachmentExtensions || []).join(', '))
+                .onChange((value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.allowedAttachmentExtensions = value
+                        .split(',')
+                        .map((item) => item.trim().toLowerCase().replace(/^\./, ''))
+                        .filter(Boolean)
+                        .sort();
+                    void debouncedSave();
+                    this.plugin.restartS3agleAttachmentAutomation();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('Ignored Attachment Extensions')
+            .setDesc('Comma-separated extensions to never upload. This wins over the allowed list.')
+            .addText(text => text
+                .setPlaceholder('pdf, mov, mp4')
+                .setValue((this.plugin.settings.s3agleAttachmentAutomation.ignoredAttachmentExtensions || []).join(', '))
+                .onChange((value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.ignoredAttachmentExtensions = value
+                        .split(',')
+                        .map((item) => item.trim().toLowerCase().replace(/^\./, ''))
+                        .filter(Boolean)
+                        .sort();
+                    void debouncedSave();
+                    this.plugin.restartS3agleAttachmentAutomation();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('Archive Unreferenced Bucket Objects')
+            .setDesc('On the Controller device, move Controller-uploaded S3 objects into the bucket archive prefix after their generated URL is no longer found in vault notes.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.s3agleAttachmentAutomation.archiveUnreferencedBucketObjects === true)
+                .onChange(async (value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.archiveUnreferencedBucketObjects = value;
+                    await this.plugin.saveSettings();
+                    this.plugin.restartS3BucketArchiveLoop();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('Bucket Archive Prefix')
+            .setDesc('Object key prefix for unreferenced bucket objects. Supports {YYYY}, {MM}, and {DD}.')
+            .addText(text => text
+                .setPlaceholder('_archive/s3/{YYYY}/{MM}/{DD}')
+                .setValue(this.plugin.settings.s3agleAttachmentAutomation.bucketArchivePrefix || '')
+                .onChange((value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.bucketArchivePrefix = value.trim();
+                    void debouncedSave();
+                    this.plugin.restartS3BucketArchiveLoop();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('Bucket Archive Check Interval (minutes)')
+            .setDesc('How often the Controller checks the manifest for uploaded S3 objects whose URLs are no longer referenced.')
+            .addSlider(slider => slider
+                .setLimits(5, 1440, 5)
+                .setValue(this.plugin.settings.s3agleAttachmentAutomation.bucketArchiveCheckIntervalMinutes)
+                .setDynamicTooltip()
+                .onChange(async (value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.bucketArchiveCheckIntervalMinutes = value;
+                    await this.plugin.saveSettings();
+                    this.plugin.restartS3BucketArchiveLoop();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('Bucket Archive Delay (minutes)')
+            .setDesc('Minimum time after an uploaded URL was last seen before the Controller moves the object into the bucket archive prefix.')
+            .addSlider(slider => slider
+                .setLimits(5, 1440, 5)
+                .setValue(this.plugin.settings.s3agleAttachmentAutomation.bucketArchiveOrphanDelayMinutes)
+                .setDynamicTooltip()
+                .onChange(async (value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.bucketArchiveOrphanDelayMinutes = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('Debounce (seconds)')
+            .setDesc('How long to wait after opening or editing a note before uploading attachments.')
+            .addSlider(slider => slider
+                .setLimits(1, 60, 1)
+                .setValue(this.plugin.settings.s3agleAttachmentAutomation.debounceSeconds)
+                .setDynamicTooltip()
+                .onChange(async (value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.debounceSeconds = value;
+                    await this.plugin.saveSettings();
+                    this.plugin.restartS3agleAttachmentAutomation();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('Cooldown (minutes)')
+            .setDesc('Minimum time before the same note is processed again.')
+            .addSlider(slider => slider
+                .setLimits(1, 60, 1)
+                .setValue(this.plugin.settings.s3agleAttachmentAutomation.cooldownMinutes)
+                .setDynamicTooltip()
+                .onChange(async (value) => {
+                    this.plugin.settings.s3agleAttachmentAutomation.cooldownMinutes = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(s3agleSection)
+            .setName('Run S3 Upload Now')
+            .setDesc('Uploads local attachments for the current active note.')
+            .addButton(btn => btn
+                .setButtonText('Run Now')
+                .onClick(async () => {
+                    btn.setDisabled(true);
+                    btn.setButtonText('Running...');
+                    try {
+                        await this.plugin.runS3agleAttachmentAutomationNow();
+                    } catch (error) {
+                        new Notice(`S3 attachment upload failed: ${(error as Error).message}`);
+                    }
+                    btn.setButtonText('Run Now');
+                    btn.setDisabled(false);
+                }));
+
+        new Setting(s3agleSection)
+            .setName('Run S3 Bucket Archive Now')
+            .setDesc('Controller-only: moves unreferenced Controller-uploaded S3 objects into the bucket archive prefix.')
+            .addButton(btn => btn
+                .setButtonText('Run Now')
+                .onClick(async () => {
+                    if (!this.plugin.deviceRoleManager.isController()) {
+                        new Notice('S3 bucket archive runs on the Controller device.');
+                        return;
+                    }
+                    btn.setDisabled(true);
+                    btn.setButtonText('Running...');
+                    try {
+                        const result = await this.plugin.runS3BucketArchiveNow();
+                        const suffix = result.lastError
+                            ? ` Last error: ${result.lastError}`
+                            : result.lastSkipReason
+                                ? ` Last skip: ${result.lastSkipReason}`
+                                : "";
+                        new Notice(`S3 bucket archive: moved ${result.archivedCount}, skipped ${result.skippedCount}.${suffix}`);
+                    } catch (error) {
+                        new Notice(`S3 bucket archive failed: ${(error as Error).message}`);
+                    }
+                    btn.setButtonText('Run Now');
+                    btn.setDisabled(false);
+                }));
+
         // ── Calendar Sync Rules ────────────────────────────────────
         const calSection = createCollapsibleSection(
-            rulesCategory,
-            'Calendar Sync Rules',
+            containerEl,
+            'Calendar Sync Timing, Deletion, and Status Rules',
             'Global sync behavior for external calendars.',
             false
         );
@@ -249,7 +671,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
         const fmContent = createCollapsibleSection(
             calSection,
-            'Frontmatter Keys',
+            'Calendar Note Frontmatter Keys',
             'Controller-owned calendar sync fields. Shared identity is managed by TPS Global Context Menu as tpsId and externalId.',
             false
         );
@@ -276,8 +698,8 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
         // ── Reminder Rules ──────────────────────────────────────────
         const remSection = createCollapsibleSection(
-            rulesCategory,
-            'Reminder Rules',
+            containerEl,
+            'Reminder Evaluation Rules and Notification Sorting',
             'Polling, ignore lists, and per-rule reminders.',
             false
         );
@@ -362,9 +784,9 @@ export class TPSControllerSettingTab extends PluginSettingTab {
         let rulesContainer: HTMLElement | null = null;
         const presetSection = createCollapsibleSection(
             reminderConfigContent,
-            'Recommended Reminder Setup',
+            'Install Recommended Reminder Rules',
             'Adds the three common rules: timed scheduled notes/tasks, unmatched external calendar events, and all-day scheduled notes/events.',
-            true
+            false
         );
         const presetSummary = presetSection.createDiv({ cls: 'tps-reminder-preset-summary' });
         this.renderRecommendedReminderSummary(presetSummary);
@@ -397,7 +819,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
         const ignoreContent = createCollapsibleSection(
             reminderConfigContent,
-            'Global Ignore Lists',
+            'Reminder Global Ignore Paths, Tags, Statuses, and Checkbox States',
             'Shared filters applied before individual reminder rules.',
             false
         );
@@ -426,12 +848,23 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
         new Setting(ignoreContent)
             .setName('Ignore Statuses')
-            .setDesc('Comma-separated status values to ignore.')
+            .setDesc('Comma-separated frontmatter or semantic task status values to ignore.')
             .addText(text => text
                 .setPlaceholder('complete, wont-do')
                 .setValue((this.plugin.settings.globalIgnoreStatuses || []).join(', '))
                 .onChange(async (value) => {
                     this.plugin.settings.globalIgnoreStatuses = value.split(',').map(s => s.trim()).filter(Boolean);
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(ignoreContent)
+            .setName('Ignore Checkbox States')
+            .setDesc('Comma-separated raw Markdown checkbox markers to ignore. Use blank/open/todo for unchecked tasks, or markers like x, -, /, ?.')
+            .addText(text => text
+                .setPlaceholder('x, -')
+                .setValue((this.plugin.settings.globalIgnoreCheckboxStates || []).join(', '))
+                .onChange(async (value) => {
+                    this.plugin.settings.globalIgnoreCheckboxStates = value.split(',').map(s => s.trim()).filter(Boolean);
                     await this.plugin.saveSettings();
                 }));
 
@@ -470,8 +903,8 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
         // ── Snooze ─────────────────────────────────────────────────
         const snoozeSection = createCollapsibleSection(
-            rulesCategory,
-            'Snooze',
+            containerEl,
+            'Reminder Snooze Property and Presets',
             'Reminder snooze field configuration and presets.',
             false
         );
@@ -489,7 +922,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
         const snoozePresetsEl = createCollapsibleSection(
             snoozeSection,
-            'Snooze Presets',
+            'Quick Snooze Durations',
             'Quick snooze durations shown in the reminder UI.',
             false
         );
@@ -506,8 +939,8 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
         // ── Debug ───────────────────────────────────────────────────
         const debugSection = createCollapsibleSection(
-            interactionCategory,
-            'Debug',
+            containerEl,
+            'Debug Logging and Alert Reset',
             'Low-frequency troubleshooting controls.',
             false
         );
@@ -556,12 +989,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
         const detailsEls = Array.from(containerEl.querySelectorAll('details'));
         if (!this.hasRenderedSettings) {
             detailsEls.forEach((detailsEl) => {
-                const details = detailsEl as HTMLDetailsElement;
-                if (details.classList.contains('tps-settings-main-category')) {
-                    details.setAttr('open', 'true');
-                } else {
-                    details.removeAttribute('open');
-                }
+                (detailsEl as HTMLDetailsElement).removeAttribute('open');
             });
             this.hasRenderedSettings = true;
             containerEl.scrollTop = 0;
@@ -595,6 +1023,9 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             ignorePaths: [],
             ignoreTags: [],
             ignoreStatuses: [],
+            ignoreCheckboxStates: [],
+            requiredStatuses: [],
+            requiredCheckboxStates: [],
             allDayFilter: 'any',
             includeUnmatchedExternalEvents: false,
             sourceTypes: ['file'],
@@ -615,7 +1046,9 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             ignorePaths: [],
             ignoreTags: [],
             ignoreStatuses: [],
+            ignoreCheckboxStates: [],
             requiredStatuses: [],
+            requiredCheckboxStates: [],
             requiredPaths: [],
             title: 'Reminder: {filename}',
             body: 'At {time} ({remaining})',
@@ -777,8 +1210,10 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     rem.label,
                     rem.property,
                     (rem.requiredStatuses || []).join(' '),
+                    (rem.requiredCheckboxStates || []).join(' '),
                     (rem.requiredPaths || []).join(' '),
                     (rem.ignoreStatuses || []).join(' '),
+                    (rem.ignoreCheckboxStates || []).join(' '),
                     (rem.ignoreTags || []).join(' '),
                     (rem.stopConditions || []).join(' '),
                     `rule ${index + 1}`
@@ -848,7 +1283,9 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     ignorePaths: [...(rem.ignorePaths || [])],
                     ignoreTags: [...(rem.ignoreTags || [])],
                     ignoreStatuses: [...(rem.ignoreStatuses || [])],
+                    ignoreCheckboxStates: [...(rem.ignoreCheckboxStates || [])],
                     requiredStatuses: [...(rem.requiredStatuses || [])],
+                    requiredCheckboxStates: [...(rem.requiredCheckboxStates || [])],
                     requiredPaths: [...(rem.requiredPaths || [])],
                     sourceTypes: [...(rem.sourceTypes || [])],
                 };
@@ -866,10 +1303,9 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             });
 
             const ruleContent = ruleEl.createDiv({ cls: 'tps-rule-content' });
-            const createRuleGroup = (title: string, defaultOpen = false): HTMLElement => {
-                const group = ruleContent.createEl('details', { cls: 'tps-rule-group' });
-                if (defaultOpen) group.setAttr('open', 'true');
-                group.createEl('summary', { text: title });
+            const createRuleGroup = (title: string, _defaultOpen = false): HTMLElement => {
+                const group = ruleContent.createDiv({ cls: 'tps-rule-group' });
+                group.createEl('h5', { text: title, cls: 'tps-rule-group-heading' });
                 return group.createDiv({ cls: 'tps-rule-group-content' });
             };
 
@@ -1128,11 +1564,23 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
             new Setting(filteringGroup)
                 .setName('Required Statuses')
-                .setDesc('Only trigger for files with one of these statuses. Comma-separated (e.g. scheduled, in-progress).')
+                .setDesc('Only trigger for notes/tasks with one of these semantic status values. Comma-separated (e.g. scheduled, in-progress).')
                 .addText(text => text
                     .setValue((rem.requiredStatuses || []).join(', '))
                     .onChange(async (value) => {
                         rem.requiredStatuses = value.split(',').map(s => s.trim()).filter(Boolean);
+                        await this.plugin.saveSettings();
+                        descSpan.textContent = this.buildRuleDesc(rem);
+                    }));
+
+            new Setting(filteringGroup)
+                .setName('Required Checkbox States')
+                .setDesc('Only trigger for task rows with one of these raw checkbox markers. Use blank/open/todo for unchecked tasks, or markers like x, -, /, ?.')
+                .addText(text => text
+                    .setPlaceholder('blank, /')
+                    .setValue((rem.requiredCheckboxStates || []).join(', '))
+                    .onChange(async (value) => {
+                        rem.requiredCheckboxStates = value.split(',').map(s => s.trim()).filter(Boolean);
                         await this.plugin.saveSettings();
                         descSpan.textContent = this.buildRuleDesc(rem);
                     }));
@@ -1170,11 +1618,22 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
             new Setting(filteringGroup)
                 .setName('Ignore Statuses')
-                .setDesc('Skip files with these statuses. Comma-separated.')
+                .setDesc('Skip notes/tasks with these semantic status values. Comma-separated.')
                 .addText(text => text
                     .setValue((rem.ignoreStatuses || []).join(', '))
                     .onChange(async (value) => {
                         rem.ignoreStatuses = value.split(',').map(s => s.trim()).filter(Boolean);
+                        await this.plugin.saveSettings();
+                    }));
+
+            new Setting(filteringGroup)
+                .setName('Ignore Checkbox States')
+                .setDesc('Skip task rows with these raw checkbox markers. Use blank/open/todo for unchecked tasks, or markers like x, -, /, ?.')
+                .addText(text => text
+                    .setPlaceholder('x, -')
+                    .setValue((rem.ignoreCheckboxStates || []).join(', '))
+                    .onChange(async (value) => {
+                        rem.ignoreCheckboxStates = value.split(',').map(s => s.trim()).filter(Boolean);
                         await this.plugin.saveSettings();
                     }));
 
@@ -1200,6 +1659,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             parts.push(`${rem.offsetMinutes >= 0 ? '+' : ''}${rem.offsetMinutes}min`);
         }
         if (rem.requiredStatuses?.length) parts.push(rem.requiredStatuses.join('/'));
+        if (rem.requiredCheckboxStates?.length) parts.push(`checkbox ${rem.requiredCheckboxStates.join('/')}`);
         if (rem.triggerAtEnd) parts.push('at end');
         if (rem.mode && rem.mode !== 'task') parts.push(rem.mode);
         if (rem.allDayFilter === 'true') parts.push('all-day only');
@@ -1352,7 +1812,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
                 new Setting(acContent)
                     .setName("Task target note")
-                    .setDesc("Note path for synced task items. Defaults to Calendar.md for Single task note.")
+                    .setDesc("Optional note path for synced task items. Leave blank for daily-note task storage.")
                     .addText(t => {
                         const commit = async () => {
                             const normalized = normalizeTaskTargetNotePath(t.getValue());

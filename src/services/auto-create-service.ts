@@ -12,6 +12,7 @@ import {
 } from "../utils";
 import { normalizeTagValue } from "../utils/tag-utils";
 import { buildCalendarExternalId, ensureInternalIdInFrontmatter, getExternalId } from "../tps-gcm-api";
+import { cancelOpenInlineTaskLine } from "./external-calendar-cancellation";
 
 interface CalendarAutoCreateConfig {
     mode?: "note" | "task";
@@ -50,6 +51,7 @@ export interface AutoCreateServiceConfig {
 
 interface VaultNote {
     file: TFile;
+    isInlineTask: boolean;
     externalId: string | null;
     eventId: string | null;
     uid: string;
@@ -113,13 +115,21 @@ export class AutoCreateService {
         forceRegenerate = false,
         options: { backfillPastEvents?: boolean } = {},
     ): Promise<void> {
-        if (this.config.allowAutoCreate === false || this.isSyncing) return;
+        if (this.config.allowAutoCreate === false) {
+            logger.flow("AutoCreate", "sync:skip-disabled", { urls: urls.length });
+            return;
+        }
+        if (this.isSyncing) {
+            logger.flowWarn("AutoCreate", "sync:skip-already-running", { urls: urls.length });
+            return;
+        }
         if (!Object.values(calendarConfigs).some((config) => (config?.autoCreateEnabled ?? true) !== false)) {
+            logger.flowWarn("AutoCreate", "sync:skip-all-calendars-disabled", { configs: Object.keys(calendarConfigs).length });
             if (forceRegenerate) new Notice("Calendar Sync skipped: auto-create is disabled for all configured calendars.");
             return;
         }
         if (!this.getConfiguredScanRoots().length) {
-            logger.warn("[AutoCreateService] Skipping sync: no calendar note scan roots configured.");
+            logger.flowWarn("AutoCreate", "sync:skip-no-scan-roots");
             if (forceRegenerate) new Notice("Calendar Sync skipped: no calendar note folder is configured.");
             return;
         }
@@ -137,8 +147,35 @@ export class AutoCreateService {
             rangeEnd.setDate(rangeEnd.getDate() + 60);
 
             const filterTerms = externalCalendarFilter.split(",").map((term) => term.trim().toLowerCase()).filter(Boolean);
-            const fetchResult = await this.fetchAllRemoteEvents(externalCalendarService, urls, rangeStart, rangeEnd);
-            const { byEventKey, byLegacyEventId, byUidStart, byTitleDay, byEventUrl, allNotes } = await this.buildVaultIndex();
+            logger.flow("AutoCreate", "sync:start", {
+                urls: urls.length,
+                configs: Object.keys(calendarConfigs).length,
+                scanRoots: this.getConfiguredScanRoots().length,
+                filterTerms: filterTerms.length,
+                forceRegenerate,
+                backfillPastEvents: options.backfillPastEvents === true,
+                rangeStart: rangeStart.toISOString(),
+                rangeEnd: rangeEnd.toISOString(),
+            });
+            const fetchResult = await logger.timeAsync("AutoCreate", "fetch-events", { urls: urls.length }, () =>
+                this.fetchAllRemoteEvents(externalCalendarService, urls, rangeStart, rangeEnd)
+            );
+            logger.flow("AutoCreate", "fetch-events:result", {
+                events: fetchResult.events.length,
+                successfulUrls: fetchResult.successfulUrls.size,
+                failedUrls: fetchResult.failedUrls.size,
+            });
+            const { byEventKey, byLegacyEventId, byUidStart, byTitleDay, byEventUrl, allNotes } = await logger.timeAsync("AutoCreate", "vault-index", {
+                scanRoots: this.getConfiguredScanRoots().length,
+            }, () => this.buildVaultIndex());
+            logger.flow("AutoCreate", "vault-index:result", {
+                notes: allNotes.length,
+                eventKeys: byEventKey.size,
+                legacyEventIds: byLegacyEventId.size,
+                uidStartKeys: byUidStart.size,
+                titleDayKeys: byTitleDay.size,
+                eventUrls: byEventUrl.size,
+            });
             const configuredUrlSet = new Set(urls.map((url) => normalizeCalendarUrl(url)).filter(Boolean));
 
             let created = 0;
@@ -146,6 +183,8 @@ export class AutoCreateService {
             let deleted = 0;
             let quarantined = 0;
             let restored = 0;
+            let skippedDuplicate = 0;
+            let processed = 0;
             const processedEventKeys = new Set<string>();
             const processedUidStartKeys = new Set<string>();
             const matchedFilePaths = new Set<string>();
@@ -153,11 +192,15 @@ export class AutoCreateService {
             for (const event of this.sortEventsByStart(fetchResult.events)) {
                 const eventKey = this.buildEventKeyForEvent(event);
                 const uidStartKey = this.buildUidStartKey(event);
-                if (processedEventKeys.has(eventKey) || processedUidStartKeys.has(uidStartKey)) continue;
+                if (processedEventKeys.has(eventKey) || processedUidStartKeys.has(uidStartKey)) {
+                    skippedDuplicate++;
+                    continue;
+                }
                 processedEventKeys.add(eventKey);
                 processedUidStartKeys.add(uidStartKey);
 
                 try {
+                    processed++;
                     const result = await this.processEvent(
                         event,
                         byEventKey,
@@ -174,11 +217,20 @@ export class AutoCreateService {
                     if (result.action === "deleted") deleted++;
                     if (result.file) matchedFilePaths.add(result.file.path);
                 } catch (error) {
-                    logger.error(`[AutoCreateService] Error processing event "${event.title}"`, error);
+                    logger.flowError("AutoCreate", "event:failed", error, {
+                        title: event.title,
+                        sourceUrl: normalizeCalendarUrl(event.sourceUrl || ""),
+                        startDate: event.startDate?.toISOString?.() || "",
+                    });
                 }
             }
 
             const skipOrphanCleanupBecauseNoRemoteEvents = fetchResult.events.length === 0;
+            let orphanSkippedNoRemote = 0;
+            let orphanSkippedNoId = 0;
+            let orphanSkippedUnsafe = 0;
+            let orphanSkippedOutOfRange = 0;
+            let orphanGracePending = 0;
             for (const note of allNotes) {
                 if (note.isArchived) continue;
                 if (matchedFilePaths.has(note.file.path)) {
@@ -187,19 +239,28 @@ export class AutoCreateService {
                     continue;
                 }
                 if (!note.eventId || skipOrphanCleanupBecauseNoRemoteEvents) {
+                    if (!note.eventId) orphanSkippedNoId++;
+                    else orphanSkippedNoRemote++;
                     this.orphanMissCount.delete(note.file.path);
                     continue;
                 }
                 if (!this.canEvaluateOrphanForNote(note, configuredUrlSet, fetchResult.successfulUrls, fetchResult.failedUrls)) {
+                    orphanSkippedUnsafe++;
                     this.orphanMissCount.delete(note.file.path);
                     continue;
                 }
                 const noteDate = note.startDate ?? this.getRecurrenceDateFromId(note.eventId);
-                if (!noteDate || noteDate < rangeStart || noteDate > rangeEnd) continue;
+                if (!noteDate || noteDate < rangeStart || noteDate > rangeEnd) {
+                    orphanSkippedOutOfRange++;
+                    continue;
+                }
 
                 const missCount = (this.orphanMissCount.get(note.file.path) || 0) + 1;
                 this.orphanMissCount.set(note.file.path, missCount);
-                if (missCount < AutoCreateService.ORPHAN_GRACE_CYCLES) continue;
+                if (missCount < AutoCreateService.ORPHAN_GRACE_CYCLES) {
+                    orphanGracePending++;
+                    continue;
+                }
 
                 if (this.config.noLossSyncMode) {
                     if (await this.markOrphanCandidate(note, missCount)) quarantined++;
@@ -218,8 +279,24 @@ export class AutoCreateService {
             } else if (forceRegenerate) {
                 new Notice(`Calendar Sync: ${summary.join(", ")}`);
             }
+            logger.flow("AutoCreate", "sync:done", {
+                remoteEvents: fetchResult.events.length,
+                processed,
+                skippedDuplicate,
+                created,
+                updated,
+                deleted,
+                quarantined,
+                restored,
+                matchedFiles: matchedFilePaths.size,
+                orphanSkippedNoRemote,
+                orphanSkippedNoId,
+                orphanSkippedUnsafe,
+                orphanSkippedOutOfRange,
+                orphanGracePending,
+            });
         } catch (error) {
-            logger.error("[AutoCreateService] Sync failed:", error);
+            logger.flowError("AutoCreate", "sync:failed", error, { urls: urls.length });
             if (forceRegenerate) new Notice("Calendar Sync failed. Check the developer console for details.");
         } finally {
             this.isSyncing = false;
@@ -324,6 +401,7 @@ export class AutoCreateService {
             const startDate = storedStart ? parseFrontmatterDate(storedStart) : null;
             const note: VaultNote = {
                 file,
+                isInlineTask: false,
                 externalId,
                 eventId,
                 uid,
@@ -379,6 +457,7 @@ export class AutoCreateService {
             const startDate = storedStart ? parseFrontmatterDate(storedStart) : null;
             notes.push({
                 file,
+                isInlineTask: true,
                 externalId,
                 eventId,
                 uid: uid || "",
@@ -473,7 +552,14 @@ export class AutoCreateService {
         if (match) {
             if (match.isArchived) return { action: "none", file: match.file };
             if (event.isCancelled) {
-                const action = await this.handleCancelledMatch(match.file);
+                const action = match.isInlineTask
+                    ? (await this.markInlineTaskCancelled(match, event) ? "updated" : "none")
+                    : await this.handleCancelledMatch(match.file);
+                logger.flow("AutoCreate", "event:cancelled", {
+                    action,
+                    route: match.isInlineTask ? "inline-task" : "note",
+                    path: match.file.path,
+                });
                 return { action, file: match.file };
             }
 
@@ -527,7 +613,12 @@ export class AutoCreateService {
                     didUpdate = true;
                 }
                 if (allDayChanged) {
-                    fm.allDay = event.isAllDay;
+                    if (event.isAllDay) {
+                        const allDayKey = Object.keys(fm).find((key) => key.trim().toLowerCase() === "allday") || "allDay";
+                        fm[allDayKey] = true;
+                    } else {
+                        this.deleteFrontmatterKeyIfPresent(fm, "allDay");
+                    }
                     didUpdate = true;
                 }
                 if (startChanged) {
@@ -913,6 +1004,34 @@ export class AutoCreateService {
             if (await this.archiveFile(file)) return "deleted";
         }
         return (await this.markCancelledWithoutDelete(file)) ? "updated" : "none";
+    }
+
+    private async markInlineTaskCancelled(note: VaultNote, event: ExternalCalendarEvent): Promise<boolean> {
+        const content = await this.app.vault.read(note.file);
+        const lines = content.split(/\r?\n/);
+        const footnoteMetadata = this.parseInlineMetadataFootnotes(lines);
+        const expectedExternalId = buildCalendarExternalId(this.app, event);
+        const normalizedSourceUrl = this.normalizeSourceUrl(event.sourceUrl);
+        const lineIndex = lines.findIndex((line) => {
+            if (!/^\s*[-*]\s+\[[ xX]\]\s+/.test(line)) return false;
+            const props = this.parseInlineDataviewProperties(line, footnoteMetadata);
+            const externalId = this.normalizeIdentityValue(props.get("externalid"));
+            if (expectedExternalId && externalId === expectedExternalId) return true;
+            const eventId = this.normalizeIdentityValue(props.get(this.config.eventIdKey.toLowerCase()) || props.get("externaleventid"));
+            const sourceUrl = this.normalizeSourceUrl(props.get(this.config.sourceUrlKey.toLowerCase()) || props.get("tpscalendarsourceurl"));
+            return eventId === event.id && (!normalizedSourceUrl || sourceUrl === normalizedSourceUrl);
+        });
+        if (lineIndex < 0) {
+            logger.flowWarn("AutoCreate", "event:cancelled-inline-task-missing", { path: note.file.path });
+            return false;
+        }
+
+        const cancelledLine = cancelOpenInlineTaskLine(lines[lineIndex]);
+        if (!cancelledLine) return false;
+        lines[lineIndex] = cancelledLine;
+        const newline = content.includes("\r\n") ? "\r\n" : "\n";
+        await this.app.vault.modify(note.file, lines.join(newline));
+        return true;
     }
 
     private async markCancelledWithoutDelete(file: TFile): Promise<boolean> {

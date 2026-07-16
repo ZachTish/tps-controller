@@ -249,7 +249,6 @@ export async function createBidirectionalLink(
             await app.fileManager.processFrontMatter(childFile, (fm) => {
                 const parentLink = buildLink(app, childFile.path, parentFile);
                 setFrontmatterValueCaseInsensitive(fm, parentKey, parentLink);
-                setFrontmatterValueCaseInsensitive(fm, "folderPath", childFile.parent?.path || "/");
                 logger.log(`[ParentChildLink] Added parent link to ${childFile.path}: ${parentKey} = ${parentLink}`);
             });
         });

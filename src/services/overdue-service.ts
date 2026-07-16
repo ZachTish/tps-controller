@@ -4,7 +4,7 @@ import * as logger from "../logger";
 import type { TPSControllerSettings, OverdueItem } from "../types";
 import {
     parseDate, parseTimeRange, parseDuration, getEffectiveEndTime,
-    formatTemplate, checkStopCondition, hasRequiredStatus,
+    formatTemplate, checkStopCondition, hasRequiredStatus, hasRequiredCheckboxState,
     shouldIgnoreForReminder, isAllDayEvent, hasExplicitTimeInValue,
     getReminderTriggerBase,
 } from "../utils/time-calculation-service";
@@ -14,6 +14,10 @@ import {
     buildReminderDisplayName,
 } from "./reminder-target-service";
 import { getReminderCandidateFiles } from "./reminder-candidate-service";
+import {
+    getFileReminderLiveWindowMs,
+    shouldSkipStaleOneShotReminder,
+} from "./reminder-delivery-window";
 import { TPS_EVENTS, TPS_LEGACY_EVENTS } from "../tps-contracts";
 import { emitFilesUpdated } from "../tps-gcm-api";
 
@@ -29,45 +33,94 @@ export class OverdueService {
     }
 
     async openNotificationModal(): Promise<void> {
+        const started = performance.now();
         const { workspace } = this.app;
-        let leaf: WorkspaceLeaf | null = null;
-        const leaves = workspace.getLeavesOfType(NOTIFICATION_VIEW_TYPE);
-        if (leaves.length > 0) {
-            leaf = leaves[0];
-        } else {
-            const rightLeaf = workspace.getRightLeaf(false);
-            if (rightLeaf) {
-                leaf = rightLeaf;
-                await leaf.setViewState({ type: NOTIFICATION_VIEW_TYPE, active: true });
-            } else {
-                logger.error("[TPS Controller] Failed to get right leaf");
-            }
+        const existingCount = workspace.getLeavesOfType(NOTIFICATION_VIEW_TYPE).length;
+        logger.flow("NotificationView", "open:start", {
+            existingLeaves: existingCount,
+            rightCollapsed: !!(workspace as any).rightSplit?.collapsed,
+        });
+        workspace.detachLeavesOfType(NOTIFICATION_VIEW_TYPE);
+        const leaf = typeof (workspace as any).ensureSideLeaf === "function"
+            ? await (workspace as any).ensureSideLeaf(NOTIFICATION_VIEW_TYPE, "right", {
+                active: true,
+                reveal: true,
+                state: {},
+            })
+            : workspace.getRightLeaf(true);
+        if (!leaf) {
+            logger.flowError("NotificationView", "open:no-leaf", new Error("Failed to get right leaf"), { existingLeaves: existingCount });
+            return;
         }
-        if (leaf) workspace.revealLeaf(leaf);
+        await leaf.setViewState({ type: NOTIFICATION_VIEW_TYPE, state: {}, active: true });
+        (workspace as any).rightSplit?.expand?.();
+        this.activateLeafTab(leaf);
+        logger.flow("NotificationView", "open:leaf-ready", {
+            existingLeaves: existingCount,
+            rightCollapsed: !!(workspace as any).rightSplit?.collapsed,
+            parentTabIndex: this.getLeafTabIndex(leaf),
+            parentCurrentTab: (leaf as any).parent?.currentTab,
+        });
+        await workspace.revealLeaf(leaf);
+        this.activateLeafTab(leaf);
+        workspace.setActiveLeaf(leaf, { focus: true } as any);
+        await leaf.loadIfDeferred?.();
+        await (leaf.view as any)?.refresh?.();
+        (workspace as any).requestSaveLayout?.();
+        logger.flow("NotificationView", "open:done", {
+            durationMs: Math.round(performance.now() - started),
+            parentTabIndex: this.getLeafTabIndex(leaf),
+        });
+    }
+
+    private getLeafTabIndex(leaf: WorkspaceLeaf): number {
+        const children = (leaf as any).parent?.children;
+        return Array.isArray(children) ? children.indexOf(leaf) : -1;
+    }
+
+    private activateLeafTab(leaf: WorkspaceLeaf): void {
+        const parent = (leaf as any).parent;
+        const tabIndex = this.getLeafTabIndex(leaf);
+        if (tabIndex < 0) return;
+        if (typeof parent.selectTabIndex === "function") {
+            parent.selectTabIndex(tabIndex);
+            return;
+        }
+        parent.currentTab = tabIndex;
     }
 
     async getOverdueItems(): Promise<OverdueItem[]> {
+        const started = performance.now();
         const settings = this.getSettings();
         const now = Date.now();
         const overdueItems: OverdueItem[] = [];
         const reminders = settings.reminders || [];
-        if (!reminders.length) return overdueItems;
+        if (!reminders.length) {
+            logger.flow("OverdueItems", "scan:no-rules");
+            return overdueItems;
+        }
 
         const ignorePaths = settings.globalIgnorePaths || [];
         const ignoreTags = settings.globalIgnoreTags || [];
         const ignoreStatuses = settings.globalIgnoreStatuses || [];
+        const ignoreCheckboxStates = settings.globalIgnoreCheckboxStates || [];
         const snoozeKey = settings.snoozeProperty || "reminderSnooze";
+        const liveWindowMs = getFileReminderLiveWindowMs(settings.pollMinutes);
         const candidateResult = await getReminderCandidateFiles(
             this.app,
             settings,
             reminders.filter((reminder) => reminder.enabled).map((reminder) => reminder.property),
         );
         const files = candidateResult.files;
+        let targetCount = 0;
+        let matchedBeforeDedupe = 0;
+        let staleOneShotHidden = 0;
 
         for (const file of files) {
             const cache = this.app.metadataCache.getFileCache(file);
             const fm = (cache?.frontmatter || {}) as Record<string, unknown>;
             const targets = await buildReminderTargetsForFile(this.app, file, fm, settings);
+            targetCount += targets.length;
 
             for (const target of targets) {
                 for (const reminder of reminders) {
@@ -79,8 +132,9 @@ export class OverdueService {
                     const effectiveFm = ctx.frontmatter;
                     const propertyValue = ctx.propertyValue;
 
-                    if (shouldIgnoreForReminder(file, cache, effectiveFm, reminder, ignorePaths, ignoreTags, ignoreStatuses)) continue;
+                    if (shouldIgnoreForReminder(file, cache, effectiveFm, reminder, ignorePaths, ignoreTags, ignoreStatuses, ignoreCheckboxStates)) continue;
                     if (!hasRequiredStatus(effectiveFm, reminder)) continue;
+                    if (!hasRequiredCheckboxState(effectiveFm, reminder)) continue;
 
                     let snoozedUntil: number | undefined;
                     const snoozeVal = effectiveFm[snoozeKey];
@@ -128,8 +182,15 @@ export class OverdueService {
                     // Never show items before their trigger time — applies to both timed and all-day events.
                     if (now < triggerTime) continue;
                     if (reminder.repeatEndAt === "trigger-base" && now > finalTriggerBase) continue;
-                    // For all-day events, include past days too — if stop conditions haven't been met the
-                    // item is still "open" and should surface until explicitly completed or snoozed.
+                    if (shouldSkipStaleOneShotReminder(
+                        now,
+                        triggerTime,
+                        reminder.repeatUntilComplete,
+                        liveWindowMs,
+                    )) {
+                        staleOneShotHidden++;
+                        continue;
+                    }
 
                     const diff = this.formatTimeDiff(now - finalTriggerBase);
                     const vars: Record<string, string> = {
@@ -138,6 +199,7 @@ export class OverdueService {
                         remaining: diff,
                         duration: String(effectiveFm["duration"] ?? ""),
                     };
+                    matchedBeforeDedupe++;
                     overdueItems.push({
                         file,
                         reminder,
@@ -212,8 +274,16 @@ export class OverdueService {
                 sourceType: item.sourceType || 'file',
                 targetKind: item.targetKind,
                 taskTitle: item.taskTitle,
+                taskRawLine: item.taskRawLine,
                 taskLine: item.taskLine,
                 noteTitle: item.noteTitle,
+                taskFrontmatter: item.targetKind === "task" ? {
+                    ...fm,
+                    status: item.status || fm.status,
+                    checkboxStatus: item.status || fm.status,
+                    checkboxState: this.getTaskCheckboxState(item.taskRawLine),
+                    taskCheckboxState: this.getTaskCheckboxState(item.taskRawLine),
+                } : undefined,
             };
 
             // PHASE 1: Check if the CURRENT reminder will fire again
@@ -222,8 +292,9 @@ export class OverdueService {
                 const reminder = currentReminder;
                 const ctx = buildEffectiveReminderContextForTarget(target, fm, reminder.property, settings);
                 if (ctx && 
-                    !shouldIgnoreForReminder(item.file, cache, ctx.frontmatter, reminder, ignorePaths, ignoreTags, ignoreStatuses) &&
+                    !shouldIgnoreForReminder(item.file, cache, ctx.frontmatter, reminder, ignorePaths, ignoreTags, ignoreStatuses, ignoreCheckboxStates) &&
                     hasRequiredStatus(ctx.frontmatter, reminder) &&
+                    hasRequiredCheckboxState(ctx.frontmatter, reminder) &&
                     !reminder.stopConditions.some((cond) => checkStopCondition(ctx.frontmatter, cond))) {
                     
                     const { start: pt, end: ret } = parseTimeRange(ctx.propertyValue);
@@ -261,12 +332,21 @@ export class OverdueService {
                                     nextLabel = currentReminderLabel;
                                     isRepeatingCurrent = true;
                                     intervalMins = reminder.repeatIntervalMinutes;
-                                    logger.log(`[TPS-Controller Annotation] ${item.file.basename}: Current reminder repeating, nextTime=${new Date(nextRepeat).toLocaleTimeString()}, intervalMins=${intervalMins}`);
+                                    logger.flow("OverdueItems", "next-trigger:current-repeat", {
+                                        path: item.file.path,
+                                        reminderId: currentReminderId,
+                                        nextTriggerTime: nextRepeat,
+                                        intervalMins,
+                                    });
                                 } else if (now < tTime) {
                                     // Future non-repeating trigger
                                     nextTime = tTime;
                                     nextLabel = currentReminderLabel;
-                                    logger.log(`[TPS-Controller Annotation] ${item.file.basename}: Current reminder future, nextTime=${new Date(tTime).toLocaleTimeString()}`);
+                                    logger.flow("OverdueItems", "next-trigger:current-future", {
+                                        path: item.file.path,
+                                        reminderId: currentReminderId,
+                                        nextTriggerTime: tTime,
+                                    });
                                 }
                             }
                         } else {
@@ -293,12 +373,21 @@ export class OverdueService {
                                 nextLabel = currentReminderLabel;
                                 isRepeatingCurrent = true;
                                 intervalMins = reminder.repeatIntervalMinutes;
-                                logger.log(`[TPS-Controller Annotation] ${item.file.basename}: Current reminder repeating, nextTime=${new Date(nextRepeat).toLocaleTimeString()}, intervalMins=${intervalMins}`);
+                                logger.flow("OverdueItems", "next-trigger:current-repeat", {
+                                    path: item.file.path,
+                                    reminderId: currentReminderId,
+                                    nextTriggerTime: nextRepeat,
+                                    intervalMins,
+                                });
                             } else if (now < tTime) {
                                 // Future non-repeating trigger
                                 nextTime = tTime;
                                 nextLabel = currentReminderLabel;
-                                logger.log(`[TPS-Controller Annotation] ${item.file.basename}: Current reminder future, nextTime=${new Date(tTime).toLocaleTimeString()}`);
+                                logger.flow("OverdueItems", "next-trigger:current-future", {
+                                    path: item.file.path,
+                                    reminderId: currentReminderId,
+                                    nextTriggerTime: tTime,
+                                });
                             }
                         }
                     }
@@ -313,8 +402,9 @@ export class OverdueService {
                     if (reminder.id === currentReminderId) continue;
                     const ctx = buildEffectiveReminderContextForTarget(target, fm, reminder.property, settings);
                     if (!ctx) continue;
-                    if (shouldIgnoreForReminder(item.file, cache, ctx.frontmatter, reminder, ignorePaths, ignoreTags, ignoreStatuses)) continue;
+                    if (shouldIgnoreForReminder(item.file, cache, ctx.frontmatter, reminder, ignorePaths, ignoreTags, ignoreStatuses, ignoreCheckboxStates)) continue;
                     if (!hasRequiredStatus(ctx.frontmatter, reminder)) continue;
+                    if (!hasRequiredCheckboxState(ctx.frontmatter, reminder)) continue;
                     if (reminder.stopConditions.some((cond) => checkStopCondition(ctx.frontmatter, cond))) continue;
                     const { start: pt, end: ret } = parseTimeRange(ctx.propertyValue);
                     if (!pt) continue;
@@ -341,7 +431,11 @@ export class OverdueService {
                         if (nextTime === undefined || tTime < nextTime) {
                             nextTime = tTime;
                             nextLabel = reminder.label || reminder.id;
-                            logger.log(`[TPS-Controller Annotation] ${item.file.basename}: Next different reminder at ${new Date(tTime).toLocaleTimeString()}, label=${nextLabel}`);
+                            logger.flow("OverdueItems", "next-trigger:different-reminder", {
+                                path: item.file.path,
+                                reminderId: reminder.id,
+                                nextTriggerTime: tTime,
+                            });
                         }
                     }
                 }
@@ -358,7 +452,23 @@ export class OverdueService {
             }
         }
 
+        logger.flow("OverdueItems", "scan:done", {
+            files: files.length,
+            targets: targetCount,
+            matchedBeforeDedupe,
+            staleOneShotHidden,
+            visibleBeforeDedupe: visibleOverdueItems.length,
+            deduplicated: deduplicated.length,
+            durationMs: Math.round(performance.now() - started),
+            sortDirection: this.getSettings().notificationSortDirection === "desc" ? "desc" : "asc",
+        });
         return deduplicated;
+    }
+
+    private getTaskCheckboxState(rawLine: unknown): string | undefined {
+        const match = String(rawLine || "").match(/^\s*(?:[-*+]|\d+[.)])\s+\[([^\]]?)]\s+/);
+        if (!match) return undefined;
+        return String(match[1] || "").trim().toLowerCase() || " ";
     }
 
     private reminderIncludesSource(
@@ -408,26 +518,44 @@ export class OverdueService {
     }
 
     async setItemStatus(item: OverdueItem, status: string | null): Promise<void> {
+        const statusKey = this.getSettings().statusKey || "status";
+        const isStatusClear = status == null || String(status).trim() === "";
+        const resolvedStatus = isStatusClear ? null : status;
+        logger.flow("OverdueAction", "status:set-start", {
+            path: item.file.path,
+            targetKind: item.targetKind || "note",
+            taskLine: typeof item.taskLine === "number" ? item.taskLine : -1,
+            status: resolvedStatus || "",
+        });
         if (item.targetKind === "task" && typeof item.taskLine === "number") {
-            await this.updateTaskLineProperties(item, this.buildTaskStatusPatch(status));
+            const changed = await this.updateTaskLineProperties(item, this.buildTaskStatusPatch(resolvedStatus), "status");
+            logger.flow("OverdueAction", "status:set-done", {
+                route: "task-line",
+                changed,
+                path: item.file.path,
+                status: resolvedStatus || "",
+            });
             return;
         }
 
         const bulkEditService = this.getGcmBulkEditService();
         if (bulkEditService) {
-            if (status == null) {
+            if (isStatusClear) {
                 if (typeof bulkEditService.updateFrontmatter === "function") {
-                    await bulkEditService.updateFrontmatter([item.file], { status: null });
+                    await bulkEditService.updateFrontmatter([item.file], { [statusKey]: null });
                     this.triggerFilesUpdated([item.file.path]);
+                    logger.flow("OverdueAction", "status:set-done", { route: "gcm-update-frontmatter-clear", path: item.file.path });
                     return;
                 }
             } else if (typeof bulkEditService.setStatus === "function") {
-                await bulkEditService.setStatus([item.file], status);
+                await bulkEditService.setStatus([item.file], resolvedStatus);
                 this.triggerFilesUpdated([item.file.path]);
+                logger.flow("OverdueAction", "status:set-done", { route: "gcm-set-status", path: item.file.path, status: resolvedStatus });
                 return;
             } else if (typeof bulkEditService.updateFrontmatter === "function") {
-                await bulkEditService.updateFrontmatter([item.file], { status });
+                await bulkEditService.updateFrontmatter([item.file], { [statusKey]: resolvedStatus });
                 this.triggerFilesUpdated([item.file.path]);
+                logger.flow("OverdueAction", "status:set-done", { route: "gcm-update-frontmatter", path: item.file.path, status: resolvedStatus });
                 return;
             }
         }
@@ -435,14 +563,15 @@ export class OverdueService {
         const now = (window as any).moment
             ? (window as any).moment().format('YYYY-MM-DD HH:mm:ss')
             : new Date().toISOString().replace('T', ' ').slice(0, 19);
-        const normalized = String(status || "").trim().toLowerCase();
+        const normalized = String(resolvedStatus || "").trim().toLowerCase();
         const isDone = normalized === "complete" || normalized === "wont-do";
 
         await this.app.fileManager.processFrontMatter(item.file, (fm) => {
-            if (status == null) {
-                delete fm.status;
+            const existingStatusKey = Object.keys(fm).find((key) => key.trim().toLowerCase() === statusKey.trim().toLowerCase());
+            if (isStatusClear) {
+                if (existingStatusKey) delete fm[existingStatusKey];
             } else {
-                fm.status = status;
+                fm[existingStatusKey || statusKey] = resolvedStatus;
             }
             const cdKey = Object.keys(fm).find((k) => k.toLowerCase() === 'completeddate');
             if (isDone) {
@@ -452,18 +581,40 @@ export class OverdueService {
             }
         });
         this.triggerFilesUpdated([item.file.path]);
+        logger.flow("OverdueAction", "status:set-done", {
+            route: "frontmatter",
+            path: item.file.path,
+            status: resolvedStatus || "",
+            completedDate: isDone,
+        });
     }
 
     async snoozeItem(item: OverdueItem, minutes: number): Promise<void> {
+        logger.flow("OverdueAction", "snooze:start", {
+            path: item.file.path,
+            targetKind: item.targetKind || "note",
+            minutes,
+        });
         if (item.targetKind === "task" && typeof item.taskLine === "number") {
             const snoozeKey = this.getSettings().snoozeProperty || "reminderSnooze";
             const snoozeTimeStr = minutes > 0
                 ? moment().add(minutes, "minutes").format("YYYY-MM-DD HH:mm")
                 : "";
-            await this.updateTaskLineProperties(item, { [snoozeKey]: snoozeTimeStr || null });
+            const changed = await this.updateTaskLineProperties(item, { [snoozeKey]: snoozeTimeStr || null }, "snooze");
+            logger.flow("OverdueAction", "snooze:done", {
+                route: "task-line",
+                changed,
+                path: item.file.path,
+                minutes,
+            });
             return;
         }
         await this.snoozeFile(item.file, minutes);
+        logger.flow("OverdueAction", "snooze:done", {
+            route: "frontmatter",
+            path: item.file.path,
+            minutes,
+        });
     }
 
     async markItemComplete(item: OverdueItem): Promise<void> {
@@ -476,7 +627,7 @@ export class OverdueService {
 
     async resolveTaskReminder(item: OverdueItem): Promise<boolean> {
         const property = item.reminderProperty || item.reminder.property || this.getSettings().startProperty || "scheduled";
-        logger.debug("[NotificationMove] resolve reminder task action", {
+        logger.flow("OverdueAction", "resolve-reminder:start", {
             path: item.file?.path,
             targetKind: item.targetKind,
             taskLine: item.taskLine,
@@ -487,24 +638,35 @@ export class OverdueService {
         if (item.targetKind !== "task" || typeof item.taskLine !== "number") {
             await this.clearFileReminderProperty(item.file, property);
             new Notice(`Cleared ${property}.`);
+            logger.flow("OverdueAction", "resolve-reminder:done", {
+                route: "note-clear",
+                path: item.file.path,
+                property,
+            });
             return true;
         }
 
         if (item.reminderPropertySource === "task") {
-            const changed = await this.updateTaskLineProperties(item, { [property]: null });
+            const changed = await this.updateTaskLineProperties(item, { [property]: null }, "clear-task-reminder");
             if (changed) new Notice(`Cleared ${property} from task.`);
+            logger.flow("OverdueAction", "resolve-reminder:done", {
+                route: "task-clear",
+                path: item.file.path,
+                property,
+                changed,
+            });
             return changed;
         }
 
         const targetFile = await this.promptTargetFile();
         if (!targetFile) {
-            logger.debug("[NotificationMove] target selection canceled", {
+            logger.flow("OverdueAction", "resolve-reminder:canceled", {
                 path: item.file?.path,
                 taskTitle: item.taskTitle,
             });
             return false;
         }
-        logger.debug("[NotificationMove] target selected", {
+        logger.flow("OverdueAction", "resolve-reminder:target-selected", {
             sourcePath: item.file?.path,
             targetPath: targetFile.path,
             taskLine: item.taskLine,
@@ -520,6 +682,7 @@ export class OverdueService {
             delete fm[key];
         });
         this.triggerFilesUpdated([file.path]);
+        logger.flow("OverdueAction", "reminder-property:cleared", { path: file.path, property });
     }
 
     private buildTaskStatusPatch(status: string | null): Record<string, string | null> {
@@ -535,14 +698,23 @@ export class OverdueService {
         };
     }
 
-    private async updateTaskLineProperties(item: OverdueItem, patch: Record<string, string | null>): Promise<boolean> {
-        if (typeof item.taskLine !== "number" || !Number.isFinite(item.taskLine)) return false;
+    private async updateTaskLineProperties(item: OverdueItem, patch: Record<string, string | null>, reason = "patch"): Promise<boolean> {
+        if (typeof item.taskLine !== "number" || !Number.isFinite(item.taskLine)) {
+            logger.flowWarn("OverdueAction", "task-line:update-invalid-line", {
+                path: item.file?.path || "",
+                reason,
+                taskLine: item.taskLine,
+            });
+            return false;
+        }
         const raw = await this.app.vault.cachedRead(item.file);
         const lines = raw.split(/\r?\n/);
+        const originalLine = item.taskLine;
         const resolvedIndex = this.findCurrentTaskLineIndex(lines, item);
         if (resolvedIndex < 0 || resolvedIndex >= lines.length) {
-            logger.warn("[NotificationMove] task line update target not found", {
+            logger.flowWarn("OverdueAction", "task-line:update-not-found", {
                 path: item.file?.path,
+                reason,
                 taskLine: item.taskLine,
                 taskTitle: item.taskTitle,
                 taskRawLine: item.taskRawLine,
@@ -558,6 +730,13 @@ export class OverdueService {
         item.taskLine = resolvedIndex;
         item.taskRawLine = lines[resolvedIndex];
         this.triggerFilesUpdated([item.file.path]);
+        logger.flow("OverdueAction", "task-line:update-done", {
+            path: item.file.path,
+            reason,
+            originalLine,
+            resolvedLine: resolvedIndex,
+            patchKeys: Object.keys(patch).sort(),
+        });
         return true;
     }
 
@@ -568,8 +747,15 @@ export class OverdueService {
     }
 
     private async moveTaskToFile(item: OverdueItem, targetFile: TFile): Promise<boolean> {
+        logger.flow("OverdueAction", "move-task:start", {
+            sourcePath: item.file.path,
+            targetPath: targetFile?.path || "",
+            taskLine: item.taskLine,
+            taskTitle: item.taskTitle || "",
+        });
         if (!(targetFile instanceof TFile) || targetFile.extension?.toLowerCase() !== "md") {
             new Notice("Choose a Markdown file.");
+            logger.flowWarn("OverdueAction", "move-task:invalid-target", { targetPath: targetFile?.path || "" });
             return false;
         }
 
@@ -578,7 +764,7 @@ export class OverdueService {
         const sourceParts = this.splitContent(sourceContent);
         const sourceIndex = this.findCurrentTaskLineIndex(sourceParts.lines, item);
         if (sourceIndex < 0) {
-            logger.warn("[NotificationMove] task line move source not found", {
+            logger.flowWarn("OverdueAction", "move-task:source-not-found", {
                 sourcePath: sourceFile.path,
                 targetPath: targetFile.path,
                 taskLine: item.taskLine,
@@ -591,7 +777,7 @@ export class OverdueService {
 
         const block = this.extractTaskBlock(sourceParts.lines, sourceIndex);
         if (!block.length) {
-            logger.warn("[NotificationMove] task block move source not found", {
+            logger.flowWarn("OverdueAction", "move-task:block-not-found", {
                 sourcePath: sourceFile.path,
                 targetPath: targetFile.path,
                 sourceIndex,
@@ -610,6 +796,13 @@ export class OverdueService {
             item.taskLine = inserted.lineIndex;
             item.taskRawLine = block[0];
             new Notice(`Moved task to the top of ${sourceFile.basename}.`);
+            logger.flow("OverdueAction", "move-task:done", {
+                route: "same-file",
+                sourcePath: sourceFile.path,
+                targetPath: targetFile.path,
+                insertedLine: inserted.lineIndex,
+                removedSource: true,
+            });
             return true;
         }
 
@@ -640,7 +833,8 @@ export class OverdueService {
             new Notice(preserved
                 ? `Copied task to ${targetFile.basename}; kept a checked scratchpad copy in ${sourceFile.basename}.`
                 : `Copied task to ${targetFile.basename}; the original daily-note line changed before it could be marked.`);
-            logger.debug("[NotificationMove] daily-note scratchpad move complete", {
+            logger.flow("OverdueAction", "move-task:done", {
+                route: "daily-note-scratchpad-copy",
                 sourcePath: sourceFile.path,
                 targetPath: targetFile.path,
                 insertedLine: targetInsertLine,
@@ -671,7 +865,8 @@ export class OverdueService {
         new Notice(removed
             ? `Moved task to ${targetFile.basename}.`
             : `Copied task to ${targetFile.basename}; the original line changed before it could be removed.`);
-        logger.debug("[NotificationMove] move complete", {
+        logger.flow("OverdueAction", "move-task:done", {
+            route: "move",
             sourcePath: sourceFile.path,
             targetPath: targetFile.path,
             insertedLine: targetInsertLine,
@@ -887,35 +1082,89 @@ export class OverdueService {
         const snoozeTimeStr = minutes > 0
             ? moment().add(minutes, "minutes").format("YYYY-MM-DD HH:mm")
             : "";
+        logger.flow("OverdueAction", "snooze-file:start", { path: file.path, minutes, snoozeKey });
         await this.app.fileManager.processFrontMatter(file, (fm) => {
-            fm[snoozeKey] = snoozeTimeStr;
+            const existingSnoozeKey = Object.keys(fm).find((key) => key.trim().toLowerCase() === snoozeKey.trim().toLowerCase());
+            if (snoozeTimeStr) {
+                fm[existingSnoozeKey || snoozeKey] = snoozeTimeStr;
+            } else if (existingSnoozeKey) {
+                delete fm[existingSnoozeKey];
+            }
         });
+        logger.flow("OverdueAction", "snooze-file:done", { path: file.path, minutes, cleared: !snoozeTimeStr });
     }
 
     openFile(file: TFile): void {
+        logger.flow("OverdueAction", "open-file", { path: file.path });
         void this.openFileAtLine(file);
     }
 
     async openItem(item: OverdueItem): Promise<void> {
+        logger.flow("OverdueAction", "open-item", {
+            path: item.file.path,
+            targetKind: item.targetKind || "note",
+            taskLine: typeof item.taskLine === "number" ? item.taskLine : -1,
+        });
         await this.openFileAtLine(item.file, item.taskLine);
     }
 
     private async openFileAtLine(file: TFile, lineNumber?: number): Promise<void> {
-        const leaf = this.app.workspace.getLeaf(false);
-        if (!leaf) return;
-
         const safeLine = typeof lineNumber === "number" && Number.isFinite(lineNumber)
             ? Math.max(0, Math.floor(lineNumber))
             : undefined;
-        await leaf.openFile(file, {
-            active: true,
-            eState: safeLine !== undefined ? { line: safeLine } : undefined,
-        });
-        this.app.workspace.revealLeaf(leaf);
+        const gcm = (this.app as any).plugins?.plugins?.["tps-global-context-menu"] as
+            | { openFileInLeaf?: (file: TFile, context: false, getLeaf: () => WorkspaceLeaf | null, options?: { revealLeaf?: boolean; active?: boolean }) => Promise<boolean> }
+            | undefined;
 
+        let leaf: WorkspaceLeaf | null = null;
+        const opened = gcm?.openFileInLeaf
+            ? await gcm.openFileInLeaf(file, false, () => this.app.workspace.getLeaf(false), {
+                active: true,
+                revealLeaf: true,
+            })
+            : false;
+        logger.flow("OverdueAction", "open-file:route", {
+            path: file.path,
+            line: safeLine ?? -1,
+            route: opened ? "gcm-open-file-in-leaf" : "workspace-open-file",
+        });
+
+        if (opened) {
+            leaf = this.findOpenMarkdownLeaf(file) ?? this.app.workspace.activeLeaf;
+        } else {
+            leaf = this.app.workspace.getLeaf(true);
+            if (!leaf) {
+                logger.flowWarn("OverdueAction", "open-file:no-leaf", { path: file.path });
+                return;
+            }
+            await leaf.openFile(file, {
+                active: true,
+                eState: safeLine !== undefined ? { line: safeLine } : undefined,
+            });
+            this.app.workspace.setActiveLeaf(leaf, { focus: true } as any);
+            this.app.workspace.revealLeaf(leaf);
+        }
+
+        if (!leaf) {
+            logger.flowWarn("OverdueAction", "open-file:no-open-leaf", { path: file.path });
+            return;
+        }
         if (safeLine !== undefined) {
             await this.revealEditorLine(leaf, safeLine);
         }
+        logger.flow("OverdueAction", "open-file:done", { path: file.path, line: safeLine ?? -1 });
+    }
+
+    private findOpenMarkdownLeaf(file: TFile): WorkspaceLeaf | null {
+        let match: WorkspaceLeaf | null = null;
+        this.app.workspace.iterateAllLeaves((leaf) => {
+            if (match) return;
+            const viewFile = (leaf.view as any)?.file;
+            if (viewFile instanceof TFile && viewFile.path === file.path) {
+                match = leaf;
+            }
+        });
+        return match;
     }
 
     private async revealEditorLine(leaf: WorkspaceLeaf, lineNumber: number): Promise<void> {
@@ -979,10 +1228,12 @@ export class OverdueService {
     }
 
     async markFileComplete(file: TFile): Promise<void> {
+        logger.flow("OverdueAction", "mark-file-complete:start", { path: file.path });
         const bulkEditService = this.getGcmBulkEditService();
         if (typeof bulkEditService?.setStatus === "function") {
             await bulkEditService.setStatus([file], "complete");
             this.triggerFilesUpdated([file.path]);
+            logger.flow("OverdueAction", "mark-file-complete:done", { path: file.path, route: "gcm-set-status" });
             return;
         }
 
@@ -994,9 +1245,11 @@ export class OverdueService {
             fm.completedDate = now;
         });
         this.triggerFilesUpdated([file.path]);
+        logger.flow("OverdueAction", "mark-file-complete:done", { path: file.path, route: "frontmatter" });
     }
 
     async markFileWontDo(file: TFile): Promise<void> {
+        logger.flow("OverdueAction", "mark-file-wont-do:start", { path: file.path });
         const now = (window as any).moment
             ? (window as any).moment().format('YYYY-MM-DD HH:mm:ss')
             : new Date().toISOString().replace('T', ' ').slice(0, 19);
@@ -1005,6 +1258,7 @@ export class OverdueService {
             fm.completedDate = now;
         });
         this.triggerFilesUpdated([file.path]);
+        logger.flow("OverdueAction", "mark-file-wont-do:done", { path: file.path, route: "frontmatter" });
     }
 
     private triggerFilesUpdated(paths: string[]): void {

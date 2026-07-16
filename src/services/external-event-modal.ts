@@ -33,6 +33,7 @@ export class ExternalEventModal extends Modal {
   }
 
   onOpen() {
+    this.modalEl.addClass("tps-keyboard-aware-modal");
     const { contentEl } = this;
     contentEl.empty();
     contentEl.addClass("external-event-modal");
@@ -176,9 +177,32 @@ export async function createMeetingNoteFromExternalEvent(
   },
   existingFile?: TFile
 ): Promise<TFile | null> {
+  const externalId = buildCalendarExternalId(app, event);
+  const logContext = {
+    title: event.title || "",
+    externalId,
+    eventId: event.id || "",
+    uid: event.uid || "",
+    sourceUrl: event.sourceUrl || "",
+    startDate: event.startDate?.toISOString?.() || "",
+    folderPath: folderPath || "",
+    templatePath: templatePath || "",
+    existingPath: existingFile?.path || "",
+  };
+  logger.flow("CreateMeetingNote", "start", {
+    ...logContext,
+    hasParent: parentFile instanceof TFile,
+    useEndDuration,
+  });
+
   // Load template (supports templater folder + relative paths)
   let templateContent = "";
   let templateFile = await resolveTemplateFromPath(app, templatePath);
+  logger.flow("CreateMeetingNote", "template:resolved", {
+    ...logContext,
+    templateFile: templateFile?.path || "",
+    configured: !!templatePath,
+  });
 
   if (templateFile) {
     const templateVars = buildExternalEventTemplateVars(null, {
@@ -196,8 +220,18 @@ export async function createMeetingNoteFromExternalEvent(
     const processed = await processTemplate(app, templateFile, templateVars);
     if (processed != null) {
       templateContent = processed;
+      logger.flow("CreateMeetingNote", "template:processed", {
+        ...logContext,
+        templateFile: templateFile.path,
+        bytes: processed.length,
+      });
     } else {
       templateContent = await app.vault.read(templateFile);
+      logger.flowWarn("CreateMeetingNote", "template:fallback-raw", {
+        ...logContext,
+        templateFile: templateFile.path,
+        bytes: templateContent.length,
+      });
     }
   }
 
@@ -210,8 +244,10 @@ export async function createMeetingNoteFromExternalEvent(
   const frontmatter: Record<string, any> = {};
   ensureInternalIdInFrontmatter(app, frontmatter);
   frontmatter[titleKey] = event.title;
-  frontmatter.externalId = buildCalendarExternalId(app, event);
-  frontmatter["allDay"] = !!event.isAllDay;
+  frontmatter.externalId = externalId;
+  if (event.isAllDay) {
+    frontmatter["allDay"] = true;
+  }
   if (event.url) {
     frontmatter.url = event.url.trim().replace(/\/+$/, "");
   }
@@ -244,15 +280,20 @@ export async function createMeetingNoteFromExternalEvent(
   if (existingFile) {
     file = existingFile;
     const existingContent = await app.vault.read(file);
+    logger.flow("CreateMeetingNote", "reuse:explicit-file", {
+      ...logContext,
+      path: file.path,
+      empty: !existingContent.trim(),
+    });
     if (!existingContent.trim()) {
       await app.vault.modify(file, bodyContent);
+      logger.flow("CreateMeetingNote", "reuse:explicit-file-body-written", { ...logContext, path: file.path });
     }
   } else {
     const resolvedEventIdKey = frontmatterKeys?.eventIdKey || "externalEventId";
-    const externalId = buildCalendarExternalId(app, event);
     const existingByExternalId = findExistingNoteByExternalId(app, externalId);
     if (existingByExternalId) {
-      logger.log(`[CreateMeetingNote] Note already exists for "${event.title}" (${externalId}) — reusing ${existingByExternalId.path}`);
+      logger.flow("CreateMeetingNote", "reuse:external-id", { ...logContext, path: existingByExternalId.path });
       return existingByExternalId;
     }
 
@@ -265,7 +306,7 @@ export async function createMeetingNoteFromExternalEvent(
         frontmatterKeys?.sourceUrlKey || "tpsCalendarSourceUrl",
       );
       if (existingByEventId) {
-        logger.log(`[CreateMeetingNote] Note already exists for "${event.title}" (${event.id}) — reusing ${existingByEventId.path}`);
+        logger.flow("CreateMeetingNote", "reuse:legacy-event-id", { ...logContext, path: existingByEventId.path });
         return existingByEventId;
       }
     }
@@ -280,7 +321,7 @@ export async function createMeetingNoteFromExternalEvent(
         folderPath || null,
       );
       if (existingByUidDate) {
-        logger.log(`[CreateMeetingNote] Found existing note by uid+date for "${event.title}" (${event.uid}) — reusing ${existingByUidDate.path}`);
+        logger.flow("CreateMeetingNote", "reuse:uid-date", { ...logContext, path: existingByUidDate.path });
         return existingByUidDate;
       }
     }
@@ -301,7 +342,7 @@ export async function createMeetingNoteFromExternalEvent(
         startProperty || "scheduled",
       );
       if (existingByTitleDay) {
-        logger.log(`[CreateMeetingNote] Found existing note by title+day for "${event.title}" — reusing ${existingByTitleDay.path}`);
+        logger.flow("CreateMeetingNote", "reuse:title-day", { ...logContext, path: existingByTitleDay.path });
         return existingByTitleDay;
       }
     }
@@ -317,9 +358,9 @@ export async function createMeetingNoteFromExternalEvent(
           // tolerate races where another process created the folder concurrently
           const nowExists = app.vault.getAbstractFileByPath(folder);
           if (nowExists) {
-            logger.debug(`[CreateMeetingNote] Folder creation raced but folder now exists: ${folder}`);
+            logger.flow("CreateMeetingNote", "folder:create-raced", { ...logContext, folder });
           } else {
-            logger.warn(`Failed to create folder ${folder}:`, e);
+            logger.flowWarn("CreateMeetingNote", "folder:create-failed", { ...logContext, folder, error: logger.errorSummary(e) });
           }
         }
       }
@@ -335,12 +376,26 @@ export async function createMeetingNoteFromExternalEvent(
       if (!existingExternalId || existingExternalId === externalId) {
         file = existingAtPath;
         const existingContent = await app.vault.read(file);
+        logger.flow("CreateMeetingNote", "reuse:path", {
+          ...logContext,
+          path: file.path,
+          existingExternalId: existingExternalId || "",
+          empty: !existingContent.trim(),
+        });
         if (!existingContent.trim()) {
           await app.vault.modify(file, bodyContent);
+          logger.flow("CreateMeetingNote", "reuse:path-body-written", { ...logContext, path: file.path });
         }
       } else {
         const availablePath = await nextAvailableMarkdownPath(app, folder, safeBasename);
+        logger.flow("CreateMeetingNote", "create:path-conflict", {
+          ...logContext,
+          deterministicPath,
+          existingPath: existingAtPath.path,
+          availablePath,
+        });
         file = await app.vault.create(availablePath, bodyContent);
+        logger.flow("CreateMeetingNote", "create:done", { ...logContext, path: file.path, route: "path-conflict-available" });
       }
     } else {
       const maxRetries = 3;
@@ -349,25 +404,26 @@ export async function createMeetingNoteFromExternalEvent(
 
       for (let attempt = 0; attempt < maxRetries; attempt++) {
         try {
-          logger.log(`[CreateMeetingNote] Attempt ${attempt + 1}/${maxRetries}: Creating file at path: ${deterministicPath}`);
+          logger.flow("CreateMeetingNote", "create:attempt", { ...logContext, attempt: attempt + 1, maxRetries, deterministicPath });
           file = await app.vault.create(deterministicPath, bodyContent);
 
           await new Promise(resolve => setTimeout(resolve, 250));
 
           try {
             await app.vault.cachedRead(file);
-            logger.log(`[CreateMeetingNote] File created and verified: ${file.path}`);
+            logger.flow("CreateMeetingNote", "create:verified", { ...logContext, path: file.path, attempt: attempt + 1 });
           } catch (readError) {
-            logger.warn(`[CreateMeetingNote] File created but not yet readable, waiting...`);
+            logger.flowWarn("CreateMeetingNote", "create:read-wait", { ...logContext, path: file.path, error: logger.errorSummary(readError) });
             await new Promise(resolve => setTimeout(resolve, 250));
             try {
               await app.vault.cachedRead(file);
             } catch (finalError) {
-              logger.warn(`[CreateMeetingNote] File still not readable after wait, continuing anyway: ${deterministicPath}`);
+              logger.flowWarn("CreateMeetingNote", "create:read-still-pending", { ...logContext, deterministicPath, error: logger.errorSummary(finalError) });
             }
           }
 
           lastError = null;
+          logger.flow("CreateMeetingNote", "create:done", { ...logContext, path: file.path, route: "created", attempt: attempt + 1 });
           break;
         } catch (error: any) {
           lastError = error;
@@ -378,6 +434,7 @@ export async function createMeetingNoteFromExternalEvent(
             if (racedFile instanceof TFile) {
               file = racedFile;
               lastError = null;
+              logger.flow("CreateMeetingNote", "create:recovered-race-path", { ...logContext, path: file.path, attempt: attempt + 1 });
               break;
             }
 
@@ -385,7 +442,7 @@ export async function createMeetingNoteFromExternalEvent(
             if (byBasename) {
               file = byBasename;
               lastError = null;
-              logger.log(`[CreateMeetingNote] Recovered existing file by basename after create conflict: ${file.path}`);
+              logger.flow("CreateMeetingNote", "create:recovered-basename", { ...logContext, path: file.path, attempt: attempt + 1 });
               break;
             }
 
@@ -393,7 +450,7 @@ export async function createMeetingNoteFromExternalEvent(
             continue;
           }
 
-          logger.warn(`[CreateMeetingNote] Attempt ${attempt + 1} failed: ${errorMessage}`);
+          logger.flowWarn("CreateMeetingNote", "create:attempt-failed", { ...logContext, attempt: attempt + 1, error: errorMessage });
           await new Promise(resolve => setTimeout(resolve, retryDelayMs));
         }
       }
@@ -403,18 +460,18 @@ export async function createMeetingNoteFromExternalEvent(
         const racedFileFinal = app.vault.getAbstractFileByPath(deterministicPath) || findFileByPathInsensitive(app, deterministicPath);
         if (racedFileFinal instanceof TFile) {
           file = racedFileFinal;
-          logger.log(`[CreateMeetingNote] Recovered raced-created file: ${file.path}`);
+          logger.flow("CreateMeetingNote", "create:recovered-final-path", { ...logContext, path: file.path });
         } else {
           const byBasename = findFileByBasenameInFolder(app, folder, safeBasename);
           if (byBasename) {
             file = byBasename;
-            logger.log(`[CreateMeetingNote] Recovered existing file by basename on final lookup: ${file.path}`);
+            logger.flow("CreateMeetingNote", "create:recovered-final-basename", { ...logContext, path: file.path });
           }
         }
 
         if (!file) {
           const errorMsg = lastError?.message || "Unknown error";
-          logger.error(`[CreateMeetingNote] Failed to create file after ${maxRetries} attempts: ${errorMsg}`);
+          logger.flowError("CreateMeetingNote", "create:failed", lastError || new Error(errorMsg), { ...logContext, maxRetries, deterministicPath });
           throw new Error(`Failed to create meeting note after ${maxRetries} attempts: ${errorMsg}`);
         }
       }
@@ -430,8 +487,6 @@ export async function createMeetingNoteFromExternalEvent(
     if (normalizedCalendarTag) {
       fm.tags = mergeTagInputs(fm.tags, normalizedCalendarTag);
     }
-    const resolvedFolderPath = file.parent?.path || "/";
-    setFrontmatterValueCaseInsensitive(fm, "folderPath", resolvedFolderPath);
 
     deleteFrontmatterValueCaseInsensitive(fm, titleKey);
     deleteFrontmatterValueCaseInsensitive(fm, frontmatterKeys?.eventIdKey || "externalEventId");
@@ -444,15 +499,30 @@ export async function createMeetingNoteFromExternalEvent(
       setFrontmatterValueCaseInsensitive(fm, key, value);
     }
   });
+  logger.flow("CreateMeetingNote", "frontmatter:applied", {
+    ...logContext,
+    path: file.path,
+    keys: Object.keys(frontmatter).sort(),
+  });
 
 
   // Create bidirectional link if parent file is provided
   if (parentFile && parentLinkKey && childLinkKey) {
     try {
       await createBidirectionalLink(app, file, parentFile, parentLinkKey, childLinkKey);
-      logger.log(`[CreateMeetingNote] Created bidirectional link: ${file.basename} ↔ ${parentFile.basename}`);
+      logger.flow("CreateMeetingNote", "parent-link:done", {
+        ...logContext,
+        path: file.path,
+        parentPath: parentFile.path,
+        parentLinkKey,
+        childLinkKey,
+      });
     } catch (error) {
-      logger.error(`[CreateMeetingNote] Failed to create bidirectional link:`, error);
+      logger.flowError("CreateMeetingNote", "parent-link:failed", error, {
+        ...logContext,
+        path: file.path,
+        parentPath: parentFile.path,
+      });
       // Don't fail the entire operation if linking fails
     }
   }
@@ -461,6 +531,7 @@ export async function createMeetingNoteFromExternalEvent(
 
   app.workspace.trigger('tps-file-created', file, { subtypeId });
   app.workspace.trigger('tps-calendar:file-created', file, { subtypeId });
+  logger.flow("CreateMeetingNote", "done", { ...logContext, path: file.path });
 
   return file;
 }
@@ -475,11 +546,15 @@ export async function createMeetingNoteFromExternalEvent(
  */
 async function runTemplaterOnFile(app: App, file: TFile): Promise<void> {
   const templater = getPluginById(app, 'templater-obsidian') as any;
-  if (!templater?.templater) return;
+  if (!templater?.templater) {
+    logger.flow("CreateMeetingNote", "templater:unavailable", { path: file.path });
+    return;
+  }
   try {
     await templater.templater.overwrite_file_commands(file, false);
+    logger.flow("CreateMeetingNote", "templater:done", { path: file.path });
   } catch (e) {
-    logger.warn('[CreateMeetingNote] Templater failed to process file (non-fatal):', file.path, e);
+    logger.flowWarn("CreateMeetingNote", "templater:failed", { path: file.path, error: logger.errorSummary(e) });
   }
 }
 
@@ -495,7 +570,7 @@ async function processTemplate(app: App, templateFile: TFile, vars: TemplateVars
     const raw = await app.vault.read(templateFile);
     return applyTemplateVars(raw, vars);
   } catch (e) {
-    logger.error("[ExternalEvent] Template processing failed", e);
+    logger.flowError("CreateMeetingNote", "template:process-failed", e, { templatePath: templateFile.path });
     new Notice(`⚠️ Calendar Base: Error processing template "${templateFile.basename}".\n${getErrorMessage(e)}`);
     return null;
   }

@@ -3,6 +3,19 @@ import ICAL from 'ical.js';
 import { moment } from 'obsidian';
 import * as logger from "../logger";
 import { ExternalCalendarEvent } from "../types";
+import { isCancelledCalendarTitle } from "./external-calendar-cancellation";
+
+interface ICalParseStats {
+    vevents: number;
+    parsedComponents: number;
+    recurrenceExceptions: number;
+    recurringMasters: number;
+    cancelledSkipped: number;
+    outOfRangeSkipped: number;
+    preparseErrors: number;
+    eventErrors: number;
+    pushedEvents: number;
+}
 
 export class ICalParserService {
     public static warnedZones: Set<string> = new Set();
@@ -28,19 +41,49 @@ export class ICalParserService {
         includeCancelled: boolean = false
     ): ExternalCalendarEvent[] {
         const events: ExternalCalendarEvent[] = [];
+        const stats: ICalParseStats = {
+            vevents: 0,
+            parsedComponents: 0,
+            recurrenceExceptions: 0,
+            recurringMasters: 0,
+            cancelledSkipped: 0,
+            outOfRangeSkipped: 0,
+            preparseErrors: 0,
+            eventErrors: 0,
+            pushedEvents: 0,
+        };
+        const context = {
+            rangeStart: rangeStart?.toISOString() || "",
+            rangeEnd: rangeEnd?.toISOString() || "",
+            includeCancelled,
+        };
         try {
             if (!icalData || typeof icalData !== 'string') {
+                logger.flowWarn("ICalParser", "parse:invalid-input", {
+                    ...context,
+                    type: typeof icalData,
+                });
                 return [];
             }
 
             const trimmed = icalData.trim();
             if (!trimmed.toUpperCase().includes('BEGIN:VCALENDAR')) {
+                logger.flowWarn("ICalParser", "parse:not-calendar", {
+                    ...context,
+                    bytes: icalData.length,
+                });
                 return [];
             }
 
             const jcalData = ICAL.parse(icalData);
             const comp = new ICAL.Component(jcalData);
             const vevents = comp.getAllSubcomponents('vevent');
+            stats.vevents = vevents.length;
+            logger.flow("ICalParser", "parse:start", {
+                ...context,
+                bytes: icalData.length,
+                vevents: stats.vevents,
+            });
 
 
             const exceptions = new Map<string, ICAL.Time[]>();
@@ -51,11 +94,14 @@ export class ICalParserService {
                 try {
                     const event = new ICAL.Event(vevent);
                     parsedEvents.push({ event, vevent });
+                    stats.parsedComponents++;
 
                     const hasRecurrenceRule = !!vevent.getFirstProperty('rrule') || !!vevent.getFirstProperty('rdate');
                     const isRecurringMaster = (event.isRecurring() || hasRecurrenceRule) && !event.recurrenceId;
+                    if (isRecurringMaster) stats.recurringMasters++;
 
                     if (event.recurrenceId) {
+                        stats.recurrenceExceptions++;
                         const uid = event.uid;
                         if (!exceptions.has(uid)) {
                             exceptions.set(uid, []);
@@ -63,7 +109,8 @@ export class ICalParserService {
                         exceptions.get(uid)?.push(event.recurrenceId);
                     }
                 } catch (e) {
-                    logger.warn('[ICalParser] Error pre-parsing event:', e);
+                    stats.preparseErrors++;
+                    logger.flowWarn("ICalParser", "event:preparse-failed", { error: logger.errorSummary(e) });
                 }
             }
 
@@ -75,17 +122,21 @@ export class ICalParserService {
                     const rawStatus = this.extractString(vevent, 'status', '');
                     const status = (typeof rawStatus === 'string' ? rawStatus : '').trim().toUpperCase();
 
+                    const summary = this.extractString(vevent, 'summary', 'Untitled Event');
                     const isExplicitCancelled = status === 'CANCELLED' || status === 'CANCELED';
                     const hasRecurrenceRule = !!vevent.getFirstProperty('rrule') || !!vevent.getFirstProperty('rdate');
                     const isRecurringMaster = (event.isRecurring() || hasRecurrenceRule) && !event.recurrenceId;
 
-                    const isCancelled = !!statusProp && isExplicitCancelled && !isRecurringMaster;
+                    // Outlook sometimes publishes cancellation only as a summary prefix,
+                    // including on recurring masters, without STATUS:CANCELLED.
+                    const isCancelled = (!!statusProp && isExplicitCancelled && !isRecurringMaster)
+                        || isCancelledCalendarTitle(summary);
 
                     if (isCancelled && !includeCancelled) {
+                        stats.cancelledSkipped++;
                         continue;
                     }
 
-                    const summary = this.extractString(vevent, 'summary', 'Untitled Event');
                     const description = this.extractString(vevent, 'description', '');
                     const location = this.extractString(vevent, 'location', '');
                     const uid = this.extractString(vevent, 'uid', `${event.startDate.toUnixTime()}`);
@@ -194,7 +245,7 @@ export class ICalParserService {
                             // producing different IDs across syncs.
                             const occurrenceId = `${uid}-${this.icalTimeToStableString(next)}`;
 
-                            this.pushEvent(
+                            if (!this.pushEvent(
                                 events,
                                 startDate,
                                 endDate,
@@ -212,7 +263,11 @@ export class ICalParserService {
                                 },
                                 rangeStart,
                                 rangeEnd
-                            );
+                            )) {
+                                stats.outOfRangeSkipped++;
+                            } else {
+                                stats.pushedEvents++;
+                            }
                         }
                     } else {
                         // Single Event
@@ -235,7 +290,7 @@ export class ICalParserService {
                             stableId = `${uid}-${this.icalTimeToStableString(event.startDate)}`;
                         }
 
-                        this.pushEvent(
+                        if (!this.pushEvent(
                             events,
                             startDate,
                             endDate,
@@ -243,16 +298,30 @@ export class ICalParserService {
                             { uid, id: stableId, summary, description, location, organizer, attendees, url, isCancelled },
                             rangeStart,
                             rangeEnd
-                        );
+                        )) {
+                            stats.outOfRangeSkipped++;
+                        } else {
+                            stats.pushedEvents++;
+                        }
                     }
                 } catch (innerError) {
-                    logger.warn('[ICalParser] Error parsing single event:', innerError);
+                    stats.eventErrors++;
+                    logger.flowWarn("ICalParser", "event:parse-failed", { error: logger.errorSummary(innerError) });
                     continue;
                 }
             }
+            logger.flow("ICalParser", "parse:done", {
+                ...context,
+                ...stats,
+                events: events.length,
+            });
             return events;
         } catch (error) {
-            logger.error('[ICalParser] Error parsing iCal data:', error);
+            logger.flowError("ICalParser", "parse:failed", error, {
+                ...context,
+                ...stats,
+                events: events.length,
+            });
             // Return whatever we scraped so far instead of empty array
             return events;
         }
@@ -283,7 +352,7 @@ export class ICalParserService {
             }
 
             if (!ICalParserService.warnedZones.has(targetTzid)) {
-                logger.warn('[ICalParser] moment-timezone conversion failed', {
+                logger.flowWarn("ICalParser", "timezone:moment-conversion-failed", {
                     isoString,
                     targetTzid,
                     fallback: 'using manual offset calculation'
@@ -292,7 +361,7 @@ export class ICalParserService {
             }
         } else if (targetTzid) {
             if (!ICalParserService.warnedZones.has(targetTzid)) {
-                logger.warn('[ICalParser] moment-timezone not available or zone not found', {
+                logger.flowWarn("ICalParser", "timezone:zone-unavailable", {
                     targetTzid,
                     momentTzAvailable: !!(moment as any).tz
                 });
@@ -309,7 +378,10 @@ export class ICalParserService {
                     return resolvedDate;
                 }
             } catch (error) {
-                logger.warn('[ICalParser] Manual timezone offset calculation failed', { targetTzid });
+                logger.flowWarn("ICalParser", "timezone:manual-offset-failed", {
+                    targetTzid,
+                    error: logger.errorSummary(error),
+                });
             }
         }
 
@@ -418,7 +490,10 @@ export class ICalParserService {
         }
 
         const estimated = Math.ceil((endMs - startMs) / msPer) + 10;
-        const capped = Math.min(200000, Math.max(baseMax, estimated));
+        // Match Calendar Base's hard guard so sync and rendered views cannot
+        // disagree solely because one service expands an unbounded dense rule.
+        const HARD_MAX_ITERATIONS = 10000;
+        const capped = Math.min(HARD_MAX_ITERATIONS, Math.max(baseMax, estimated));
         return capped;
     }
 
@@ -440,9 +515,9 @@ export class ICalParserService {
         },
         rangeStart?: Date,
         rangeEnd?: Date
-    ): void {
-        if (rangeStart && endDate < rangeStart) return;
-        if (rangeEnd && startDate > rangeEnd) return;
+    ): boolean {
+        if (rangeStart && endDate < rangeStart) return false;
+        if (rangeEnd && startDate > rangeEnd) return false;
 
         events.push({
             id: props.id || `${props.uid}-${startDate.getTime()}`,
@@ -458,6 +533,7 @@ export class ICalParserService {
             url: props.url,
             isCancelled: props.isCancelled,
         });
+        return true;
     }
 
     private extractString(vevent: ICAL.Component, propName: string, fallback: string): string {

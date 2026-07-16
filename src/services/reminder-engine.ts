@@ -10,7 +10,7 @@ import { normalizeCalendarUrl, parseFrontmatterDate } from "../utils";
 import {
     parseDate, parseTimeRange, parseDuration, getEffectiveEndTime,
     formatTemplate, formatRemaining, checkStopCondition,
-    normalizeStatus, getStatuses, hasRequiredStatus, shouldIgnoreForReminder,
+    normalizeStatus, getStatuses, hasRequiredStatus, hasRequiredCheckboxState, shouldIgnoreForReminder,
     isAllDayEvent, hasExplicitTimeInValue, getReminderTriggerBase,
 } from "../utils/time-calculation-service";
 import {
@@ -21,6 +21,10 @@ import {
 } from "./reminder-target-service";
 import { ExternalCalendarService } from "./external-calendar-service";
 import { getReminderCandidateFiles as discoverReminderCandidateFiles } from "./reminder-candidate-service";
+import {
+    getFileReminderLiveWindowMs,
+    shouldSkipStaleOneShotReminder,
+} from "./reminder-delivery-window";
 
 export interface PendingNotification {
     title: string;
@@ -49,6 +53,27 @@ interface LocalEventMatchIndex {
     terminalTitleKeys: Set<string>;
 }
 
+interface ReminderEvaluationStats {
+    candidateFiles: number;
+    activeFiles: number;
+    archivedFiles: number;
+    activeRules: number;
+    filesProcessed: number;
+    fileErrors: number;
+    targetsBuilt: number;
+    targetsEvaluated: number;
+    suppressedNoteRows: number;
+    externalUrls: number;
+    externalEventsFetched: number;
+    externalHidden: number;
+    externalMatchedLocal: number;
+    externalDuplicate: number;
+    externalTargets: number;
+    externalFetchErrors: number;
+    notificationsQueued: number;
+    skipReasons: Record<string, number>;
+}
+
 export class ReminderEngine {
     private app: App;
     private externalCalendarService: ExternalCalendarService;
@@ -66,19 +91,48 @@ export class ReminderEngine {
 
         const files = await this.getReminderCandidateFiles(settings);
         const activeFiles = files.filter((file) => !this.isArchivedFile(file, settings.archiveFolder));
+        const activeRules = settings.reminders.filter((r) => r.enabled).length;
         const needsExternalEvents = settings.reminders.some(
             (reminder) => reminder.enabled && this.reminderIncludesSource(reminder, "external-event"),
         );
+        const stats: ReminderEvaluationStats = {
+            candidateFiles: files.length,
+            activeFiles: activeFiles.length,
+            archivedFiles: files.length - activeFiles.length,
+            activeRules,
+            filesProcessed: 0,
+            fileErrors: 0,
+            targetsBuilt: 0,
+            targetsEvaluated: 0,
+            suppressedNoteRows: 0,
+            externalUrls: 0,
+            externalEventsFetched: 0,
+            externalHidden: 0,
+            externalMatchedLocal: 0,
+            externalDuplicate: 0,
+            externalTargets: 0,
+            externalFetchErrors: 0,
+            notificationsQueued: 0,
+            skipReasons: {},
+        };
 
         if (settings.enableLogging) {
-            logger.log(`[ReminderEngine] Checking ${activeFiles.length} files${needsExternalEvents ? " + unmatched external events" : ""}...`);
+            logger.flow("ReminderEngine", "scan:start", {
+                candidateFiles: stats.candidateFiles,
+                activeFiles: stats.activeFiles,
+                archivedFiles: stats.archivedFiles,
+                activeRules: stats.activeRules,
+                includeExternalEvents: needsExternalEvents,
+            });
         }
 
         for (const file of activeFiles) {
             try {
+                stats.filesProcessed++;
                 const cache = this.app.metadataCache.getFileCache(file);
                 const fm = (cache?.frontmatter || {}) as Record<string, unknown>;
                 const targets = await buildReminderTargetsForFile(this.app, file, fm, settings);
+                stats.targetsBuilt += targets.length;
                 const fileNotifications: PendingNotification[] = [];
 
                 for (const target of targets) {
@@ -90,20 +144,24 @@ export class ReminderEngine {
                         settings,
                         now,
                         alertState,
+                        stats,
                     });
                     fileNotifications.push(...result.notifications);
                     stateChanged = stateChanged || result.stateChanged;
                 }
                 const suppression = this.suppressNoteNotificationsBackedByTaskNotifications(fileNotifications, alertState);
+                stats.suppressedNoteRows += Math.max(0, fileNotifications.length - suppression.notifications.length);
                 pendingNotifications.push(...suppression.notifications);
                 stateChanged = stateChanged || suppression.stateChanged;
             } catch (err) {
-                logger.error(`[ReminderEngine] Error processing reminders for ${file.path}:`, err);
+                stats.fileErrors++;
+                logger.flowError("ReminderEngine", "file:error", err, { path: file.path });
             }
         }
 
         if (needsExternalEvents) {
-            const externalTargets = await this.buildUnmatchedExternalReminderTargets(files, settings);
+            const externalTargets = await this.buildUnmatchedExternalReminderTargets(files, settings, stats);
+            stats.externalTargets = externalTargets.length;
             for (const target of externalTargets) {
                 const event = target.externalEvent;
                 if (!event) continue;
@@ -117,6 +175,7 @@ export class ReminderEngine {
                     now,
                     alertState,
                     reminderFilter: (reminder) => this.reminderIncludesSource(reminder, "external-event"),
+                    stats,
                 });
                 pendingNotifications.push(...result.notifications);
                 stateChanged = stateChanged || result.stateChanged;
@@ -124,11 +183,12 @@ export class ReminderEngine {
         }
 
         if (settings.enableLogging) {
-            const notifSummary = pendingNotifications.length > 0
-                ? `${pendingNotifications.length} notification(s) queued`
-                : "no notifications triggered";
-            const activeRules = settings.reminders.filter((r) => r.enabled).length;
-            logger.log(`[ReminderEngine] Scan complete: ${notifSummary} (${activeFiles.length} files, ${activeRules} active rule(s))`);
+            stats.notificationsQueued = pendingNotifications.length;
+            logger.flow("ReminderEngine", "scan:done", {
+                ...stats,
+                stateChanged,
+                skipReasons: this.summarizeSkipReasons(stats.skipReasons),
+            });
         }
 
         return { notifications: pendingNotifications, stateChanged };
@@ -194,6 +254,7 @@ export class ReminderEngine {
         now: number;
         alertState: TPSControllerSettings["alertState"];
         reminderFilter?: (reminder: PropertyReminder) => boolean;
+        stats?: ReminderEvaluationStats;
     }): ReminderRunResult {
         const {
             target,
@@ -215,8 +276,12 @@ export class ReminderEngine {
             if (reminderFilter && !reminderFilter(reminder)) continue;
             if (!this.reminderIncludesSource(reminder, target.sourceType)) continue;
 
+            if (params.stats) params.stats.targetsEvaluated++;
             const ctx = buildEffectiveReminderContextForTarget(target, baseFrontmatter, reminder.property, settings);
-            if (!ctx) continue;
+            if (!ctx) {
+                this.countSkip(params.stats, "missing-property");
+                continue;
+            }
             const effectiveFm = ctx.frontmatter;
             const propValue = ctx.propertyValue;
 
@@ -228,13 +293,25 @@ export class ReminderEngine {
                 settings.globalIgnorePaths,
                 settings.globalIgnoreTags,
                 settings.globalIgnoreStatuses,
+                settings.globalIgnoreCheckboxStates,
             )) {
+                this.countSkip(params.stats, "ignored");
                 continue;
             }
 
             const { start: propTime, end: rangeEndTime } = parseTimeRange(propValue);
-            if (!propTime) continue;
-            if (!hasRequiredStatus(effectiveFm, reminder)) continue;
+            if (!propTime) {
+                this.countSkip(params.stats, "invalid-time");
+                continue;
+            }
+            if (!hasRequiredStatus(effectiveFm, reminder)) {
+                this.countSkip(params.stats, "status-filter");
+                continue;
+            }
+            if (!hasRequiredCheckboxState(effectiveFm, reminder)) {
+                this.countSkip(params.stats, "checkbox-filter");
+                continue;
+            }
 
             let offsetMs = reminder.offsetMinutes * 60 * 1000;
             const normalizedPropValue = this.normalizeReminderPropertyValue(propValue);
@@ -243,6 +320,7 @@ export class ReminderEngine {
                 (!hasExplicitTime || String(effectiveFm?.allDay ?? "").toLowerCase() === "true");
             const effectiveEndTime = getEffectiveEndTime(propTime, rangeEndTime, effectiveFm);
             if (reminder.mode === "timeblock" && !reminder.triggerAtEnd && effectiveEndTime && now > effectiveEndTime) {
+                this.countSkip(params.stats, "timeblock-ended");
                 continue;
             }
 
@@ -254,7 +332,10 @@ export class ReminderEngine {
                 reminder.triggerAtEnd,
                 effectiveAllDayBaseTime,
             );
-            if (!finalTriggerBase) continue;
+            if (!finalTriggerBase) {
+                this.countSkip(params.stats, "missing-trigger-base");
+                continue;
+            }
 
             if (reminder.useSmartOffset && reminder.smartOffsetProperty) {
                 const durationMins = parseDuration(effectiveFm[reminder.smartOffsetProperty]);
@@ -287,7 +368,10 @@ export class ReminderEngine {
             const snoozeVal = effectiveFm[settings.snoozeProperty || "reminderSnooze"];
             if (snoozeVal) {
                 const snoozeTime = parseDate(snoozeVal);
-                if (snoozeTime && now < snoozeTime) continue;
+                if (snoozeTime && now < snoozeTime) {
+                    this.countSkip(params.stats, "snoozed");
+                    continue;
+                }
                 if (snoozeTime) {
                     triggerKey = `${baseTriggerKey}|snooze:${snoozeTime}`;
                 }
@@ -301,15 +385,24 @@ export class ReminderEngine {
             }
 
             if (reminder.allDayFilter && reminder.allDayFilter !== "any") {
-                if (reminder.allDayFilter === "true" && !isAllDaySafe) continue;
-                if (reminder.allDayFilter === "false" && isAllDaySafe) continue;
+                if (reminder.allDayFilter === "true" && !isAllDaySafe) {
+                    this.countSkip(params.stats, "all-day-filter");
+                    continue;
+                }
+                if (reminder.allDayFilter === "false" && isAllDaySafe) {
+                    this.countSkip(params.stats, "all-day-filter");
+                    continue;
+                }
             }
 
             if (effectiveEndTime) {
                 const isWorking = getStatuses(effectiveFm).includes("working");
                 if (isWorking && now < effectiveEndTime) {
                     const requiresWorking = reminder.requiredStatuses?.some((s) => normalizeStatus(s) === "working");
-                    if (!requiresWorking) continue;
+                    if (!requiresWorking) {
+                        this.countSkip(params.stats, "working-until-end");
+                        continue;
+                    }
                 }
             }
 
@@ -322,6 +415,7 @@ export class ReminderEngine {
                     state.lastTriggerKey = undefined;
                     stateChanged = true;
                 }
+                this.countSkip(params.stats, "stop-condition");
                 continue;
             }
 
@@ -333,6 +427,7 @@ export class ReminderEngine {
                     state.repeatCount = 0;
                     stateChanged = true;
                 }
+                this.countSkip(params.stats, "future-trigger");
                 continue;
             }
 
@@ -344,22 +439,47 @@ export class ReminderEngine {
                     state.lastSent = params.now;
                     stateChanged = true;
                 }
+                this.countSkip(params.stats, "repeat-ended-at-base");
                 continue;
             }
 
             let shouldNotify = false;
             if (!state.triggered) {
-                if (!reminder.repeatUntilComplete && state.lastTriggerKey === triggerKey && state.lastSent) continue;
-                if (isExternalEvent) {
-                    const staleMs = this.getExternalEventLiveFireWindowMs(settings, isAllDaySafe);
-                    if (params.now - triggerTime > staleMs) {
-                        state.triggered = true;
-                        state.repeatCount = 0;
-                        state.lastTriggerKey = triggerKey;
-                        state.lastSent = params.now;
-                        stateChanged = true;
-                        continue;
+                if (!reminder.repeatUntilComplete && state.lastTriggerKey === triggerKey && state.lastSent) {
+                    this.countSkip(params.stats, "already-sent");
+                    continue;
+                }
+                const liveWindowMs = isExternalEvent
+                    ? this.getExternalEventLiveFireWindowMs(settings, isAllDaySafe)
+                    : getFileReminderLiveWindowMs(settings.pollMinutes);
+                if (shouldSkipStaleOneShotReminder(
+                    params.now,
+                    triggerTime,
+                    reminder.repeatUntilComplete,
+                    liveWindowMs,
+                )) {
+                    state.triggered = true;
+                    state.repeatCount = 0;
+                    state.lastTriggerKey = triggerKey;
+                    state.lastSent = undefined;
+                    stateChanged = true;
+                    this.countSkip(params.stats, isExternalEvent ? "stale-external" : "stale-one-shot");
+                    if (settings.enableLogging) {
+                        logger.flow("ReminderEngine", "notification:skipped-stale", {
+                            path: fileRef.path,
+                            sourceKey: target.sourceKey,
+                            sourceType: target.sourceType,
+                            targetKind: target.targetKind,
+                            reminderId: reminder.id,
+                            reminderLabel: reminder.label || "",
+                            triggerTime,
+                            evaluatedAt: params.now,
+                            lateByMs: params.now - triggerTime,
+                            liveWindowMs,
+                            repeatUntilComplete: false,
+                        });
                     }
+                    continue;
                 }
                 shouldNotify = true;
                 state.triggered = true;
@@ -370,18 +490,34 @@ export class ReminderEngine {
                 reminder.repeatUntilComplete &&
                 (!reminder.mode || reminder.mode === "task")
             ) {
-                if (repeatEndsAtTriggerBase && params.now >= finalTriggerBase) continue;
-                if (!hasRequiredStatus(effectiveFm, reminder)) continue;
+                if (repeatEndsAtTriggerBase && params.now >= finalTriggerBase) {
+                    this.countSkip(params.stats, "repeat-ended-at-base");
+                    continue;
+                }
+                if (!hasRequiredStatus(effectiveFm, reminder)) {
+                    this.countSkip(params.stats, "status-filter");
+                    continue;
+                }
+                if (!hasRequiredCheckboxState(effectiveFm, reminder)) {
+                    this.countSkip(params.stats, "checkbox-filter");
+                    continue;
+                }
                 const repeatMs = reminder.repeatIntervalMinutes * 60 * 1000;
                 const timeSinceLastSent = state.lastSent ? (params.now - state.lastSent) : Infinity;
                 if (timeSinceLastSent >= repeatMs && (reminder.maxRepeats === -1 || state.repeatCount < reminder.maxRepeats)) {
                     shouldNotify = true;
                     state.repeatCount++;
                     stateChanged = true;
+                } else {
+                    this.countSkip(params.stats, timeSinceLastSent < repeatMs ? "repeat-not-due" : "max-repeats");
+                    continue;
                 }
             }
 
-            if (!shouldNotify) continue;
+            if (!shouldNotify) {
+                this.countSkip(params.stats, "not-due");
+                continue;
+            }
 
             const remaining = formatRemaining(propTime - params.now);
             const timeStr = moment(propTime).format("h:mm A");
@@ -403,7 +539,18 @@ export class ReminderEngine {
             stateChanged = true;
 
             if (settings.enableLogging) {
-                logger.log(`[ReminderEngine] Firing notification: "${title}" for ${fileRef.basename} (rule: "${reminder.label || reminder.id}")`);
+                logger.flow("ReminderEngine", "notification:queued", {
+                    path: fileRef.path,
+                    sourceKey: target.sourceKey,
+                    sourceType: target.sourceType,
+                    targetKind: target.targetKind,
+                    reminderId: reminder.id,
+                    reminderLabel: reminder.label || "",
+                    title,
+                    triggerTime,
+                    isAllDay: isAllDaySafe,
+                    repeatCount: state.repeatCount,
+                });
             }
 
             break;
@@ -422,9 +569,11 @@ export class ReminderEngine {
     private async buildUnmatchedExternalReminderTargets(
         files: TFile[],
         settings: TPSControllerSettings,
+        stats?: ReminderEvaluationStats,
     ): Promise<ReminderEvaluationTarget[]> {
         const calendars = (settings.externalCalendars || []).filter((calendar) => calendar.enabled !== false);
         const urls = Array.from(new Set(calendars.map((calendar) => normalizeCalendarUrl(calendar.url)).filter(Boolean)));
+        if (stats) stats.externalUrls = urls.length;
         if (!urls.length) return [];
 
         const localIndex = await this.buildLocalEventMatchIndex(files, settings);
@@ -435,15 +584,31 @@ export class ReminderEngine {
 
         for (const url of urls) {
             try {
+                const targetsBeforeFetch = targets.length;
+                logger.flow("ReminderEngine", "external-fetch:start", {
+                    url,
+                    rangeStart: rangeStart.toISOString(),
+                    rangeEnd: rangeEnd.toISOString(),
+                });
                 const events = await this.externalCalendarService.fetchEvents(url, rangeStart, rangeEnd, false, false);
+                if (stats) stats.externalEventsFetched += events.length;
                 for (const event of events) {
                     if (event.isCancelled) continue;
-                    if (this.isExternalEventHiddenByCalendarPlugin(event, url)) continue;
-                    if (this.matchesLocalEvent(localIndex, event)) continue;
+                    if (this.isExternalEventHiddenByCalendarPlugin(event, url)) {
+                        if (stats) stats.externalHidden++;
+                        continue;
+                    }
+                    if (this.matchesLocalEvent(localIndex, event)) {
+                        if (stats) stats.externalMatchedLocal++;
+                        continue;
+                    }
 
                     const sourceUrl = normalizeCalendarUrl(event.sourceUrl || url);
                     const dedupeKey = `${sourceUrl}::${event.id}`;
-                    if (seen.has(dedupeKey)) continue;
+                    if (seen.has(dedupeKey)) {
+                        if (stats) stats.externalDuplicate++;
+                        continue;
+                    }
                     seen.add(dedupeKey);
 
                     targets.push({
@@ -455,12 +620,35 @@ export class ReminderEngine {
                         },
                     });
                 }
+                logger.flow("ReminderEngine", "external-fetch:done", {
+                    url,
+                    events: events.length,
+                    targets: targets.length - targetsBeforeFetch,
+                    hidden: stats?.externalHidden ?? 0,
+                    matchedLocal: stats?.externalMatchedLocal ?? 0,
+                    duplicates: stats?.externalDuplicate ?? 0,
+                });
             } catch (error) {
-                logger.warn(`[ReminderEngine] Failed fetching external reminder events for ${url}`, error);
+                if (stats) stats.externalFetchErrors++;
+                logger.flowWarn("ReminderEngine", "external-fetch:failed", { url, error: logger.errorSummary(error) });
             }
         }
 
         return targets;
+    }
+
+    private countSkip(stats: ReminderEvaluationStats | undefined, reason: string): void {
+        if (!stats) return;
+        stats.skipReasons[reason] = (stats.skipReasons[reason] || 0) + 1;
+    }
+
+    private summarizeSkipReasons(skipReasons: Record<string, number>): Record<string, number> {
+        return Object.fromEntries(
+            Object.entries(skipReasons)
+                .filter(([, count]) => count > 0)
+                .sort(([, a], [, b]) => b - a)
+                .slice(0, 12),
+        );
     }
 
     private isExternalEventHiddenByCalendarPlugin(event: ExternalCalendarEvent, fallbackUrl: string): boolean {

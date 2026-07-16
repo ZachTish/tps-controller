@@ -1,12 +1,12 @@
 {
     "name": "tps-controller",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "description": "Centralized controller management for TPS plugins.",
     "main": "main.js",
     "scripts": {
         "dev": "node esbuild.config.mjs",
         "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-        "test": "node --test scripts/test-tps-contracts.mjs && node --test scripts/test-identity-fields.mjs && node --test scripts/test-reminder-engine.mjs && node --test scripts/test-calendar-sync-settlement-filter.mjs && npm run build",
+        "test": "node --test scripts/test-tps-contracts.mjs && node --test scripts/test-identity-fields.mjs && node --test scripts/test-reminder-engine.mjs && node --test scripts/test-calendar-sync-settlement-filter.mjs && node --test scripts/test-calendar-service-parity.mjs && node --test scripts/test-external-calendar-cancellation.mjs && node --test scripts/test-two-stage-archive.mjs && node --test scripts/test-s3-credentials.mjs && node --test scripts/test-s3agle-attachment-automation.mjs && node --test scripts/test-sync-request-safety.mjs && node --test scripts/test-command-surface.mjs && node --test scripts/test-notebook-navigator-open-patch.mjs && npm run build",
         "version": "node version-bump.mjs && git add manifest.json versions.json"
     },
     "keywords": [],
@@ -23,6 +23,7 @@
         "typescript": "4.7.4"
     },
     "dependencies": {
+        "@aws-sdk/client-s3": "^3.1081.0",
         "ical.js": "^2.2.1"
     }
 }
