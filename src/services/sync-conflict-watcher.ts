@@ -1,15 +1,28 @@
-import { App, TFile, Notice, normalizePath, EventRef } from "obsidian";
+import { App, TFile, Notice, normalizePath } from "obsidian";
 import * as logger from "../logger";
+
+type SyncConflictCause = "vault-create" | "vault-rename" | "startup-sweep";
+
+type WatcherTimerHost = {
+    setTimeout(callback: () => void, delayMs: number): number;
+    clearTimeout(id: number): void;
+};
 
 export class SyncConflictWatcher {
     private app: App;
-    private events: EventRef[] = [];
+    private timerHost: WatcherTimerHost;
+    private eventDisposers: Array<() => void> = [];
     private archiveFolder: string = "System/Archive";
     private eventIdKey: string = "externalEventId";
-    private isSweeping = false;
+    private active = false;
+    private lifecycleGeneration = 0;
+    private startupSweepTimer: { generation: number; id: number } | null = null;
+    private activeSweep: { generation: number; promise: Promise<void> } | null = null;
+    private candidateTail: Promise<void> = Promise.resolve();
 
-    constructor(app: App) {
+    constructor(app: App, timerHost: WatcherTimerHost = window) {
         this.app = app;
+        this.timerHost = timerHost;
     }
 
     public updateConfig(archiveFolder: string, eventIdKey?: string) {
@@ -37,27 +50,45 @@ export class SyncConflictWatcher {
         return normalizedPath === duplicateFolder || normalizedPath.startsWith(`${duplicateFolder}/`);
     }
 
-    public start() {
+    public start(): void {
+        if (this.active) {
+            logger.flow("SyncConflictWatcher", "start:already-active", {
+                generation: this.lifecycleGeneration,
+            });
+            return;
+        }
+        this.active = true;
+        const generation = ++this.lifecycleGeneration;
         logger.flow("SyncConflictWatcher", "start", {
+            generation,
             archiveFolder: this.archiveFolder,
             duplicateFolder: this.getDuplicateArchiveFolder(),
             eventIdKey: this.eventIdKey,
         });
         // 1. Listen for new files being created or renamed by Sync
-        this.events.push(
-            this.app.vault.on("create", async (file) => {
-                if (file instanceof TFile && file.extension === "md") {
-                    await this.checkAndArchiveIfConflict(file, "vault-create");
-                }
-            })
-        );
-        this.events.push(
-            this.app.vault.on("rename", async (file) => {
-                if (file instanceof TFile && file.extension === "md") {
-                    await this.checkAndArchiveIfConflict(file, "vault-rename");
-                }
-            })
-        );
+        const createRef = this.app.vault.on("create", (file) => {
+            if (!this.isActiveGeneration(generation) || !(file instanceof TFile) || file.extension !== "md") return;
+            void this.enqueueCandidate(file, "vault-create", generation).catch((error) => {
+                logger.flowError("SyncConflictWatcher", "candidate:failed", error, {
+                    cause: "vault-create",
+                    path: file.path,
+                    generation,
+                });
+            });
+        });
+        this.eventDisposers.push(() => this.app.vault.offref(createRef));
+
+        const renameRef = this.app.vault.on("rename", (file) => {
+            if (!this.isActiveGeneration(generation) || !(file instanceof TFile) || file.extension !== "md") return;
+            void this.enqueueCandidate(file, "vault-rename", generation).catch((error) => {
+                logger.flowError("SyncConflictWatcher", "candidate:failed", error, {
+                    cause: "vault-rename",
+                    path: file.path,
+                    generation,
+                });
+            });
+        });
+        this.eventDisposers.push(() => this.app.vault.offref(renameRef));
 
         // 2. Do an initial sweep to catch any created while Obsidian was closed.
         // Must wait for metadataCache to be fully populated: hasCalendarIdentity()
@@ -66,75 +97,174 @@ export class SyncConflictWatcher {
         // conflict-style name would bypass the guard and be incorrectly archived.
         let startupSweepDone = false;
         const runStartupSweep = () => {
-            if (startupSweepDone) return;
+            if (startupSweepDone || !this.isActiveGeneration(generation)) return;
             startupSweepDone = true;
-            logger.flow("SyncConflictWatcher", "startup-sweep:scheduled");
-            void this.sweepVaultForConflicts();
+            this.clearStartupSweepTimer(generation);
+            logger.flow("SyncConflictWatcher", "startup-sweep:scheduled", { generation });
+            void this.requestSweep(generation).catch((error) => {
+                logger.flowError("SyncConflictWatcher", "startup-sweep:failed", error, { generation });
+            });
         };
-        this.events.push(
-            this.app.metadataCache.on("resolved", runStartupSweep),
-        );
         // Fallback: if the vault was already fully resolved before we registered
         // the event (common on subsequent loads), fire after a generous delay.
-        setTimeout(runStartupSweep, 8000);
+        const timerId = this.timerHost.setTimeout(runStartupSweep, 8000);
+        this.startupSweepTimer = { generation, id: timerId };
+
+        const resolvedRef = this.app.metadataCache.on("resolved", runStartupSweep);
+        this.eventDisposers.push(() => this.app.metadataCache.offref(resolvedRef));
     }
 
-    public stop() {
-        this.events.forEach(e => this.app.vault.offref(e));
-        const removedListeners = this.events.length;
-        this.events = [];
-        logger.flow("SyncConflictWatcher", "stop", { removedListeners });
+    public stop(): void {
+        const stoppedGeneration = this.lifecycleGeneration;
+        const wasActive = this.active;
+        this.active = false;
+        this.lifecycleGeneration += 1;
+        const clearedStartupTimer = this.clearStartupSweepTimer();
+        const disposers = this.eventDisposers.splice(0);
+        disposers.forEach((dispose, index) => {
+            try {
+                dispose();
+            } catch (error) {
+                logger.flowError("SyncConflictWatcher", "stop:listener-cleanup-failed", error, { index });
+            }
+        });
+        logger.flow("SyncConflictWatcher", "stop", {
+            wasActive,
+            stoppedGeneration,
+            invalidatedByGeneration: this.lifecycleGeneration,
+            removedListeners: disposers.length,
+            clearedStartupTimer,
+            activeSweepGeneration: this.activeSweep?.generation ?? null,
+        });
     }
 
     /**
      * Scans the entire vault ONCE at startup to catch any offline sync conflicts.
      */
-    public async sweepVaultForConflicts() {
-        if (this.isSweeping) {
-            logger.flow("SyncConflictWatcher", "sweep:skip-already-running");
+    public sweepVaultForConflicts(): Promise<void> {
+        return this.requestSweep(this.lifecycleGeneration);
+    }
+
+    private requestSweep(generation: number): Promise<void> {
+        if (!this.isActiveGeneration(generation)) {
+            logger.flow("SyncConflictWatcher", "sweep:skip-inactive", { generation });
+            return Promise.resolve();
+        }
+
+        const activeSweep = this.activeSweep;
+        if (activeSweep) {
+            if (activeSweep.generation === generation) {
+                logger.flow("SyncConflictWatcher", "sweep:skip-already-running", { generation });
+                return activeSweep.promise;
+            }
+            logger.flow("SyncConflictWatcher", "sweep:wait-prior-generation", {
+                generation,
+                priorGeneration: activeSweep.generation,
+            });
+            return activeSweep.promise.then(
+                () => this.isActiveGeneration(generation) ? this.requestSweep(generation) : undefined,
+                () => this.isActiveGeneration(generation) ? this.requestSweep(generation) : undefined,
+            );
+        }
+
+        let trackedPromise: Promise<void>;
+        trackedPromise = this.runSweep(generation).finally(() => {
+            if (this.activeSweep?.promise === trackedPromise) {
+                this.activeSweep = null;
+            }
+        });
+        this.activeSweep = { generation, promise: trackedPromise };
+        return trackedPromise;
+    }
+
+    private async runSweep(generation: number): Promise<void> {
+        const pendingCandidates = this.candidateTail;
+        await pendingCandidates;
+        if (!this.isActiveGeneration(generation)) {
+            logger.flow("SyncConflictWatcher", "sweep:cancelled", { generation, stage: "before-start" });
             return;
         }
-        this.isSweeping = true;
         const duplicateFolder = this.getDuplicateArchiveFolder();
         let scanned = 0;
         let conflictNamed = 0;
         let archivedCount = 0;
-        try {
-            const files = this.app.vault.getMarkdownFiles();
-            logger.flow("SyncConflictWatcher", "sweep:start", {
-                files: files.length,
-                duplicateFolder,
-            });
+        const files = this.app.vault.getMarkdownFiles();
+        logger.flow("SyncConflictWatcher", "sweep:start", {
+            generation,
+            files: files.length,
+            duplicateFolder,
+        });
 
-            for (const file of files) {
-                // Quick ignore for our own archive folder
-                if (this.isInDuplicateArchiveFolder(file.path)) continue;
-                scanned++;
-                if (this.isConflictName(file.basename)) conflictNamed++;
-
-                const archived = await this.checkAndArchiveIfConflict(file, "startup-sweep");
-                if (archived) archivedCount++;
+        for (const file of files) {
+            if (!this.isActiveGeneration(generation)) {
+                logger.flow("SyncConflictWatcher", "sweep:cancelled", {
+                    generation,
+                    stage: "before-file",
+                    scanned,
+                    conflictNamed,
+                    archived: archivedCount,
+                });
+                return;
             }
+            // Quick ignore for our own archive folder
+            if (this.isInDuplicateArchiveFolder(file.path)) continue;
+            scanned++;
+            if (this.isConflictName(file.basename)) conflictNamed++;
 
-            if (archivedCount > 0) {
-                new Notice(`Controller: Archived ${archivedCount} sync conflicts on startup.`);
+            const archived = await this.enqueueCandidate(file, "startup-sweep", generation);
+            if (!this.isActiveGeneration(generation)) {
+                logger.flow("SyncConflictWatcher", "sweep:cancelled", {
+                    generation,
+                    stage: "after-file",
+                    scanned,
+                    conflictNamed,
+                    archived: archivedCount,
+                });
+                return;
             }
-            logger.flow("SyncConflictWatcher", "sweep:done", {
+            if (archived) archivedCount++;
+        }
+
+        if (!this.isActiveGeneration(generation)) {
+            logger.flow("SyncConflictWatcher", "sweep:cancelled", {
+                generation,
+                stage: "before-completion",
                 scanned,
                 conflictNamed,
                 archived: archivedCount,
-                duplicateFolder,
             });
-        } finally {
-            this.isSweeping = false;
+            return;
         }
+        if (archivedCount > 0) {
+            new Notice(`Controller: Archived ${archivedCount} sync conflicts on startup.`);
+        }
+        logger.flow("SyncConflictWatcher", "sweep:done", {
+            generation,
+            scanned,
+            conflictNamed,
+            archived: archivedCount,
+            duplicateFolder,
+        });
+    }
+
+    private enqueueCandidate(file: TFile, cause: SyncConflictCause, generation: number): Promise<boolean> {
+        const candidate = this.candidateTail.then(() => {
+            if (!this.isActiveGeneration(generation)) return false;
+            return this.checkAndArchiveIfConflict(file, cause, generation);
+        });
+        this.candidateTail = candidate.then(
+            () => undefined,
+            () => undefined,
+        );
+        return candidate;
     }
 
     /**
      * Checks if a file has a conflict-style name and if its canonical parent exists.
      * If so, safely archives it.
      */
-    private async checkAndArchiveIfConflict(file: TFile, cause: "vault-create" | "vault-rename" | "startup-sweep"): Promise<boolean> {
+    private async checkAndArchiveIfConflict(file: TFile, cause: SyncConflictCause, generation: number): Promise<boolean> {
+        if (!this.isActiveGeneration(generation)) return false;
         // Must match standard Sync conflict patterns
         if (!this.isConflictName(file.basename)) return false;
         logger.flow("SyncConflictWatcher", "check:start", {
@@ -180,7 +310,8 @@ export class SyncConflictWatcher {
 
         // Only archive this conflict IF the canonical note is still safely in the vault
         if (canonicalFile && canonicalFile instanceof TFile) {
-            return await this.archiveDuplicate(file, cause, expectedCanonicalPath);
+            if (!this.isActiveGeneration(generation)) return false;
+            return await this.archiveDuplicate(file, cause, expectedCanonicalPath, generation);
         }
 
         logger.flow("SyncConflictWatcher", "check:skip-missing-canonical", {
@@ -219,13 +350,24 @@ export class SyncConflictWatcher {
 
     private async archiveDuplicate(
         file: TFile,
-        cause: "vault-create" | "vault-rename" | "startup-sweep",
+        cause: SyncConflictCause,
         expectedCanonicalPath: string,
+        generation: number,
     ): Promise<boolean> {
+        if (!this.isActiveGeneration(generation)) return false;
         const dupFolder = this.getDuplicateArchiveFolder();
         const originalPath = file.path;
         try {
-            await this.ensureFolderExists(dupFolder);
+            await this.ensureFolderExists(dupFolder, generation);
+            if (!this.isActiveGeneration(generation)) {
+                logger.flow("SyncConflictWatcher", "archive:cancelled", {
+                    cause,
+                    path: originalPath,
+                    generation,
+                    stage: "after-folder",
+                });
+                return false;
+            }
             const baseName = this.getCanonicalBaseName(file.basename);
 
             let newPath = normalizePath(`${dupFolder}/${baseName} duplicate.${file.extension}`);
@@ -239,6 +381,16 @@ export class SyncConflictWatcher {
                 counter++;
             }
 
+            if (!this.isActiveGeneration(generation)) {
+                logger.flow("SyncConflictWatcher", "archive:cancelled", {
+                    cause,
+                    path: originalPath,
+                    generation,
+                    stage: "before-rename",
+                });
+                return false;
+            }
+
             logger.flow("SyncConflictWatcher", "archive:start", {
                 cause,
                 path: originalPath,
@@ -247,6 +399,16 @@ export class SyncConflictWatcher {
                 collisionCount: counter - 1,
             });
             await this.app.vault.rename(file, newPath);
+            if (!this.isActiveGeneration(generation)) {
+                logger.flowWarn("SyncConflictWatcher", "archive:completed-after-stop", {
+                    cause,
+                    originalPath,
+                    targetPath: newPath,
+                    expectedCanonicalPath,
+                    generation,
+                });
+                return false;
+            }
             logger.flowWarn("SyncConflictWatcher", "archive:done", {
                 cause,
                 originalPath,
@@ -266,17 +428,27 @@ export class SyncConflictWatcher {
         }
     }
 
-    private async ensureFolderExists(folderPath: string): Promise<void> {
+    private async ensureFolderExists(folderPath: string, generation: number): Promise<void> {
+        if (!this.isActiveGeneration(generation)) return;
         if (!folderPath || folderPath === "/") return;
         const normalizedPath = normalizePath(folderPath);
         const folder = this.app.vault.getAbstractFileByPath(normalizedPath);
         if (!folder) {
             const parent = normalizedPath.substring(0, normalizedPath.lastIndexOf("/"));
             if (parent) {
-                await this.ensureFolderExists(parent);
+                await this.ensureFolderExists(parent, generation);
             }
+            if (!this.isActiveGeneration(generation)) return;
             try {
+                if (!this.isActiveGeneration(generation)) return;
                 await this.app.vault.createFolder(normalizedPath);
+                if (!this.isActiveGeneration(generation)) {
+                    logger.flow("SyncConflictWatcher", "folder:created-after-stop", {
+                        path: normalizedPath,
+                        generation,
+                    });
+                    return;
+                }
                 logger.flow("SyncConflictWatcher", "folder:created", { path: normalizedPath });
             } catch (e: any) {
                 if (!(typeof e.message === "string" && e.message.toLowerCase().includes("already exists"))) {
@@ -285,5 +457,17 @@ export class SyncConflictWatcher {
                 logger.flow("SyncConflictWatcher", "folder:create-raced", { path: normalizedPath });
             }
         }
+    }
+
+    private isActiveGeneration(generation: number): boolean {
+        return this.active && generation === this.lifecycleGeneration;
+    }
+
+    private clearStartupSweepTimer(generation?: number): boolean {
+        const timer = this.startupSweepTimer;
+        if (!timer || (generation !== undefined && timer.generation !== generation)) return false;
+        this.timerHost.clearTimeout(timer.id);
+        this.startupSweepTimer = null;
+        return true;
     }
 }

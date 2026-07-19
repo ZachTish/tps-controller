@@ -182,13 +182,18 @@ test("sync request and conflict logging records cross-device causes and mutation
   assert.match(syncRequestServiceSource, /"ack:stale-generation"/);
 
   assert.match(syncConflictWatcherSource, /logger\.flow\("SyncConflictWatcher", "start"/);
+  assert.match(syncConflictWatcherSource, /logger\.flow\("SyncConflictWatcher", "start:already-active"/);
+  assert.match(syncConflictWatcherSource, /this\.app\.metadataCache\.offref\(resolvedRef\)/);
   assert.match(syncConflictWatcherSource, /logger\.flow\("SyncConflictWatcher", "sweep:start"/);
   assert.match(syncConflictWatcherSource, /logger\.flow\("SyncConflictWatcher", "sweep:done"/);
+  assert.match(syncConflictWatcherSource, /logger\.flow\("SyncConflictWatcher", "sweep:wait-prior-generation"/);
+  assert.match(syncConflictWatcherSource, /logger\.flow\("SyncConflictWatcher", "sweep:cancelled"/);
   assert.match(syncConflictWatcherSource, /logger\.flow\("SyncConflictWatcher", "check:start"/);
   assert.match(syncConflictWatcherSource, /logger\.flow\("SyncConflictWatcher", "check:skip-calendar-identity"/);
   assert.match(syncConflictWatcherSource, /logger\.flow\("SyncConflictWatcher", "check:canonical-resolved"/);
   assert.match(syncConflictWatcherSource, /logger\.flow\("SyncConflictWatcher", "archive:start"/);
   assert.match(syncConflictWatcherSource, /logger\.flowWarn\("SyncConflictWatcher", "archive:done"/);
+  assert.match(syncConflictWatcherSource, /logger\.flowWarn\("SyncConflictWatcher", "archive:completed-after-stop"/);
   assert.match(syncConflictWatcherSource, /logger\.flowError\("SyncConflictWatcher", "archive:failed"/);
 });
 
