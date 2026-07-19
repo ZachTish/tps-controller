@@ -175,15 +175,6 @@ export default class TPSControllerPlugin extends Plugin {
             version: this.manifest.version,
             isMobile: Platform.isMobile,
         });
-        try {
-            const cssPath = `${this.manifest.dir}/styles-ui.css`;
-            const cssContent = await this.app.vault.adapter.read(cssPath);
-            this.register(() => document.head.querySelector('style#tps-controller-ui-styles')?.remove());
-            const styleEl = document.head.createEl('style', { attr: { id: 'tps-controller-ui-styles' } });
-            styleEl.textContent = cssContent;
-        } catch (e) {
-            logger.flowError("Plugin", "load-styles-failed", e, { path: `${this.manifest.dir}/styles-ui.css` });
-        }
 
         await this.loadSettings();
         this.app.workspace.onLayoutReady(() => this.installNotebookNavigatorOpenPatch());

@@ -1,5 +1,23 @@
 # TPS Controller
 
+## 0.1.2
+
+- Made GitHub release installs compatible with BRAT 2.2.0 and Obsidian's standard plugin artifact contract. Controller's complete shared UI rules now ship inside `styles.css`; the runtime no longer reads or injects the nonstandard `styles-ui.css` file.
+- Preserved `styles-ui.css` as a legacy/local deployment artifact. A focused packaging regression requires its complete rule set to remain mirrored at the end of standard `styles.css` and rejects any runtime dependency on the extra file.
+- Added synchronized release metadata for Controller `0.1.2`. Minimum supported Obsidian remains `1.12.0`, and there are no settings or data migrations.
+- Validation passed in the isolated test vault: the focused BRAT packaging regression passed 2/2, the clean release suite passed 78/78, and the required separate production-mode build reported the test runtime unchanged. Source and test-runtime artifacts matched byte-for-byte; after `Reload app without saving`, Controller's status bar and commands were present in Obsidian 1.12.7. No production promotion occurred.
+
+## Install with BRAT
+
+This is a private GitHub repository. Use BRAT 2.2.0 or newer and a fine-grained GitHub personal access token that is limited to `ZachTish/tps-controller` with read-only **Contents** permission.
+
+1. Add the private-repository token in BRAT's main settings. Never commit the token to this repository, a vault note, a release, or other source-controlled content.
+2. Run BRAT's **Add a beta plugin for testing** command.
+3. Enter `ZachTish/tps-controller` as the repository and select **Latest** to follow numbered releases.
+4. Use BRAT's update command when a newer Controller release is published; BRAT downloads `main.js`, `manifest.json`, and `styles.css` from that release.
+
+Each device that accesses the private repository needs an authorized token. Selecting a frozen version instead of **Latest** intentionally prevents automatic movement to newer releases.
+
 ## Development and deployment
 
 Canonical source, tests, Git metadata, and dependencies live in `/Users/zachtisherman/TishOS Plugin Development/TPS-Controller (Dev)`, outside both vaults. `npm run build` and watch builds deploy byte-changed runtime artifacts by default only to `/Users/zachtisherman/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian Plugin Test Vault/.obsidian/plugins/tps-controller`; `npm test` is therefore isolated even though it ends with a production-mode build. Promotion to `/Users/zachtisherman/TishOS v0.1/.obsidian/plugins/tps-controller` is an explicit guarded post-validation action. Neither target overwrites `data.json` or other runtime-owned state.
