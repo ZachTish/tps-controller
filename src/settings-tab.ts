@@ -724,8 +724,8 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                 .setValue(this.plugin.settings.enableTimeTrackingHourlyReminders !== false)
                 .onChange(async (value) => {
                     this.plugin.settings.enableTimeTrackingHourlyReminders = value;
-                    await this.plugin.saveSettings();
                     this.plugin.restartTimeTrackingReminderLoop();
+                    await this.plugin.saveSettings();
                 }));
 
         if (!(this.plugin.settings.enableReminders ?? true)) {

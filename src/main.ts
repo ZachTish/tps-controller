@@ -19,6 +19,13 @@ import { TwoStageArchiveService } from "./services/two-stage-archive-service";
 import { TPS_EVENTS } from "./tps-events";
 import { shouldDeferCalendarSyncSettlementForPath } from "./services/calendar-sync-settlement-filter";
 import { normalizeReminderSettingsInPlace } from "./services/reminder-settings-service";
+import { NotifierDeliveryCoordinator } from "./services/notifier-delivery-coordinator";
+import {
+    NotifierDeliveryLedger,
+    type NotifierDeliveryStorage,
+} from "./services/notifier-delivery-ledger";
+import { withOperationDeadline } from "./services/operation-deadline";
+import { TPSNotifierClient } from "./tps-notifier-client";
 import {
     migrateLegacyS3Credentials,
     takeRetainedLegacyS3Credentials,
@@ -60,6 +67,8 @@ interface GcmTimeTrackingSession {
     sourcePath?: string;
     targetPath?: string;
 }
+
+const TIME_TRACKING_SOURCE_DEADLINE_MS = 30_000;
 
 interface GcmPluginAPI {
     settings?: Record<string, any>;
@@ -152,6 +161,12 @@ export default class TPSControllerPlugin extends Plugin {
     private reminderStartupTimeoutId: number | null = null;
     private timeTrackingReminderIntervalId: number | null = null;
     private timeTrackingReminderStartupTimeoutId: number | null = null;
+    private timeTrackingReminderCheckPromise: Promise<void> | null = null;
+    private timeTrackingReminderEpoch = 0;
+    private timeTrackingReminderLedgerWarningShown = false;
+    private notifierClient: TPSNotifierClient<TFile>;
+    private notifierDeliveryLedger: NotifierDeliveryLedger;
+    private notifierDeliveryCoordinator: NotifierDeliveryCoordinator<TFile>;
     private syncRequestIntervalId: number | null = null;
     private syncRequestFulfillmentPromise: Promise<void> | null = null;
     private parentChildMaintenanceIntervalId: number | null = null;
@@ -177,6 +192,37 @@ export default class TPSControllerPlugin extends Plugin {
         });
 
         await this.loadSettings();
+        this.notifierClient = new TPSNotifierClient<TFile>(this.app, this.manifest.id);
+        this.notifierClient.start((eventRef) => this.registerEvent(eventRef));
+        let notifierStorage: NotifierDeliveryStorage = {
+            getItem: () => { throw new Error("Local storage is unavailable."); },
+            setItem: () => { throw new Error("Local storage is unavailable."); },
+        };
+        try {
+            notifierStorage = window.localStorage;
+        } catch {
+            // The ledger load below records a fail-closed storage-read failure.
+        }
+        this.notifierDeliveryLedger = new NotifierDeliveryLedger(
+            notifierStorage,
+            this.getTimeTrackingReminderStateStorageKey(),
+        );
+        const notifierLedgerLoad = this.notifierDeliveryLedger.load();
+        this.notifierDeliveryCoordinator = new NotifierDeliveryCoordinator(
+            this.notifierClient,
+            this.notifierDeliveryLedger,
+        );
+        if (notifierLedgerLoad.ready) {
+            logger.flow("NotifierDelivery", "ledger:ready", {
+                migratedLegacyRecords: notifierLedgerLoad.migratedLegacyRecords,
+                recoveredAttemptingRecords: notifierLedgerLoad.recoveredAttemptingRecords,
+            });
+        } else {
+            logger.flowWarn("NotifierDelivery", "ledger:blocked", {
+                reason: notifierLedgerLoad.blockedReason || "unknown",
+            });
+            this.surfaceTimeTrackingReminderLedgerBlock();
+        }
         this.app.workspace.onLayoutReady(() => this.installNotebookNavigatorOpenPatch());
         this.statusBarEl = this.addStatusBarItem();
         this.deviceRoleManager = new DeviceRoleManager(this.app, (role) => this.onRoleChanged(role));
@@ -486,8 +532,10 @@ export default class TPSControllerPlugin extends Plugin {
 
     async onunload() {
         logger.flow("Lifecycle", "unload");
+        this.notifierDeliveryLedger?.close();
         this.stopS3agleAttachmentAutomation();
         this.stopAllAutomation();
+        this.notifierClient?.dispose();
         await this.saveSettings();
         await this.flushReminderStateNow();
         this.stopReminderStateFlushTimer();
@@ -1172,7 +1220,7 @@ export default class TPSControllerPlugin extends Plugin {
     // ========================================================================
 
     restartTimeTrackingReminderLoop(): void {
-        if (this.deviceRoleManager.isController()) this.startTimeTrackingReminderLoop();
+        if (!Platform.isMobile && this.deviceRoleManager.isController()) this.startTimeTrackingReminderLoop();
         else this.stopTimeTrackingReminderLoop();
     }
 
@@ -1214,6 +1262,10 @@ export default class TPSControllerPlugin extends Plugin {
 
     private startTimeTrackingReminderLoop(): void {
         this.stopTimeTrackingReminderLoop();
+        if (Platform.isMobile) {
+            logger.flow("TimeTrackingReminder", "loop:skip-mobile");
+            return;
+        }
         if (this.settings.enableTimeTrackingHourlyReminders === false) {
             logger.flow("TimeTrackingReminder", "loop:not-enabled");
             return;
@@ -1230,6 +1282,7 @@ export default class TPSControllerPlugin extends Plugin {
     }
 
     private stopTimeTrackingReminderLoop(): void {
+        this.timeTrackingReminderEpoch += 1;
         if (this.timeTrackingReminderStartupTimeoutId !== null) {
             window.clearTimeout(this.timeTrackingReminderStartupTimeoutId);
             this.timeTrackingReminderStartupTimeoutId = null;
@@ -1240,7 +1293,22 @@ export default class TPSControllerPlugin extends Plugin {
         }
     }
 
-    private async runTimeTrackingReminderCheck(): Promise<void> {
+    private runTimeTrackingReminderCheck(): Promise<void> {
+        if (this.timeTrackingReminderCheckPromise) return this.timeTrackingReminderCheckPromise;
+        const expectedEpoch = this.timeTrackingReminderEpoch;
+        const run = this.performTimeTrackingReminderCheck(expectedEpoch)
+            .catch((error) => logger.flowError("TimeTrackingReminder", "check:failed", error))
+            .finally(() => {
+                if (this.timeTrackingReminderCheckPromise === run) {
+                    this.timeTrackingReminderCheckPromise = null;
+                }
+            });
+        this.timeTrackingReminderCheckPromise = run;
+        return run;
+    }
+
+    private async performTimeTrackingReminderCheck(expectedEpoch: number): Promise<void> {
+        if (expectedEpoch !== this.timeTrackingReminderEpoch) return;
         if (!this.deviceRoleManager.isController()) {
             logger.flow("TimeTrackingReminder", "check:skip-role", { role: this.deviceRoleManager.role });
             return;
@@ -1257,6 +1325,14 @@ export default class TPSControllerPlugin extends Plugin {
         hourStart.setMinutes(0, 0, 0);
         const hourKey = moment(hourStart).format("YYYY-MM-DDTHH");
 
+        if (!this.notifierDeliveryLedger?.ready || !this.notifierDeliveryCoordinator) {
+            logger.flowWarn("TimeTrackingReminder", "check:ledger-blocked", {
+                reason: this.notifierDeliveryLedger?.blockReason || "not-initialized",
+            });
+            this.surfaceTimeTrackingReminderLedgerBlock();
+            return;
+        }
+
         const gcm = this.getGcmPlugin();
         const timeTracking = gcm?.timeTracking;
         if (typeof timeTracking?.getActiveTimers !== "function") {
@@ -1264,58 +1340,95 @@ export default class TPSControllerPlugin extends Plugin {
             return;
         }
 
-        const messager = this.getNotifierPlugin();
-        if (!messager?.sendNotification && !messager?.sendMessage) {
-            logger.flowWarn("TimeTrackingReminder", "check:no-notifier");
-            return;
-        }
-
         let activeSessions: GcmTimeTrackingSession[] = [];
         try {
-            activeSessions = await timeTracking.getActiveTimers();
+            const sessions = await withOperationDeadline(
+                Promise.resolve(timeTracking.getActiveTimers()),
+                TIME_TRACKING_SOURCE_DEADLINE_MS,
+            );
+            if (!Array.isArray(sessions)) throw new Error("Time tracking returned a malformed session list.");
+            const seenSessionIds = new Set<string>();
+            for (const session of sessions) {
+                const sessionId = typeof session?.id === "string" ? session.id.trim() : "";
+                if (!sessionId
+                    || sessionId !== session.id
+                    || sessionId.length > 256
+                    || seenSessionIds.has(sessionId)) {
+                    throw new Error("Time tracking returned a missing or duplicate session id.");
+                }
+                seenSessionIds.add(sessionId);
+            }
+            activeSessions = sessions;
         } catch (error) {
             logger.warn("Failed to read active time tracking sessions for hourly reminders.", error);
             return;
         }
+        if (expectedEpoch !== this.timeTrackingReminderEpoch
+            || !this.deviceRoleManager.isController()) return;
 
         logger.flow("TimeTrackingReminder", "check:sessions", { activeSessions: activeSessions.length, hourKey });
         if (!activeSessions.length) return;
 
-        const state = this.loadTimeTrackingReminderState();
         const cutoff = Date.now() - 48 * 60 * 60 * 1000;
-        let changed = false;
-        for (const key of Object.keys(state)) {
-            if (state[key] < cutoff) {
-                delete state[key];
-                changed = true;
-            }
+        if (!this.notifierDeliveryLedger.pruneResolvedBefore(cutoff)) {
+            logger.flowWarn("TimeTrackingReminder", "check:ledger-prune-failed", {
+                reason: this.notifierDeliveryLedger.blockReason || "unknown",
+            });
+            this.surfaceTimeTrackingReminderLedgerBlock();
+            return;
         }
 
+        let eligibleSessions = 0;
+        let existingRecords = 0;
+        let sendInvocations = 0;
+        let persistedResults = 0;
         for (const session of activeSessions) {
+            if (expectedEpoch !== this.timeTrackingReminderEpoch) return;
             const start = this.parseTimeTrackingSessionDate(session.start);
             if (!start || start.getTime() >= hourStart.getTime()) continue;
+            eligibleSessions += 1;
 
-            const dedupeKey = `${session.id}:${hourKey}`;
-            if (state[dedupeKey]) continue;
+            const legacyDedupeKey = `${session.id}:${hourKey}`;
+            const epochHour = Math.floor(hourStart.getTime() / (60 * 60 * 1000));
+            const dedupeKey = `v2:${encodeURIComponent(session.id)}:${epochHour}`;
+            const existingRecord = this.notifierDeliveryLedger.getRecord(dedupeKey);
+            const legacyRecord = this.notifierDeliveryLedger.getRecord(legacyDedupeKey);
+            if (legacyRecord || (existingRecord && existingRecord.state !== "not-attempted")) {
+                existingRecords += 1;
+                continue;
+            }
 
             const title = String(session.title || "this note").trim() || "this note";
             const file = this.resolveTimeTrackingSessionFile(session);
-            try {
-                const body = `Still working "${title}"?`;
-                if (messager.sendNotification) {
-                    await messager.sendNotification("Time tracking reminder", body, file ?? undefined);
-                } else if (messager.sendMessage) {
-                    await messager.sendMessage(body, file ?? undefined, "Time tracking reminder");
-                }
-                state[dedupeKey] = Date.now();
-                changed = true;
-            } catch (error) {
-                logger.warn(`Failed to send time tracking reminder for ${title}.`, error);
-            }
+            const outcome = await this.notifierDeliveryCoordinator.deliver(dedupeKey, {
+                title: "Time tracking reminder",
+                body: `Still working "${title}"?`,
+                file: file ?? undefined,
+            }, {
+                retryNotAttempted: true,
+            });
+            if (outcome.sendInvoked) sendInvocations += 1;
+            if (outcome.persisted) persistedResults += 1;
+            logger.flow("TimeTrackingReminder", "delivery:result", {
+                state: outcome.result.state,
+                transport: outcome.result.transport,
+                evidence: outcome.result.evidence,
+                attempted: outcome.result.attempted,
+                persisted: outcome.persisted,
+                sendInvoked: outcome.sendInvoked,
+                reusedExisting: outcome.reusedExisting,
+                ledgerReason: outcome.ledgerReason || "none",
+            });
+            if (!this.notifierDeliveryLedger.ready) this.surfaceTimeTrackingReminderLedgerBlock();
         }
 
-        logger.flow("TimeTrackingReminder", "check:done", { activeSessions: activeSessions.length, changed });
-        if (changed) this.persistTimeTrackingReminderState(state);
+        logger.flow("TimeTrackingReminder", "check:done", {
+            activeSessions: activeSessions.length,
+            eligibleSessions,
+            existingRecords,
+            sendInvocations,
+            persistedResults,
+        });
     }
 
     private parseTimeTrackingSessionDate(value: string): Date | null {
@@ -1342,30 +1455,13 @@ export default class TPSControllerPlugin extends Plugin {
         return `tps-controller-time-tracking-reminder-state-${this.app.vault.getName()}`;
     }
 
-    private loadTimeTrackingReminderState(): Record<string, number> {
-        try {
-            const raw = window.localStorage.getItem(this.getTimeTrackingReminderStateStorageKey());
-            if (!raw) return {};
-            const parsed = JSON.parse(raw);
-            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-            const output: Record<string, number> = {};
-            for (const [key, value] of Object.entries(parsed)) {
-                const timestamp = Number(value);
-                if (key && Number.isFinite(timestamp)) output[key] = timestamp;
-            }
-            return output;
-        } catch (error) {
-            logger.warn("Failed to read local time tracking reminder state; resetting state.", error);
-            return {};
-        }
-    }
-
-    private persistTimeTrackingReminderState(state: Record<string, number>): void {
-        try {
-            window.localStorage.setItem(this.getTimeTrackingReminderStateStorageKey(), JSON.stringify(state || {}));
-        } catch (error) {
-            logger.warn("Failed to persist local time tracking reminder state.", error);
-        }
+    private surfaceTimeTrackingReminderLedgerBlock(): void {
+        if (this.timeTrackingReminderLedgerWarningShown) return;
+        this.timeTrackingReminderLedgerWarningShown = true;
+        new Notice(
+            "TPS Controller paused hourly time-tracking reminders because delivery history could not be updated safely.",
+            10000,
+        );
     }
 
     private startParentChildMaintenanceLoop() {
