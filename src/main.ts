@@ -1,4 +1,4 @@
-﻿import { Plugin, Notice, Platform, TFile, WorkspaceLeaf, moment, normalizePath } from "obsidian";
+﻿import { Plugin, Notice, Platform, TFile, moment, normalizePath } from "obsidian";
 import { DeviceRoleManager, DeviceRole } from "./device-role-manager";
 import { TPSControllerSettings, DEFAULT_CONTROLLER_SETTINGS } from "./types";
 import { AutoCreateService } from "./services/auto-create-service";
@@ -178,9 +178,6 @@ export default class TPSControllerPlugin extends Plugin {
     private metadataIndexResolved = false;
     private calendarSyncSettledAt = Date.now() + 20_000;
     private readonly calendarSyncSettleWindowMs = 20_000;
-    private notebookNavigatorOpenPatchInstalled = false;
-    private notebookNavigatorInteractionUntil = 0;
-    private notebookNavigatorPendingOpenRedirect = false;
     private persistedSettingsSnapshot: Record<string, unknown> | null = null;
     private retainedLegacyS3Credentials: RetainedLegacyS3Credentials = {};
 
@@ -223,7 +220,6 @@ export default class TPSControllerPlugin extends Plugin {
             });
             this.surfaceTimeTrackingReminderLedgerBlock();
         }
-        this.app.workspace.onLayoutReady(() => this.installNotebookNavigatorOpenPatch());
         this.statusBarEl = this.addStatusBarItem();
         this.deviceRoleManager = new DeviceRoleManager(this.app, (role) => this.onRoleChanged(role));
         this.updateStatusBar(this.deviceRoleManager.role);
@@ -391,143 +387,6 @@ export default class TPSControllerPlugin extends Plugin {
             isController: this.deviceRoleManager?.isController?.() === true,
             isMobile: Platform.isMobile,
         }, action);
-    }
-
-    private installNotebookNavigatorOpenPatch(): void {
-        if (this.notebookNavigatorOpenPatchInstalled) return;
-
-        const workspace = this.app.workspace as any;
-        const originalGetLeaf = workspace.getLeaf;
-        if (typeof originalGetLeaf !== "function") return;
-        const originalLeafOpenFile = WorkspaceLeaf.prototype.openFile;
-        const originalLeafSetViewState = WorkspaceLeaf.prototype.setViewState;
-
-        const plugin = this;
-        const redirectedNotebookNavigatorLeaves = new WeakSet<WorkspaceLeaf>();
-        const getLeafTargetPath = (leaf: WorkspaceLeaf): string | null => {
-            const viewFile = (leaf.view as any)?.file;
-            if (viewFile instanceof TFile) return viewFile.path;
-            const state = leaf.getViewState?.()?.state as Record<string, unknown> | undefined;
-            if (typeof state?.file === "string") return state.file;
-            if (typeof state?.path === "string") return state.path;
-            return null;
-        };
-        const getViewStateTargetPath = (viewState: unknown): string | null => {
-            if (!viewState || typeof viewState !== "object") return null;
-            const state = (viewState as Record<string, unknown>).state;
-            if (!state || typeof state !== "object") return null;
-            const record = state as Record<string, unknown>;
-            if (typeof record.file === "string") return record.file;
-            if (typeof record.path === "string") return record.path;
-            return null;
-        };
-        const focusRedirectedLeafIfStillTarget = (leaf: WorkspaceLeaf, filePath: string | null) => {
-            const leafPath = getLeafTargetPath(leaf);
-            if (filePath && leafPath && leafPath !== filePath) return;
-            workspace.setActiveLeaf?.(leaf, { focus: true });
-            workspace.revealLeaf?.(leaf);
-        };
-        const markNotebookNavigatorInteraction = (evt: Event) => {
-            const target = evt.target;
-            if (!(target instanceof Element)) return;
-            if (!target.closest(".notebook-navigator")) return;
-            plugin.notebookNavigatorInteractionUntil = Date.now() + 500;
-            plugin.notebookNavigatorPendingOpenRedirect = true;
-        };
-        document.addEventListener("pointerdown", markNotebookNavigatorInteraction, true);
-        document.addEventListener("keydown", markNotebookNavigatorInteraction, true);
-        document.addEventListener("contextmenu", markNotebookNavigatorInteraction, true);
-
-        const patchedGetLeaf = function patchedGetLeaf(this: any, newLeaf?: unknown, ...args: unknown[]) {
-            if (newLeaf === false && plugin.isNotebookNavigatorOpenRequest()) {
-                const leaf = originalGetLeaf.call(this, true, ...args);
-                if (leaf) {
-                    redirectedNotebookNavigatorLeaves.add(leaf);
-                    logger.log("[Notebook Navigator] Redirected same-tab file open to a new tab.");
-                }
-                return leaf;
-            }
-
-            return originalGetLeaf.call(this, newLeaf, ...args);
-        };
-        workspace.getLeaf = patchedGetLeaf;
-
-        const patchedNotebookNavigatorOpenFile = function patchedNotebookNavigatorOpenFile(this: WorkspaceLeaf, ...args: Parameters<WorkspaceLeaf["openFile"]>) {
-            const shouldFocusAfterOpen = redirectedNotebookNavigatorLeaves.has(this);
-            if (shouldFocusAfterOpen) redirectedNotebookNavigatorLeaves.delete(this);
-
-            if (shouldFocusAfterOpen) {
-                const options = args[1];
-                args[1] = { ...(options && typeof options === "object" ? options : {}), active: true } as Parameters<WorkspaceLeaf["openFile"]>[1];
-            }
-
-            const result = originalLeafOpenFile.apply(this, args);
-            if (!shouldFocusAfterOpen) return result;
-
-            return Promise.resolve(result).then((value) => {
-                const file = args[0] instanceof TFile ? args[0].path : null;
-                const focusIfStillTarget = () => {
-                    focusRedirectedLeafIfStillTarget(this, file);
-                };
-                focusIfStillTarget();
-                window.setTimeout(focusIfStillTarget, 100);
-                window.setTimeout(focusIfStillTarget, 350);
-                logger.log("[Notebook Navigator] Focused redirected file tab after open.", { file });
-                return value;
-            }) as ReturnType<WorkspaceLeaf["openFile"]>;
-        } as typeof WorkspaceLeaf.prototype.openFile;
-        WorkspaceLeaf.prototype.openFile = patchedNotebookNavigatorOpenFile;
-
-        const patchedNotebookNavigatorSetViewState = function patchedNotebookNavigatorSetViewState(this: WorkspaceLeaf, ...args: Parameters<WorkspaceLeaf["setViewState"]>) {
-            const shouldFocusAfterSetViewState = redirectedNotebookNavigatorLeaves.has(this);
-            if (shouldFocusAfterSetViewState) redirectedNotebookNavigatorLeaves.delete(this);
-
-            const result = originalLeafSetViewState.apply(this, args);
-            if (!shouldFocusAfterSetViewState) return result;
-
-            return Promise.resolve(result).then((value) => {
-                const file = getViewStateTargetPath(args[0]);
-                const focusIfStillTarget = () => {
-                    focusRedirectedLeafIfStillTarget(this, file);
-                };
-                focusIfStillTarget();
-                window.setTimeout(focusIfStillTarget, 100);
-                window.setTimeout(focusIfStillTarget, 350);
-                logger.log("[Notebook Navigator] Focused redirected view tab after setViewState.", { file });
-                return value;
-            }) as ReturnType<WorkspaceLeaf["setViewState"]>;
-        } as typeof WorkspaceLeaf.prototype.setViewState;
-        WorkspaceLeaf.prototype.setViewState = patchedNotebookNavigatorSetViewState;
-
-        this.notebookNavigatorOpenPatchInstalled = true;
-        this.register(() => {
-            if (workspace.getLeaf === patchedGetLeaf) {
-                workspace.getLeaf = originalGetLeaf;
-            }
-            if (WorkspaceLeaf.prototype.openFile === patchedNotebookNavigatorOpenFile) {
-                WorkspaceLeaf.prototype.openFile = originalLeafOpenFile;
-            }
-            if (WorkspaceLeaf.prototype.setViewState === patchedNotebookNavigatorSetViewState) {
-                WorkspaceLeaf.prototype.setViewState = originalLeafSetViewState;
-            }
-        });
-        this.register(() => {
-            document.removeEventListener("pointerdown", markNotebookNavigatorInteraction, true);
-            document.removeEventListener("keydown", markNotebookNavigatorInteraction, true);
-            document.removeEventListener("contextmenu", markNotebookNavigatorInteraction, true);
-        });
-    }
-
-    private isNotebookNavigatorOpenRequest(): boolean {
-        const stack = new Error().stack || "";
-        if (stack.includes("notebook-navigator")) return true;
-        if (!this.notebookNavigatorPendingOpenRedirect) return false;
-        if (Date.now() > this.notebookNavigatorInteractionUntil) {
-            this.notebookNavigatorPendingOpenRedirect = false;
-            return false;
-        }
-        this.notebookNavigatorPendingOpenRedirect = false;
-        return true;
     }
 
     async onunload() {
