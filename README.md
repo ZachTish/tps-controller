@@ -1,5 +1,13 @@
 # TPS Controller
 
+## 0.1.3
+
+- Removed Controller's unsupported Notebook Navigator compatibility shim. Controller no longer replaces `Workspace.getLeaf`, `WorkspaceLeaf.openFile`, or `WorkspaceLeaf.setViewState`, and it no longer uses document-wide interaction listeners or timing/stack heuristics to claim Notebook Navigator actions.
+- Notebook Navigator and Obsidian now own file selection, multi-selection, drag preparation, and file opening. Shift/Cmd selections no longer enter a Controller redirect window that opens and repeatedly focuses a daily note. TPS Global Context Menu 1.3.1 supplies the matching Daily Note Home selection-only guard.
+- Controller-owned commands, notification/reminder navigation, calendar sync, and other explicit file-opening routes are unchanged. Minimum supported Obsidian remains 1.12.0, with no settings or data migration.
+- Added a whole-source regression guard that rejects reintroduction of the retired workspace/prototype replacements and Notebook Navigator ownership heuristics.
+- Validation passed the focused Notebook Navigator isolation regression (1/1) and scoped release suite (78/78), followed by the required separate production-mode build. Obsidian 1.12.7 was reloaded with `Reload app without saving`; Notebook Navigator opened the requested Daily Note without Controller creating or repeatedly focusing a replacement tab. Final source/runtime artifacts matched byte-for-byte, and no production promotion occurred.
+
 ## 0.1.2
 
 - Made GitHub release installs compatible with BRAT 2.2.0 and Obsidian's standard plugin artifact contract. Controller's complete shared UI rules now ship inside `styles.css`; the runtime no longer reads or injects the nonstandard `styles-ui.css` file.
@@ -9,14 +17,13 @@
 
 ## Install with BRAT
 
-This is a private GitHub repository. Use BRAT 2.2.0 or newer and a fine-grained GitHub personal access token that is limited to `ZachTish/tps-controller` with read-only **Contents** permission.
+This GitHub repository is public. BRAT 2.2.0 or newer does not require a private-repository token for TPS Controller.
 
-1. Add the private-repository token in BRAT's main settings. Never commit the token to this repository, a vault note, a release, or other source-controlled content.
-2. Run BRAT's **Add a beta plugin for testing** command.
-3. Enter `ZachTish/tps-controller` as the repository and select **Latest** to follow numbered releases.
-4. Use BRAT's update command when a newer Controller release is published; BRAT downloads `main.js`, `manifest.json`, and `styles.css` from that release.
+1. Run BRAT's **Add a beta plugin for testing** command.
+2. Enter `ZachTish/tps-controller` as the repository and select **Latest** to follow numbered releases.
+3. Use BRAT's update command when a newer Controller release is published; BRAT downloads `main.js`, `manifest.json`, and `styles.css` from that release.
 
-Each device that accesses the private repository needs an authorized token. Selecting a frozen version instead of **Latest** intentionally prevents automatic movement to newer releases.
+Selecting a frozen version instead of **Latest** intentionally prevents automatic movement to newer releases.
 
 ## Development and deployment
 
@@ -159,7 +166,7 @@ Device role, reminder alert reset, calendar quarantine review, historical backfi
 - Calendar integration uses TPS Calendar Base settings as a fallback source for external calendar definitions and respects Calendar Base hidden-external-event state when building unmatched external reminder candidates.
 - Global Context Menu integration is used for shared external identity helpers, file-updated event emission, guarded status writes, and parent/child maintenance when the GCM API is available.
 - Notifier integration remains optional: Controller falls back to local Obsidian notices when TPS Notifier is unavailable or exposes no send API.
-- Notebook Navigator compatibility: when Notebook Navigator selects a file and requests Obsidian's same-tab leaf, Controller redirects that single request to a new tab. Detection uses the call stack plus a one-shot recent pointer/keyboard fallback inside Notebook Navigator, preserving pinned tabs and avoiding replacement of the first non-pinned editor tab while leaving non-Navigator same-tab requests unchanged. Redirected file opens force Obsidian's `openFile` options to `active: true` because Notebook Navigator's default click path passes `active: false`; after mount, Controller focuses and reveals the redirected leaf so markdown files and non-markdown views such as Bases stay active instead of bouncing back to the previous tab.
+- Controller intentionally does not intercept Notebook Navigator file selections. Notebook Navigator and Obsidian determine whether selections reuse the current leaf, open a note, extend a multi-selection, or begin a drag; Controller does not patch global leaf-opening APIs to override that behavior.
 
 ## Diagnostics
 
@@ -185,6 +192,7 @@ Notification and overdue diagnostics log sidebar open routing, overdue scan tota
 
 ## Validation
 
+- 2026-07-20 (0.1.3): Removed Controller's global Notebook Navigator workspace/leaf patch and added a whole-TypeScript-source regression guard. The focused isolation test passed 1/1 and the scoped release suite passed 78/78; the required separate build left the test runtime current. Obsidian 1.12.7 was reloaded with `Reload app without saving`, and a live Navigator Daily Note open stayed in the native selected tab without Controller forcing another leaf. GCM 1.3.1 supplies the separate Daily Note Home selection-only guard. Final source/runtime artifacts matched byte-for-byte, and no production promotion occurred.
 - 2026-07-15: Aligned the notification sidebar and overdue modal with delivery eligibility. One-shot rows now use the same bounded live window as notification delivery, so old rules such as `15 minutes before` disappear after their live window instead of remaining as an unrelated overdue backlog; `Repeat until complete` rows remain eligible. The overdue scan logs an aggregate `staleOneShotHidden` count for diagnosis. Validation: focused reminder suite 26/26 and complete `npm test`, including TypeScript and production deployment of `main.js`; final production build passed, Obsidian 1.12.7 was reloaded with `Reload app without saving`, Controller returned active with the vault fully synced, and the live Notifications tab showed `All caught up!` instead of the July 6–14 stale backlog.
 - 2026-07-15: Prevented stale one-shot vault reminders from firing as catch-up alerts days after their calculated trigger. File/task one-shots now use a bounded live window of twice the poll interval with a one-minute minimum and five-minute maximum, record expired trigger state without claiming a send, and log `notification:skipped-stale`; `Repeat until complete` rules remain eligible when overdue. Added executable boundary, three-day-late, repeat exemption, and maximum-window coverage; the focused reminder suite passed 26/26 and the complete `npm test` suite passed, including TypeScript and production deployment of `main.js`. Obsidian 1.12.7 was reloaded with `Reload app without saving`, Controller reactivated, the vault returned to `Fully synced`, and runtime `data.json` remained untouched.
 - 2026-07-14: Fixed reminder-rule text inputs persisting only their first keystroke. Settings cleanup now normalizes reminder rules in place so the editor retains the same live object through autosaves. Added an executable `t` -> `to` -> `tod` -> `todo` regression test; the focused reminder suite passed 25/25 and the complete `npm test` suite passed, including production build/deploy. Obsidian 1.12.7 was reloaded with the reload-app command; live Controller settings persisted `todo`, `Run Reminder Check` completed, and the notification sidebar showed the open July 6 and July 7 overdue Daily Standup task rows. The intended `todo` filter remains active.
