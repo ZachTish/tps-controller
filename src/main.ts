@@ -655,9 +655,6 @@ export default class TPSControllerPlugin extends Plugin {
             runOnActiveNoteOpen: raw.runOnActiveNoteOpen !== false,
             runOnActiveNoteModify: raw.runOnActiveNoteModify !== false,
             runOnPaste: raw.runOnPaste !== false,
-            runAfterCommandIds: Array.isArray(raw.runAfterCommandIds)
-                ? raw.runAfterCommandIds.map((id) => String(id || "").trim()).filter(Boolean)
-                : [],
             debounceSeconds: Number.isFinite(debounceSeconds) && debounceSeconds >= 1
                 ? Math.floor(debounceSeconds)
                 : defaults.debounceSeconds,

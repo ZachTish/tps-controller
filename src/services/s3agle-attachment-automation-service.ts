@@ -52,8 +52,6 @@ export class S3agleAttachmentAutomationService {
     private runTimerId: number | null = null;
     private activeRun: Promise<S3agleAutomationResult | null> | null = null;
     private lastRunByPath = new Map<string, number>();
-    private originalExecuteCommandById: ((id: string, ...args: unknown[]) => unknown) | null = null;
-    private commandPatchInstalled = false;
     private lastCredentialNoticeAt = 0;
 
     constructor(
@@ -97,15 +95,10 @@ export class S3agleAttachmentAutomationService {
             });
             this.eventDisposers.push(() => this.app.vault.offref(event));
         }
-        if (rule.runAfterCommandIds.length > 0) {
-            this.installCommandTriggerPatch();
-        }
-
         logger.flow("S3agleAutomation", "start", {
             runOnActiveNoteOpen: rule.runOnActiveNoteOpen,
             runOnActiveNoteModify: rule.runOnActiveNoteModify,
             runOnPaste: rule.runOnPaste,
-            runAfterCommandIds: rule.runAfterCommandIds,
             debounceSeconds: rule.debounceSeconds,
             cooldownMinutes: rule.cooldownMinutes,
         });
@@ -118,7 +111,6 @@ export class S3agleAttachmentAutomationService {
             window.clearTimeout(this.runTimerId);
             this.runTimerId = null;
         }
-        this.uninstallCommandTriggerPatch();
     }
 
     restart(): void {
@@ -276,38 +268,6 @@ export class S3agleAttachmentAutomationService {
             logger.flow("S3agleAutomation", "controller-archive:batch-done", { archivedCount, skippedArchiveCount });
         }
         return { archivedCount, skippedArchiveCount };
-    }
-
-    private installCommandTriggerPatch(): void {
-        if (this.commandPatchInstalled) return;
-        const commands = (this.app as any).commands;
-        if (typeof commands?.executeCommandById !== "function") return;
-        const service = this;
-        this.originalExecuteCommandById = commands.executeCommandById.bind(commands);
-        commands.executeCommandById = function patchedExecuteCommandById(id: string, ...args: unknown[]) {
-            const result = service.originalExecuteCommandById?.(id, ...args);
-            service.scheduleAfterCommandIfConfigured(id);
-            return result;
-        };
-        this.commandPatchInstalled = true;
-    }
-
-    private uninstallCommandTriggerPatch(): void {
-        if (!this.commandPatchInstalled) return;
-        const commands = (this.app as any).commands;
-        if (this.originalExecuteCommandById && commands?.executeCommandById) {
-            commands.executeCommandById = this.originalExecuteCommandById;
-        }
-        this.originalExecuteCommandById = null;
-        this.commandPatchInstalled = false;
-    }
-
-    private scheduleAfterCommandIfConfigured(commandId: string): void {
-        if (commandId === "tps-controller:run-s3agle-attachment-automation-now") return;
-        const rule = this.getRule();
-        if (!rule.enabled || !rule.runAfterCommandIds.includes(commandId)) return;
-        const activeFile = this.app.workspace.getActiveFile();
-        if (activeFile instanceof TFile) this.scheduleForFile(activeFile, `command:${commandId}`);
     }
 
     private async uploadAndRewriteReferences(
@@ -900,7 +860,6 @@ export class S3agleAttachmentAutomationService {
             runOnActiveNoteOpen: true,
             runOnActiveNoteModify: true,
             runOnPaste: true,
-            runAfterCommandIds: [],
             debounceSeconds: 10,
             cooldownMinutes: 10,
             archiveUploadedSources: true,
@@ -935,9 +894,6 @@ export class S3agleAttachmentAutomationService {
             runOnActiveNoteOpen: raw.runOnActiveNoteOpen !== false,
             runOnActiveNoteModify: raw.runOnActiveNoteModify !== false,
             runOnPaste: raw.runOnPaste !== false,
-            runAfterCommandIds: Array.isArray(raw.runAfterCommandIds)
-                ? raw.runAfterCommandIds.map((id) => String(id || "").trim()).filter(Boolean)
-                : [],
             debounceSeconds: Number.isFinite(debounceSeconds) ? Math.max(1, debounceSeconds) : defaults.debounceSeconds,
             cooldownMinutes: Number.isFinite(cooldownMinutes) ? Math.max(1, cooldownMinutes) : defaults.cooldownMinutes,
             archiveUploadedSources: raw.archiveUploadedSources !== false,

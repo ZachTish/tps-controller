@@ -1,19 +1,34 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+function readTypeScriptTree(directory) {
+  return readdirSync(directory).flatMap((entry) => {
+    const path = join(directory, entry);
+    return statSync(path).isDirectory()
+      ? readTypeScriptTree(path)
+      : path.endsWith(".ts")
+        ? [readFileSync(path, "utf8")]
+        : [];
+  }).join("\n");
+}
 
 const mainSource = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 const typesSource = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
 const settingsTabSource = readFileSync(new URL("../src/settings-tab.ts", import.meta.url), "utf8");
 const serviceSource = readFileSync(new URL("../src/services/s3agle-attachment-automation-service.ts", import.meta.url), "utf8");
 const syncRequestSource = readFileSync(new URL("../src/services/sync-request-service.ts", import.meta.url), "utf8");
+const sourceTree = readTypeScriptTree(join(dirname(fileURLToPath(import.meta.url)), "../src"));
+const obsoleteRewriteUtility = join(dirname(fileURLToPath(import.meta.url)), "../src/rewrite_auto_create.js");
 
 test("S3 attachment upload automation exposes configurable triggers, settings, and manual command", () => {
   assert.match(typesSource, /interface S3agleAttachmentAutomationSettings/);
   assert.match(typesSource, /runOnActiveNoteOpen: true/);
   assert.match(typesSource, /runOnActiveNoteModify: true/);
   assert.match(typesSource, /runOnPaste: true/);
-  assert.match(typesSource, /runAfterCommandIds: \[\]/);
+  assert.doesNotMatch(typesSource, /runAfterCommandIds/);
   assert.match(typesSource, /allowedAttachmentExtensions: \[\]/);
   assert.match(typesSource, /ignoredAttachmentExtensions: \[\]/);
   assert.match(typesSource, /makeUploadedObjectsPublic: true/);
@@ -44,7 +59,7 @@ test("S3 attachment upload automation exposes configurable triggers, settings, a
   assert.match(settingsTabSource, /Run on Note Open/);
   assert.match(settingsTabSource, /Run on Active Note Changes/);
   assert.match(settingsTabSource, /Run on Paste/);
-  assert.match(settingsTabSource, /Run After Commands/);
+  assert.doesNotMatch(settingsTabSource, /Run After Commands|runAfterCommandIds/);
   assert.match(settingsTabSource, /Allowed Attachment Extensions/);
   assert.match(settingsTabSource, /Ignored Attachment Extensions/);
   assert.match(settingsTabSource, /Make Uploaded Objects Public/);
@@ -114,11 +129,13 @@ test("S3 bucket archive moves unreferenced uploaded objects instead of deleting 
   assert.match(mainSource, /loop:skip-mobile/);
 });
 
-test("S3 attachment upload automation can run after user-defined workflow commands", () => {
-  assert.match(serviceSource, /installCommandTriggerPatch/);
-  assert.match(serviceSource, /scheduleAfterCommandIfConfigured/);
-  assert.match(serviceSource, /runAfterCommandIds\.includes\(commandId\)/);
-  assert.match(serviceSource, /commandId === "tps-controller:run-s3agle-attachment-automation-now"/);
+test("S3 automation never intercepts Obsidian's command executor", () => {
+  assert.doesNotMatch(sourceTree, /runAfterCommandIds|installCommandTriggerPatch|patchedExecuteCommandById|originalExecuteCommandById/);
+  assert.doesNotMatch(sourceTree, /commands\s*\.\s*executeCommandById\s*=/);
+  assert.doesNotMatch(sourceTree, /Object\.defineProperty\s*\(\s*[^,\n]*commands[^,\n]*,\s*["']executeCommandById["']/);
+  assert.doesNotMatch(sourceTree, /Reflect\.set\s*\(\s*[^,\n]*commands[^,\n]*,\s*["']executeCommandById["']/);
+  assert.match(sourceTree, /commands\?\.executeCommandById\?\.\(commandId\)/);
+  assert.equal(existsSync(obsoleteRewriteUtility), false, "obsolete absolute-path rewrite utility must stay retired");
 });
 
 test("S3 attachment upload automation can run from raw paste events", () => {

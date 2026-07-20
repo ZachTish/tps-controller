@@ -43,6 +43,15 @@ Canonical source, tests, Git metadata, and dependency links live in this test va
 - This is an intentional removal of one unsupported compatibility behavior. Controller's commands, notifications, reminders, calendar sync, device-role automation, and Controller-owned file-opening routes are unchanged. Without a supported Notebook Navigator integration contract, Controller cannot reliably guarantee new-tab behavior for Notebook Navigator selections.
 - `scripts/test-notebook-navigator-isolation.mjs` scans the complete TypeScript source tree and rejects reintroduction of the retired method replacements, indirect prototype replacement, and DOM/stack ownership heuristics.
 
+## Command execution isolation (optimization lane)
+
+- Controller no longer replaces `app.commands.executeCommandById`. Obsidian and other plugins retain the exact command-execution method and lifecycle ownership.
+- The S3 attachment automation's unsupported `Run After Commands` setting and trigger are intentionally removed. Obsidian exposes command invocation but no supported global command-completed event, so the former wrapper could miss execution routes and could overwrite another plugin's wrapper during unload.
+- S3 uploads still support active-note open, active-note modification, raw paste, the `Run S3 Attachment Upload Now` command, and the settings action. Existing persisted `runAfterCommandIds` data is ignored immediately and is dropped on the next normal settings save; no note, credential, upload-manifest, or bucket state is migrated.
+- The unreferenced `rewrite_auto_create.js` maintenance utility is also retired. It embedded an obsolete absolute vault path and could destructively overwrite source outside the selected worktree; no runtime code called it, so removing it has no user-facing effect.
+- `scripts/test-s3agle-attachment-automation.mjs` scans the complete TypeScript source tree and rejects assignment or descriptor-based replacement of the command executor while allowing Controller's ordinary supported command invocation helper.
+- 2026-07-20 optimization validation: the focused S3 automation family passed 6/6 and the complete declared suite passed 112/112. TypeScript, diff validation, and the required separate build passed; both suite and separate builds reported `[runtime-deploy] target=none lane=optimization`. The shared nine-plugin interception guard scanned 391 runtime source files with zero violations. No optimization preview, vault reload, version, tag, release, merge, or production access occurred.
+
 ## Mobile modal contract
 
 Controller notification, overdue, snooze, and external-event modals use `tps-keyboard-aware-modal`, reusing TPS GCM's shared visible-viewport behavior on mobile.
@@ -67,7 +76,7 @@ Device role, reminder alert reset, calendar quarantine review, historical backfi
 - Calendar sync rules: sync interval, no-loss sync mode, deletion behavior, archive folder, calendar filter, canceled status value, and shared frontmatter keys (`title`, `status`, previous status, start, end/duration).
 - External-calendar task target normalization rejects empty/root-only pseudo-paths such as `/.md`; task mode falls back to its configured daily-note/event-note route instead of targeting a meaningless `.md` file.
 - Two-stage archive: disabled by default, configured for `Archive` -> `_archive`, monthly-end cadence, local run time, weekly day for weekly cadence, and check interval.
-- S3 attachment upload automation: disabled by default, can run on active note open, active note modify, paste, or after user-defined command IDs such as a Linter/workflow command. It uploads directly from the active user instance using the configured S3-compatible endpoint, confirms public-read access when enabled, rewrites confirmed links, then requests controller-side archiving for confirmed uploaded source files.
+- S3 attachment upload automation: disabled by default and can run on active note open, active note modify, paste, or an explicit manual action. It uploads directly from the active user instance using the configured S3-compatible endpoint, confirms public-read access when enabled, rewrites confirmed links, then requests controller-side archiving for confirmed uploaded source files.
 - Reminder controls: enable reminders, hourly time-tracking reminders, poll interval, batch notifications, default all-day base time, global ignore lists, per-rule reminder definitions, and a recommended rule install/reset flow.
 - Reminder rule text inputs preserve their live rule object across autosave normalization, so rapid multi-character edits persist the complete value instead of only the first keystroke.
 - Reminder status filters and checkbox-state filters are configured separately. Status filters match note frontmatter status and task semantic status values such as `complete`, `working`, or `wont-do`; checkbox-state filters match raw Markdown task markers such as blank/open, `x`, `-`, `/`, or `?`.
@@ -105,10 +114,10 @@ Device role, reminder alert reset, calendar quarantine review, historical backfi
 ## S3 attachment upload automation
 
 - TPS Controller uploads active-note local attachments directly to S3-compatible storage. The runtime path no longer depends on S3agle.
-- The automation starts on any device where this setting is enabled, so note-open, note-modify, after-command, and manual-command triggers can run from a normal user instance as well as a controller device.
+- The automation starts on any device where this setting is enabled, so note-open, note-modify, paste, and manual triggers can run from a normal user instance as well as a controller device.
 - On Obsidian mobile, Controller intentionally disables the S3 upload/archive service at plugin load time so Node-only S3 dependencies do not prevent the rest of Controller from loading. Mobile can still sync notes and requests; attachment upload/archive should run from a desktop Controller/user instance.
 - The automation checks the active note for local attachment embeds/links that resolve to non-Markdown vault files, uploads those files with the AWS S3 client, applies or verifies public access by default, then rewrites the note to public S3-compatible URLs. If public access cannot be confirmed, the upload is treated as failed, the uploaded object is cleaned up, and the local note link is left in place.
-- Triggers are user configurable: active note open, active note modify, raw paste events, and a comma-separated list of command IDs to run after. This allows workflows such as running after a Linter command without hardcoding Linter behavior.
+- Triggers are user configurable: active note open, active note modify, and raw paste events. An explicit command and settings action remain available for on-demand runs. The former after-command trigger was removed because it depended on globally replacing Obsidian's command executor, for which there is no supported command-completed observer.
 - Raw paste handling listens for paste events, lets Obsidian create the local attachment/link, then checks the active note after a short delay. The active-note modify trigger remains as a fallback.
 - Upload eligibility is configurable with allowed and ignored attachment extension lists. Ignored extensions win over the allowed list. The current vault config allows image extensions only: `avif`, `gif`, `heic`, `heif`, `jpeg`, `jpg`, `png`, `svg`, and `webp`.
 - A manual command and settings button run the same active-note automation immediately.

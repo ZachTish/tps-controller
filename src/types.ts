@@ -57,7 +57,6 @@ export interface S3agleAttachmentAutomationSettings {
     runOnActiveNoteOpen: boolean;
     runOnActiveNoteModify: boolean;
     runOnPaste: boolean;
-    runAfterCommandIds: string[];
     debounceSeconds: number;
     cooldownMinutes: number;
     archiveUploadedSources: boolean;
@@ -230,7 +229,6 @@ export const DEFAULT_CONTROLLER_SETTINGS: TPSControllerSettings = {
         runOnActiveNoteOpen: true,
         runOnActiveNoteModify: true,
         runOnPaste: true,
-        runAfterCommandIds: [],
         debounceSeconds: 10,
         cooldownMinutes: 10,
         archiveUploadedSources: true,

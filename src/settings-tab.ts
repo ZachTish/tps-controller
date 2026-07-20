@@ -325,21 +325,6 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                 }));
 
         new Setting(s3agleSection)
-            .setName('Run After Commands')
-            .setDesc('Comma-separated command IDs that should trigger this after they run, such as a Linter command or another workflow command.')
-            .addTextArea(text => text
-                .setPlaceholder('obsidian-linter:lint-file')
-                .setValue((this.plugin.settings.s3agleAttachmentAutomation.runAfterCommandIds || []).join(', '))
-                .onChange((value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.runAfterCommandIds = value
-                        .split(',')
-                        .map(id => id.trim())
-                        .filter(Boolean);
-                    void debouncedSave();
-                    this.plugin.restartS3agleAttachmentAutomation();
-                }));
-
-        new Setting(s3agleSection)
             .setName('S3 Endpoint')
             .setDesc('S3-compatible endpoint URL.')
             .addText(text => text
