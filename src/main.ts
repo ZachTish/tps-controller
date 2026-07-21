@@ -179,6 +179,7 @@ export default class TPSControllerPlugin extends Plugin {
     private calendarSyncSettledAt = Date.now() + 20_000;
     private readonly calendarSyncSettleWindowMs = 20_000;
     private persistedSettingsSnapshot: Record<string, unknown> | null = null;
+    private readonly uncertainSettingsSaveKeys = new Set<string>();
     private retainedLegacyS3Credentials: RetainedLegacyS3Credentials = {};
 
     async onload() {
@@ -476,10 +477,12 @@ export default class TPSControllerPlugin extends Plugin {
             (persisted.s3agleAttachmentAutomation as Record<string, unknown>) || {},
             this.retainedLegacyS3Credentials,
         );
+        const changedKeys = new Set(this.getChangedSettingKeys(comparable));
+        for (const key of this.uncertainSettingsSaveKeys) changedKeys.add(key);
         return {
             persisted,
             comparable,
-            changedKeys: this.getChangedSettingKeys(comparable),
+            changedKeys: [...changedKeys].sort(),
             summary: this.summarizeSettingsForLog(),
         };
     }
@@ -491,7 +494,13 @@ export default class TPSControllerPlugin extends Plugin {
         });
         const latest = await this.loadData();
         const merged = mergeSettingsChangeSet(latest, snapshot.persisted, snapshot.changedKeys);
-        await this.saveData(merged);
+        try {
+            await this.saveData(merged);
+        } catch (error) {
+            for (const key of snapshot.changedKeys) this.uncertainSettingsSaveKeys.add(key);
+            throw error;
+        }
+        for (const key of snapshot.changedKeys) this.uncertainSettingsSaveKeys.delete(key);
         this.persistedSettingsSnapshot = snapshot.comparable;
         logger.flow("Settings", "save:done", { changedKeys: snapshot.changedKeys });
     }

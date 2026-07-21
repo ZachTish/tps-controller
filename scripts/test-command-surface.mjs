@@ -159,6 +159,20 @@ test("Controller settings persistence changes only local keys in the newest payl
   assert.throws(() => mergeSettingsChangeSet([], {}, []), /must be an object/);
 });
 
+test("an uncertain Controller write forces a same-as-baseline revert on retry", () => {
+  let disk = { value: "old", synchronized: "keep" };
+  // Model a filesystem/provider error reported after the first payload landed.
+  disk = mergeSettingsChangeSet(disk, { value: "new", synchronized: "keep" }, ["value"]);
+  const retried = mergeSettingsChangeSet(
+    disk,
+    { value: "old", synchronized: "stale" },
+    ["value"],
+  );
+  assert.deepEqual(retried, { value: "old", synchronized: "keep" });
+  assert.match(mainSource, /uncertainSettingsSaveKeys/);
+  assert.match(mainSource, /for \(const key of snapshot\.changedKeys\) this\.uncertainSettingsSaveKeys\.add\(key\)/);
+});
+
 test("settings save queue persists follow-up edits and unload waits without enqueueing stale state", async () => {
   let releaseFirstSave;
   const firstSaveGate = new Promise((resolve) => {
