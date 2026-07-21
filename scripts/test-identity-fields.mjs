@@ -71,7 +71,7 @@ test('external calendar task target note setting commits full normalized paths',
   assert.match(calendarAutomationSource, /this\.normalizeTaskTargetPath\(calendar\.autoCreateTaskTargetPath\)/);
   assert.doesNotMatch(calendarAutomationSource, /Calendar\.md/);
   assert.match(mainSource, /const normalizeTaskTargetPathSetting = \(value: string\): string/);
-  assert.match(mainSource, /normalizeTaskTargetPathSetting\(rest\.autoCreateTaskTargetPath\)/);
+  assert.match(mainSource, /normalizeExternalCalendarsInPlace\([\s\S]*normalizeTaskTargetPathSetting/);
   assert.match(settingsTabSource, /normalized === "\.md"/);
   assert.match(calendarAutomationSource, /normalized === "\.md"/);
   assert.match(mainSource, /normalized === "\.md"/);

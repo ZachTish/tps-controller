@@ -1,5 +1,12 @@
 # TPS Controller
 
+## 0.1.4
+
+- Settings persistence now reloads the newest plugin data and applies only locally changed top-level fields, preserving synchronized changes and unknown newer-release fields instead of replacing the whole settings file.
+- Rapid edits, including changing a value and immediately changing it back, share one durable drain. A queued newer edit can supersede a failed in-flight write, and a completion-window edit starts a fresh save instead of being acknowledged early.
+- External-calendar controls keep their live array/object references, legacy plugin migration respects explicit false, blank, and empty-list choices, and unload waits only for requested saves.
+- This backward-compatible patch keeps the minimum supported Obsidian version at 1.12.0 and requires no manual data migration.
+
 ## 0.1.3
 
 - Removed Controller's unsupported Notebook Navigator compatibility shim. Controller no longer replaces `Workspace.getLeaf`, `WorkspaceLeaf.openFile`, or `WorkspaceLeaf.setViewState`, and it no longer uses document-wide interaction listeners or timing/stack heuristics to claim Notebook Navigator actions.
@@ -57,6 +64,7 @@ Device role, reminder alert reset, calendar quarantine review, historical backfi
 - Two-stage archive: disabled by default, configured for `Archive` -> `_archive`, monthly-end cadence, local run time, weekly day for weekly cadence, and check interval.
 - S3 attachment upload automation: disabled by default, can run on active note open, active note modify, paste, or after user-defined command IDs such as a Linter/workflow command. It uploads directly from the active user instance using the configured S3-compatible endpoint, confirms public-read access when enabled, rewrites confirmed links, then requests controller-side archiving for confirmed uploaded source files.
 - Reminder controls: enable reminders, hourly time-tracking reminders, poll interval, batch notifications, default all-day base time, global ignore lists, per-rule reminder definitions, and a recommended rule install/reset flow.
+- Settings writes are awaited and coalesced, external-calendar arrays and entries are normalized in place so open controls retain live references, and unload waits only for saves that were already requested. First-run legacy plugin migration fills only keys absent from the raw Controller payload, so explicit `false`, blank, and empty-list choices are preserved.
 - Reminder rule text inputs preserve their live rule object across autosave normalization, so rapid multi-character edits persist the complete value instead of only the first keystroke.
 - Reminder status filters and checkbox-state filters are configured separately. Status filters match note frontmatter status and task semantic status values such as `complete`, `working`, or `wont-do`; checkbox-state filters match raw Markdown task markers such as blank/open, `x`, `-`, `/`, or `?`.
 - Notification sort direction: choose oldest due items first or newest due items first for the notification sidebar and overdue reminder modal.

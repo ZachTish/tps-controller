@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
 
 const mainSource = await readFile(
   fileURLToPath(new URL("../src/main.ts", import.meta.url)),
@@ -51,6 +53,226 @@ const iCalParserServiceSource = await readFile(
   fileURLToPath(new URL("../src/services/ical-parser-service.ts", import.meta.url)),
   "utf8",
 );
+const settingsTabSource = await readFile(
+  fileURLToPath(new URL("../src/settings-tab.ts", import.meta.url)),
+  "utf8",
+);
+const settingsPersistenceBundle = await build({
+  entryPoints: [fileURLToPath(new URL("../src/services/settings-persistence.ts", import.meta.url))],
+  bundle: true,
+  platform: "node",
+  format: "esm",
+  write: false,
+  logLevel: "silent",
+});
+const {
+  CoalescedSettingsSaveQueue,
+  fillMissingLegacyPluginSettings,
+  mergeSettingsChangeSet,
+  normalizeExternalCalendarsInPlace,
+} = await import(`data:text/javascript;base64,${Buffer.from(settingsPersistenceBundle.outputFiles[0].text).toString("base64")}`);
+
+test("external calendar normalization preserves live settings-editor references across every keystroke", () => {
+  const capturedCalendar = { id: "calendar-a", url: "", enabled: true };
+  const capturedCalendars = [capturedCalendar];
+
+  for (const value of ["h", "ht", "htt", "http", "https://calendar.example/feed.ics"]) {
+    capturedCalendar.url = value;
+    const normalized = normalizeExternalCalendarsInPlace(capturedCalendars, (path) => path.trim());
+    assert.strictEqual(normalized, capturedCalendars);
+    assert.strictEqual(normalized[0], capturedCalendar);
+    assert.equal(normalized[0].url, value);
+  }
+});
+
+test("external calendar normalization preserves settings-editor reorder and delete operations", () => {
+  const first = { id: "first", url: "first.ics" };
+  const second = { id: "second", url: "second.ics" };
+  const third = { id: "third", url: "third.ics" };
+  const capturedCalendars = [first, second, third];
+
+  [capturedCalendars[0], capturedCalendars[2]] = [capturedCalendars[2], capturedCalendars[0]];
+  normalizeExternalCalendarsInPlace(capturedCalendars, (path) => path);
+  assert.deepEqual(capturedCalendars.map((calendar) => calendar.id), ["third", "second", "first"]);
+  assert.strictEqual(capturedCalendars[0], third);
+
+  capturedCalendars.splice(1, 1);
+  normalizeExternalCalendarsInPlace(capturedCalendars, (path) => path);
+  assert.deepEqual(capturedCalendars.map((calendar) => calendar.id), ["third", "first"]);
+  assert.strictEqual(capturedCalendars[1], first);
+});
+
+test("legacy plugin migration fills only keys absent from the raw Controller payload", () => {
+  const settings = {
+    pollMinutes: 0,
+    enableLogging: false,
+    globalIgnoreTags: [],
+    archiveFolder: "",
+    externalCalendars: [],
+  };
+  const rawControllerSettings = {
+    pollMinutes: 0,
+    enableLogging: false,
+    globalIgnoreTags: [],
+    archiveFolder: "",
+    externalCalendars: [],
+  };
+  const migratedFields = fillMissingLegacyPluginSettings(
+    settings,
+    rawControllerSettings,
+    {
+      pollMinutes: 15,
+      enableLogging: true,
+      ignoreTags: ["legacy-tag"],
+      snoozeProperty: "legacySnooze",
+    },
+    {
+      archiveFolder: "Legacy Archive",
+      externalCalendars: [{ id: "legacy" }],
+      uidKey: "legacyUid",
+    },
+  );
+
+  assert.equal(migratedFields, 2);
+  assert.equal(settings.pollMinutes, 0);
+  assert.equal(settings.enableLogging, false);
+  assert.deepEqual(settings.globalIgnoreTags, []);
+  assert.equal(settings.archiveFolder, "");
+  assert.deepEqual(settings.externalCalendars, []);
+  assert.equal(settings.snoozeProperty, "legacySnooze");
+  assert.equal(settings.uidKey, "legacyUid");
+});
+
+test("Controller settings persistence changes only local keys in the newest payload", () => {
+  const merged = mergeSettingsChangeSet(
+    { pollMinutes: 30, archiveFolder: "Synced Archive", futureField: { keep: true } },
+    { pollMinutes: 15, archiveFolder: "Stale Archive", enableLogging: false },
+    ["pollMinutes", "enableLogging"],
+  );
+
+  assert.deepEqual(merged, {
+    pollMinutes: 15,
+    archiveFolder: "Synced Archive",
+    futureField: { keep: true },
+    enableLogging: false,
+  });
+  assert.throws(() => mergeSettingsChangeSet([], {}, []), /must be an object/);
+});
+
+test("settings save queue persists follow-up edits and unload waits without enqueueing stale state", async () => {
+  let releaseFirstSave;
+  const firstSaveGate = new Promise((resolve) => {
+    releaseFirstSave = resolve;
+  });
+  let markFirstStarted;
+  const firstStarted = new Promise((resolve) => {
+    markFirstStarted = resolve;
+  });
+  let currentValue = "first";
+  const persisted = [];
+  let captureCount = 0;
+  const queue = new CoalescedSettingsSaveQueue(
+    () => {
+      captureCount += 1;
+      return currentValue;
+    },
+    async (snapshot) => {
+      persisted.push(snapshot);
+      if (snapshot === "first") {
+        markFirstStarted();
+        await firstSaveGate;
+      }
+    },
+  );
+
+  const firstRequest = queue.requestSave();
+  await firstStarted;
+  currentValue = "second";
+  const secondRequest = queue.requestSave();
+  assert.strictEqual(secondRequest, firstRequest);
+  releaseFirstSave();
+  await Promise.all([firstRequest, secondRequest]);
+
+  assert.deepEqual(persisted, ["first", "second"]);
+  assert.equal(captureCount, 2);
+
+  currentValue = "stale-unrequested-unload-state";
+  await queue.waitForIdle();
+  assert.deepEqual(persisted, ["first", "second"]);
+  assert.equal(captureCount, 2);
+});
+
+test("a newer Controller settings request supersedes a failed in-flight write", async () => {
+  let releaseFirstSave;
+  const firstSaveGate = new Promise((resolve) => {
+    releaseFirstSave = resolve;
+  });
+  let markFirstStarted;
+  const firstStarted = new Promise((resolve) => {
+    markFirstStarted = resolve;
+  });
+  let currentValue = "first";
+  const persisted = [];
+  const queue = new CoalescedSettingsSaveQueue(
+    () => currentValue,
+    async (snapshot) => {
+      if (snapshot === "first") {
+        markFirstStarted();
+        await firstSaveGate;
+        throw new Error("first write failed");
+      }
+      persisted.push(snapshot);
+    },
+  );
+
+  const firstRequest = queue.requestSave();
+  await firstStarted;
+  currentValue = "newest";
+  const newestRequest = queue.requestSave();
+  releaseFirstSave();
+  await Promise.all([firstRequest, newestRequest]);
+
+  assert.deepEqual(persisted, ["newest"]);
+});
+
+test("a Controller request queued at drain completion starts a new durable drain", async () => {
+  let currentValue = "first";
+  let completionWindowRequest;
+  const persisted = [];
+  let queue;
+  queue = new CoalescedSettingsSaveQueue(
+    () => currentValue,
+    async (snapshot) => {
+      persisted.push(snapshot);
+      if (snapshot === "first") {
+        queueMicrotask(() => queueMicrotask(() => {
+          currentValue = "newest";
+          completionWindowRequest = queue.requestSave();
+        }));
+      }
+    },
+  );
+
+  await queue.requestSave();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await completionWindowRequest;
+
+  assert.deepEqual(persisted, ["first", "newest"]);
+  await queue.waitForIdle();
+});
+
+test("Controller settings integration awaits saves and unload only drains requested writes", () => {
+  const unloadSource = mainSource.slice(
+    mainSource.indexOf("async onunload()"),
+    mainSource.indexOf("// Settings"),
+  );
+  assert.match(mainSource, /normalizeExternalCalendarsInPlace\(/);
+  assert.match(mainSource, /migrateSettingsFromPlugins\(this\.app, this\.settings, data,/);
+  assert.match(unloadSource, /settingsSaveQueue\.waitForIdle\(\)/);
+  assert.doesNotMatch(unloadSource, /this\.saveSettings\(\)/);
+  assert.doesNotMatch(settingsTabSource, /\bdebouncedSave\b/);
+  assert.doesNotMatch(settingsTabSource, /import\s*\{[^}]*\bdebounce\b/);
+});
 
 test("command palette only exposes controller actions that are user-facing and complete", () => {
   for (const id of [

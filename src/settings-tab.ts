@@ -1,4 +1,4 @@
-import { App, Notice, PluginSettingTab, SecretComponent, Setting, debounce, normalizePath } from 'obsidian';
+import { App, Notice, PluginSettingTab, SecretComponent, Setting, normalizePath } from 'obsidian';
 import type TPSControllerPlugin from './main';
 import type { PropertyReminder, ExternalCalendarConfig } from './types';
 import { normalizeCalendarUrl } from './utils';
@@ -58,8 +58,6 @@ export class TPSControllerSettingTab extends PluginSettingTab {
         const { containerEl } = this;
         this.captureSettingsViewState(containerEl);
         containerEl.empty();
-
-        const debouncedSave = debounce(() => this.plugin.saveSettings(), 300);
 
         containerEl.createEl('h2', { text: 'TPS Controller Settings' });
         containerEl.createEl('p', {
@@ -178,9 +176,9 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             .addText(text => text
                 .setPlaceholder('Archive')
                 .setValue(this.plugin.settings.twoStageArchive.sourceFolder)
-                .onChange((value) => {
+                .onChange(async (value) => {
                     this.plugin.settings.twoStageArchive.sourceFolder = normalizePath(value.trim().replace(/^\/+|\/+$/g, '')) || 'Archive';
-                    void debouncedSave();
+                    await this.plugin.saveSettings();
                 }));
 
         new Setting(twoStageArchiveSection)
@@ -189,9 +187,9 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             .addText(text => text
                 .setPlaceholder('_archive')
                 .setValue(this.plugin.settings.twoStageArchive.destinationFolder)
-                .onChange((value) => {
+                .onChange(async (value) => {
                     this.plugin.settings.twoStageArchive.destinationFolder = normalizePath(value.trim().replace(/^\/+|\/+$/g, '')) || '_archive';
-                    void debouncedSave();
+                    await this.plugin.saveSettings();
                 }));
 
         new Setting(twoStageArchiveSection)
@@ -232,9 +230,9 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             .addText(text => text
                 .setPlaceholder('23:55')
                 .setValue(this.plugin.settings.twoStageArchive.runTime)
-                .onChange((value) => {
+                .onChange(async (value) => {
                     this.plugin.settings.twoStageArchive.runTime = value.trim() || '23:55';
-                    void debouncedSave();
+                    await this.plugin.saveSettings();
                 }));
 
         new Setting(twoStageArchiveSection)
@@ -330,12 +328,12 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             .addTextArea(text => text
                 .setPlaceholder('obsidian-linter:lint-file')
                 .setValue((this.plugin.settings.s3agleAttachmentAutomation.runAfterCommandIds || []).join(', '))
-                .onChange((value) => {
+                .onChange(async (value) => {
                     this.plugin.settings.s3agleAttachmentAutomation.runAfterCommandIds = value
                         .split(',')
                         .map(id => id.trim())
                         .filter(Boolean);
-                    void debouncedSave();
+                    await this.plugin.saveSettings();
                     this.plugin.restartS3agleAttachmentAutomation();
                 }));
 
@@ -345,9 +343,9 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             .addText(text => text
                 .setPlaceholder('https://storage.googleapis.com')
                 .setValue(this.plugin.settings.s3agleAttachmentAutomation.endpoint || '')
-                .onChange((value) => {
+                .onChange(async (value) => {
                     this.plugin.settings.s3agleAttachmentAutomation.endpoint = value.trim();
-                    void debouncedSave();
+                    await this.plugin.saveSettings();
                     this.plugin.restartS3agleAttachmentAutomation();
                 }));
 
@@ -356,9 +354,9 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             .setDesc('Bucket used for uploaded attachments.')
             .addText(text => text
                 .setValue(this.plugin.settings.s3agleAttachmentAutomation.bucket || '')
-                .onChange((value) => {
+                .onChange(async (value) => {
                     this.plugin.settings.s3agleAttachmentAutomation.bucket = value.trim();
-                    void debouncedSave();
+                    await this.plugin.saveSettings();
                     this.plugin.restartS3agleAttachmentAutomation();
                 }));
 
@@ -367,9 +365,9 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             .setDesc('Region value passed to the S3-compatible client.')
             .addText(text => text
                 .setValue(this.plugin.settings.s3agleAttachmentAutomation.region || '')
-                .onChange((value) => {
+                .onChange(async (value) => {
                     this.plugin.settings.s3agleAttachmentAutomation.region = value.trim();
-                    void debouncedSave();
+                    await this.plugin.saveSettings();
                 }));
 
         new Setting(s3agleSection)
@@ -377,9 +375,9 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             .setDesc('Optional object key prefix for uploaded attachments.')
             .addText(text => text
                 .setValue(this.plugin.settings.s3agleAttachmentAutomation.folder || '')
-                .onChange((value) => {
+                .onChange(async (value) => {
                     this.plugin.settings.s3agleAttachmentAutomation.folder = value.trim();
-                    void debouncedSave();
+                    await this.plugin.saveSettings();
                 }));
 
         new Setting(s3agleSection)
@@ -397,9 +395,9 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             .setDesc('Optional public/read endpoint for generated links. Leave blank to use the S3 endpoint.')
             .addText(text => text
                 .setValue(this.plugin.settings.s3agleAttachmentAutomation.contentUrl || '')
-                .onChange((value) => {
+                .onChange(async (value) => {
                     this.plugin.settings.s3agleAttachmentAutomation.contentUrl = value.trim();
-                    void debouncedSave();
+                    await this.plugin.saveSettings();
                 }));
 
         new Setting(s3agleSection)
@@ -450,13 +448,13 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             .addText(text => text
                 .setPlaceholder('png, jpg, jpeg, gif, webp, svg, heic, heif')
                 .setValue((this.plugin.settings.s3agleAttachmentAutomation.allowedAttachmentExtensions || []).join(', '))
-                .onChange((value) => {
+                .onChange(async (value) => {
                     this.plugin.settings.s3agleAttachmentAutomation.allowedAttachmentExtensions = value
                         .split(',')
                         .map((item) => item.trim().toLowerCase().replace(/^\./, ''))
                         .filter(Boolean)
                         .sort();
-                    void debouncedSave();
+                    await this.plugin.saveSettings();
                     this.plugin.restartS3agleAttachmentAutomation();
                 }));
 
@@ -466,13 +464,13 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             .addText(text => text
                 .setPlaceholder('pdf, mov, mp4')
                 .setValue((this.plugin.settings.s3agleAttachmentAutomation.ignoredAttachmentExtensions || []).join(', '))
-                .onChange((value) => {
+                .onChange(async (value) => {
                     this.plugin.settings.s3agleAttachmentAutomation.ignoredAttachmentExtensions = value
                         .split(',')
                         .map((item) => item.trim().toLowerCase().replace(/^\./, ''))
                         .filter(Boolean)
                         .sort();
-                    void debouncedSave();
+                    await this.plugin.saveSettings();
                     this.plugin.restartS3agleAttachmentAutomation();
                 }));
 
@@ -493,9 +491,9 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             .addText(text => text
                 .setPlaceholder('_archive/s3/{YYYY}/{MM}/{DD}')
                 .setValue(this.plugin.settings.s3agleAttachmentAutomation.bucketArchivePrefix || '')
-                .onChange((value) => {
+                .onChange(async (value) => {
                     this.plugin.settings.s3agleAttachmentAutomation.bucketArchivePrefix = value.trim();
-                    void debouncedSave();
+                    await this.plugin.saveSettings();
                     this.plugin.restartS3BucketArchiveLoop();
                 }));
 
@@ -642,9 +640,9 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             .addText(text => text
                 .setPlaceholder('System/Archive')
                 .setValue(this.plugin.settings.archiveFolder)
-                .onChange((value) => {
+                .onChange(async (value) => {
                     this.plugin.settings.archiveFolder = value;
-                    void debouncedSave();
+                    await this.plugin.saveSettings();
                 }));
 
         new Setting(calSection)
@@ -653,9 +651,9 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             .addText(text => text
                 .setPlaceholder('Canceled')
                 .setValue(this.plugin.settings.externalCalendarFilter)
-                .onChange((value) => {
+                .onChange(async (value) => {
                     this.plugin.settings.externalCalendarFilter = value;
-                    void debouncedSave();
+                    await this.plugin.saveSettings();
                 }));
 
         new Setting(calSection)
@@ -664,9 +662,9 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             .addText(text => text
                 .setPlaceholder('cancelled')
                 .setValue(this.plugin.settings.canceledStatusValue)
-                .onChange((value) => {
+                .onChange(async (value) => {
                     this.plugin.settings.canceledStatusValue = value;
-                    void debouncedSave();
+                    await this.plugin.saveSettings();
                 }));
 
         const fmContent = createCollapsibleSection(
@@ -915,9 +913,9 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             .addText(text => text
                 .setPlaceholder('reminderSnooze')
                 .setValue(this.plugin.settings.snoozeProperty || 'reminderSnooze')
-                .onChange((value) => {
+                .onChange(async (value) => {
                     this.plugin.settings.snoozeProperty = value.trim() || 'reminderSnooze';
-                    void debouncedSave();
+                    await this.plugin.saveSettings();
                 }));
 
         const snoozePresetsEl = createCollapsibleSection(

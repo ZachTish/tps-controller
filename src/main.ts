@@ -26,6 +26,11 @@ import {
     type RetainedLegacyS3Credentials,
     type S3CredentialMigrationResult,
 } from "./services/s3-credential-service";
+import {
+    CoalescedSettingsSaveQueue,
+    mergeSettingsChangeSet,
+    normalizeExternalCalendarsInPlace,
+} from "./services/settings-persistence";
 
 const normalizeTaskTargetPathSetting = (value: string): string => {
     const normalized = normalizePath(String(value || "").trim().replace(/^\[\[|\]\]$/g, "").replace(/^\/+/, ""));
@@ -51,6 +56,13 @@ interface ReminderNotificationBatch {
     body: string;
     file?: TFile;
     items: PendingNotification[];
+}
+
+interface ControllerSettingsSaveSnapshot {
+    persisted: Record<string, unknown>;
+    comparable: Record<string, unknown>;
+    changedKeys: string[];
+    summary: Record<string, unknown>;
 }
 
 interface GcmTimeTrackingSession {
@@ -125,8 +137,11 @@ class DisabledS3AttachmentAutomationService implements S3AttachmentAutomationAPI
 
 export default class TPSControllerPlugin extends Plugin {
     settings: TPSControllerSettings;
-    private settingsSavePromise: Promise<void> | null = null;
-    private settingsSavePending = false;
+    private readonly settingsSaveQueue = new CoalescedSettingsSaveQueue<ControllerSettingsSaveSnapshot>(
+        () => this.captureSettingsSaveSnapshot(),
+        (snapshot) => this.persistSettingsSnapshot(snapshot),
+        () => this.finishSettingsSaveBatch(),
+    );
     deviceRoleManager: DeviceRoleManager;
     private statusBarEl: HTMLElement;
     private readonly reminderStateSaveCooldownMs = 5 * 60 * 1000;
@@ -347,7 +362,7 @@ export default class TPSControllerPlugin extends Plugin {
         logger.flow("Lifecycle", "unload");
         this.stopS3agleAttachmentAutomation();
         this.stopAllAutomation();
-        await this.saveSettings();
+        await this.settingsSaveQueue.waitForIdle();
         await this.flushReminderStateNow();
         this.stopReminderStateFlushTimer();
         delete (this as any).api;
@@ -360,16 +375,22 @@ export default class TPSControllerPlugin extends Plugin {
 
     async loadSettings() {
         logger.flow("Settings", "load:start");
-        const data = await this.loadData();
+        const loaded = await this.loadData();
+        const data = loaded && typeof loaded === "object" && !Array.isArray(loaded)
+            ? loaded as Record<string, unknown>
+            : {};
         this.settings = {
             ...DEFAULT_CONTROLLER_SETTINGS,
-            ...(data || {}),
+            ...data,
         };
         this.cleanLegacySettings();
+        // Establish local intent before any migration mutates settings. Migration
+        // saves can then merge only their changed fields into the latest data.
+        this.persistedSettingsSnapshot = this.snapshotSettingsForDiff();
         const importedS3agleSettings = await this.migrateS3agleSettingsIfNeeded(data || {});
         const s3CredentialMigration = this.migrateS3CredentialsFromSettings();
         if (!this.settings._migratedFromPlugins) {
-            await migrateSettingsFromPlugins(this.app, this.settings, () => this.saveSettings());
+            await migrateSettingsFromPlugins(this.app, this.settings, data, () => this.saveSettings());
             this.cleanLegacySettings();
         }
         const localAlertState = this.loadAlertStateFromLocalStorage();
@@ -384,16 +405,20 @@ export default class TPSControllerPlugin extends Plugin {
         this.sanitizeTwoStageArchiveSettings();
         this.sanitizeS3agleAttachmentAutomationSettings();
         logger.setLoggingEnabled(this.settings.enableLogging);
-        this.persistedSettingsSnapshot = this.snapshotSettingsForDiff();
+        let finalMigrationSaveSucceeded = true;
         if (importedS3agleSettings || s3CredentialMigration.changed) {
             try {
                 await this.saveSettings();
             } catch (error) {
+                finalMigrationSaveSucceeded = false;
                 logger.flowError("S3AttachmentAutomation", "credentials:migration-save-failed", error, {
                     retainedLegacyFields: Object.keys(this.retainedLegacyS3Credentials).length,
                 });
                 new Notice("TPS Controller could not finish saving the S3 credential migration. Legacy values were retained and the migration will retry.", 12000);
             }
+        }
+        if (finalMigrationSaveSucceeded) {
+            this.persistedSettingsSnapshot = this.snapshotSettingsForDiff();
         }
         logger.flow("Settings", "load:done", this.summarizeSettingsForLog());
     }
@@ -421,24 +446,10 @@ export default class TPSControllerPlugin extends Plugin {
             delete (this.settings as any)[key];
         }
 
-        this.settings.externalCalendars = (this.settings.externalCalendars || []).map((calendar: any) => {
-            const {
-                autoCreateTaskListPath,
-                autoCreateTaskListHeading,
-                autoCreateKanbanRemoteDeletedLane,
-                autoCreateKanbanCancelledLane,
-                ...rest
-            } = calendar || {};
-            const legacyMode = rest.autoCreateMode === "task-list" || rest.autoCreateMode === "kanban-board";
-            const mode = rest.autoCreateMode === "task" ? "task" : "note";
-            return {
-                ...rest,
-                autoCreateMode: mode,
-                autoCreateTaskDestination: rest.autoCreateTaskDestination === "event-note" ? "event-note" : "daily-note",
-                autoCreateTaskTargetPath: typeof rest.autoCreateTaskTargetPath === "string" ? normalizeTaskTargetPathSetting(rest.autoCreateTaskTargetPath) : "",
-                autoCreateEnabled: legacyMode ? false : rest.autoCreateEnabled,
-            };
-        });
+        this.settings.externalCalendars = normalizeExternalCalendarsInPlace(
+            this.settings.externalCalendars,
+            normalizeTaskTargetPathSetting,
+        );
 
         this.settings.reminders = normalizeReminderSettingsInPlace(this.settings.reminders || []);
         if (!Array.isArray(this.settings.globalIgnoreCheckboxStates)) {
@@ -452,42 +463,40 @@ export default class TPSControllerPlugin extends Plugin {
         this.sanitizeS3agleAttachmentAutomationSettings();
         this.retryRetainedS3CredentialMigration();
         this.persistAlertStateToLocalStorage(this.settings.alertState);
-        if (this.settingsSavePromise) {
-            this.settingsSavePending = true;
-            logger.flow("Settings", "save:coalesced", { changedKeys: this.getChangedSettingKeys() });
-            await this.settingsSavePromise;
-            return;
-        }
+        await this.settingsSaveQueue.requestSave();
+    }
 
-        do {
-            this.settingsSavePending = false;
-            const persisted = {
-                ...JSON.parse(JSON.stringify(this.settings)),
-                alertState: {},
-            };
-            (persisted as any).s3agleAttachmentAutomation = withRetainedLegacyS3Credentials(
-                (persisted as any).s3agleAttachmentAutomation || {},
-                this.retainedLegacyS3Credentials,
-            );
-            const changedKeys = this.getChangedSettingKeys();
-            logger.flow("Settings", "save:start", {
-                changedKeys,
-                pending: this.settingsSavePending,
-                ...this.summarizeSettingsForLog(),
-            });
-            this.settingsSavePromise = this.saveData(persisted);
-            try {
-                await this.settingsSavePromise;
-                this.persistedSettingsSnapshot = this.snapshotSettingsForDiff();
-                logger.flow("Settings", "save:done", {
-                    changedKeys,
-                    pendingAgain: this.settingsSavePending,
-                });
-            } finally {
-                this.settingsSavePromise = null;
-            }
-        } while (this.settingsSavePending);
+    private captureSettingsSaveSnapshot(): ControllerSettingsSaveSnapshot {
+        const comparable = this.snapshotSettingsForDiff();
+        const persisted = {
+            ...JSON.parse(JSON.stringify(this.settings)),
+            alertState: {},
+        } as Record<string, unknown>;
+        persisted.s3agleAttachmentAutomation = withRetainedLegacyS3Credentials(
+            (persisted.s3agleAttachmentAutomation as Record<string, unknown>) || {},
+            this.retainedLegacyS3Credentials,
+        );
+        return {
+            persisted,
+            comparable,
+            changedKeys: this.getChangedSettingKeys(comparable),
+            summary: this.summarizeSettingsForLog(),
+        };
+    }
 
+    private async persistSettingsSnapshot(snapshot: ControllerSettingsSaveSnapshot): Promise<void> {
+        logger.flow("Settings", "save:start", {
+            changedKeys: snapshot.changedKeys,
+            ...snapshot.summary,
+        });
+        const latest = await this.loadData();
+        const merged = mergeSettingsChangeSet(latest, snapshot.persisted, snapshot.changedKeys);
+        await this.saveData(merged);
+        this.persistedSettingsSnapshot = snapshot.comparable;
+        logger.flow("Settings", "save:done", { changedKeys: snapshot.changedKeys });
+    }
+
+    private finishSettingsSaveBatch(): void {
         logger.setLoggingEnabled(this.settings.enableLogging);
         this.app.workspace.trigger(TPS_EVENTS.CONTROLLER_SETTINGS_CHANGED as any, {
             sourcePluginId: this.manifest.id,
@@ -506,9 +515,8 @@ export default class TPSControllerPlugin extends Plugin {
         }
     }
 
-    private getChangedSettingKeys(): string[] {
+    private getChangedSettingKeys(current = this.snapshotSettingsForDiff()): string[] {
         const previous = this.persistedSettingsSnapshot || {};
-        const current = this.snapshotSettingsForDiff();
         const keys = new Set([...Object.keys(previous), ...Object.keys(current)]);
         const changed: string[] = [];
         for (const key of keys) {
