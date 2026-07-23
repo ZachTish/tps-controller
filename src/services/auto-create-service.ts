@@ -11,8 +11,23 @@ import {
     parseFrontmatterDate,
 } from "../utils";
 import { normalizeTagValue } from "../utils/tag-utils";
-import { buildCalendarExternalId, ensureInternalIdInFrontmatter, getExternalId } from "../tps-gcm-api";
+import { buildCalendarExternalId, emitFilesUpdated, ensureInternalIdInFrontmatter, getExternalId } from "../tps-gcm-api";
 import { cancelOpenInlineTaskLine } from "./external-calendar-cancellation";
+import {
+    addTagToInlineTaskLine,
+    ensureInlineTaskTitle,
+    findMarkdownBodyStartLine,
+    findMarkdownCheckboxTaskLineIndexes,
+    getVisibleInlineTaskText,
+    insertTaskLineAfterLeadingTaskBlocks,
+    isMarkdownCheckboxTaskLine,
+    mutateExternalTaskLineContent,
+    patchCanonicalInlineTaskMetadata,
+    resolveInlineTaskTemporalValues,
+    setInlineTaskFieldValue,
+    type ExternalTaskLineMutationOutcome,
+    type InlineTaskTemporalValues,
+} from "./external-calendar-inline-task";
 
 interface CalendarAutoCreateConfig {
     mode?: "note" | "task";
@@ -52,6 +67,8 @@ export interface AutoCreateServiceConfig {
 interface VaultNote {
     file: TFile;
     isInlineTask: boolean;
+    taskLineIndex?: number;
+    taskRawLine?: string;
     externalId: string | null;
     eventId: string | null;
     uid: string;
@@ -368,7 +385,8 @@ export class AutoCreateService {
             const fm = await this.getFrontmatterForFile(file);
             const inlineNotes = await this.getInlineExternalTaskNotes(file);
             for (const note of inlineNotes) {
-                if (includeInOrphanSweep) allNotes.push(note);
+                // Inline events share a note with unrelated content. They must never
+                // enter note-level orphan cleanup, which can archive/delete the file.
                 if (note.externalId) this.setPreferredEventKey(byEventKey, note.externalId, note);
                 if (note.eventId) {
                     const scopedEventKey = this.buildEventKey(note.eventId, note.sourceUrl);
@@ -441,10 +459,18 @@ export class AutoCreateService {
 
     private async getInlineExternalTaskNotes(file: TFile): Promise<VaultNote[]> {
         const content = await this.app.vault.cachedRead(file);
-        const footnoteMetadata = this.parseInlineMetadataFootnotes(content.split(/\r?\n/));
+        const lines = content.split(/\r\n|\n|\r/);
+        const bodyStartLine = findMarkdownBodyStartLine(lines);
+        if (bodyStartLine < 0) {
+            logger.flowWarn("AutoCreate", "inline-task-index:unsafe-frontmatter", {
+                path: file.path,
+            });
+            return [];
+        }
+        const footnoteMetadata = this.parseInlineMetadataFootnotes(lines);
         const notes: VaultNote[] = [];
-        for (const line of content.split(/\r?\n/)) {
-            if (!/^\s*[-*]\s+\[[ xX]\]/.test(line)) continue;
+        for (const lineIndex of findMarkdownCheckboxTaskLineIndexes(lines)) {
+            const line = lines[lineIndex] || "";
             const props = this.parseInlineDataviewProperties(line, footnoteMetadata);
             const externalId = this.normalizeIdentityValue(props.get("externalid"));
             const eventId = this.normalizeIdentityValue(props.get(this.config.eventIdKey.toLowerCase()) || props.get("externaleventid"));
@@ -458,6 +484,8 @@ export class AutoCreateService {
             notes.push({
                 file,
                 isInlineTask: true,
+                taskLineIndex: lineIndex,
+                taskRawLine: line,
                 externalId,
                 eventId,
                 uid: uid || "",
@@ -480,7 +508,8 @@ export class AutoCreateService {
         const props = new Map<string, string>();
         const regex = /\[([^\[\]:]+)::\s*([^\]]+)\]/g;
         let match: RegExpExecArray | null;
-        while ((match = regex.exec(line)) !== null) {
+        const visibleLine = getVisibleInlineTaskText(line);
+        while ((match = regex.exec(visibleLine)) !== null) {
             props.set(match[1].trim().toLowerCase(), match[2].trim());
         }
         this.mergeEncodedInlineMetadata(props, props.get("tpsinlineprops") || props.get("tps-inline-props") || "");
@@ -523,7 +552,7 @@ export class AutoCreateService {
 
     private cleanInlineTaskTitle(line: string): string {
         return line
-            .replace(/^\s*[-*]\s+\[[ xX]\]\s+/, "")
+            .replace(/^\s*(?:[-*+]|\d+[.)])\s+\[[^\]\r\n]?\]\s+/, "")
             .replace(/(?:<span\b[^>]*data-tps-inline-props="[^"]*"[^>]*>\s*<\/span>|<!--\s*tps-inline-props:[\s\S]*?\s*-->|\s*%%\s*tps-inline-props:[\s\S]*?\s*%%)/g, "")
             .replace(/\[\^tps-inline:[^\]]+]/g, "")
             .replace(/\[[^\[\]:]+::\s*[^\]]+\]/g, "")
@@ -563,10 +592,15 @@ export class AutoCreateService {
                 return { action, file: match.file };
             }
 
-            const expectedStart = formatDateTimeForFrontmatter(event.startDate);
-            const expectedEnd = this.config.useEndDuration
-                ? Math.round((event.endDate.getTime() - event.startDate.getTime()) / 60000)
-                : formatDateTimeForFrontmatter(event.endDate);
+            const inlineTemporal = this.getInlineTaskTemporalValues(event);
+            const expectedStart = match.isInlineTask
+                ? inlineTemporal.start
+                : formatDateTimeForFrontmatter(event.startDate);
+            const expectedEnd = match.isInlineTask
+                ? inlineTemporal.end
+                : this.config.useEndDuration
+                    ? Math.round((event.endDate.getTime() - event.startDate.getTime()) / 60000)
+                    : formatDateTimeForFrontmatter(event.endDate);
             const startChanged = match.storedStart !== expectedStart;
             const endChanged = match.storedEnd !== expectedEnd;
             const titleMissing = !match.storedTitle && !!event.title;
@@ -577,6 +611,23 @@ export class AutoCreateService {
 
             if (!startChanged && !endChanged && !titleMissing && !locationMissing && !sourceChanged && !urlChanged && !allDayChanged && !vaultMatch.repairedEventId && !forceRegenerate) {
                 return { action: "none", file: match.file };
+            }
+
+            if (match.isInlineTask) {
+                const didUpdate = await this.updateExistingInlineTask(match, event, {
+                    expectedStart,
+                    expectedEnd,
+                    startChanged,
+                    endChanged,
+                    titleMissing,
+                    locationMissing,
+                    sourceChanged,
+                    urlChanged,
+                    allDayChanged,
+                    repairedEventId: vaultMatch.repairedEventId,
+                });
+                if (didUpdate) this.orphanDeletionTombstones.delete(event.id);
+                return { action: didUpdate ? "updated" : "none", file: match.file };
             }
 
             let didUpdate = false;
@@ -652,8 +703,8 @@ export class AutoCreateService {
         }
 
         if (calendarInfo?.mode === "task") {
-            const file = await this.createTaskInTaskNote(event, calendarInfo);
-            return file ? { action: "created", file } : { action: "none" };
+            const result = await this.createTaskInTaskNote(event, calendarInfo);
+            return result || { action: "none" };
         }
 
         const file = await createMeetingNoteFromExternalEvent(
@@ -679,23 +730,220 @@ export class AutoCreateService {
         return file ? { action: "created", file } : { action: "none" };
     }
 
+    private async updateExistingInlineTask(
+        match: VaultNote,
+        event: ExternalCalendarEvent,
+        changes: {
+            expectedStart: string;
+            expectedEnd: string | number;
+            startChanged: boolean;
+            endChanged: boolean;
+            titleMissing: boolean;
+            locationMissing: boolean;
+            sourceChanged: boolean;
+            urlChanged: boolean;
+            allDayChanged: boolean;
+            repairedEventId: boolean;
+        },
+    ): Promise<boolean> {
+        const expectedExternalId = buildCalendarExternalId(this.app, event);
+        const expectedSourceUrl = this.normalizeSourceUrl(event.sourceUrl);
+        const expectedEventUrl = this.normalizeEventUrl(event.url);
+        const expectedUid = event.uid || this.extractUid(event.id) || "";
+        const metadataUpdates: Record<string, unknown | null> = {};
+
+        if (changes.repairedEventId || changes.sourceChanged || match.externalId !== expectedExternalId) {
+            metadataUpdates.externalId = expectedExternalId;
+            metadataUpdates[this.config.eventIdKey] = event.id;
+            metadataUpdates[this.config.uidKey] = expectedUid;
+            metadataUpdates[this.config.sourceUrlKey] = expectedSourceUrl || "";
+        }
+        if (changes.locationMissing && event.location) metadataUpdates.location = event.location;
+        if (changes.urlChanged) metadataUpdates.url = expectedEventUrl || null;
+        if (changes.allDayChanged) metadataUpdates.allDay = event.isAllDay ? true : null;
+
+        const mutationState: { outcome: ExternalTaskLineMutationOutcome; lineIndex: number } = {
+            outcome: "not-found",
+            lineIndex: -1,
+        };
+        let metadataPatchUnavailable = false;
+        try {
+            await this.app.vault.process(match.file, (content) => {
+                const lines = content.split(/\r\n|\n|\r/);
+                const footnoteMetadata = this.parseInlineMetadataFootnotes(lines);
+                const candidateExternalIds = new Set(
+                    [match.externalId, expectedExternalId]
+                        .map((value) => this.normalizeIdentityValue(value))
+                        .filter(Boolean),
+                );
+                const mutation = mutateExternalTaskLineContent(
+                    content,
+                    (line, currentLineIndex) => {
+                        if (
+                            typeof match.taskLineIndex === "number"
+                            && currentLineIndex === match.taskLineIndex
+                            && line === match.taskRawLine
+                        ) {
+                            return true;
+                        }
+                        const props = this.parseInlineDataviewProperties(line, footnoteMetadata);
+                        const lineExternalId = this.normalizeIdentityValue(props.get("externalid"));
+                        if (lineExternalId && candidateExternalIds.has(lineExternalId)) return true;
+                        const lineEventId = this.normalizeIdentityValue(
+                            props.get(this.config.eventIdKey.toLowerCase()) || props.get("externaleventid"),
+                        );
+                        if (!lineEventId || lineEventId !== event.id) return false;
+                        const lineSourceUrl = this.normalizeSourceUrl(
+                            props.get(this.config.sourceUrlKey.toLowerCase()) || props.get("tpscalendarsourceurl"),
+                        );
+                        return !expectedSourceUrl || lineSourceUrl === expectedSourceUrl;
+                    },
+                    (line) => {
+                        let nextLine = line;
+                        if (Object.keys(metadataUpdates).length > 0) {
+                            const metadataPatch = patchCanonicalInlineTaskMetadata(nextLine, metadataUpdates);
+                            if (!metadataPatch.patched) {
+                                metadataPatchUnavailable = true;
+                                return line;
+                            }
+                            nextLine = metadataPatch.line;
+                        }
+                        if (changes.titleMissing) nextLine = ensureInlineTaskTitle(nextLine, event.title);
+                        if (changes.startChanged) {
+                            nextLine = setInlineTaskFieldValue(nextLine, this.config.startProperty, changes.expectedStart);
+                        }
+                        if (changes.endChanged) {
+                            nextLine = setInlineTaskFieldValue(nextLine, this.config.endProperty, changes.expectedEnd);
+                        }
+                        return nextLine;
+                    },
+                );
+                mutationState.outcome = mutation.outcome;
+                mutationState.lineIndex = mutation.lineIndex;
+                return mutation.content;
+            });
+        } catch (error) {
+            logger.flowError("AutoCreate", "inline-task-update:failed", error, {
+                path: match.file.path,
+                expectedLine: (match.taskLineIndex ?? -1) + 1,
+            });
+            return false;
+        }
+
+        if (metadataPatchUnavailable) {
+            logger.flowWarn("AutoCreate", "inline-task-update:metadata-format-unsupported", {
+                path: match.file.path,
+                line: mutationState.lineIndex + 1,
+                keys: Object.keys(metadataUpdates).sort(),
+            });
+        }
+        if (
+            mutationState.outcome === "not-found"
+            || mutationState.outcome === "ambiguous"
+            || mutationState.outcome === "invalid-result"
+            || mutationState.outcome === "unsafe-frontmatter"
+        ) {
+            logger.flowWarn("AutoCreate", "inline-task-update:skipped", {
+                path: match.file.path,
+                outcome: mutationState.outcome,
+                expectedLine: (match.taskLineIndex ?? -1) + 1,
+            });
+            return false;
+        }
+        if (mutationState.outcome !== "changed") return false;
+
+        emitFilesUpdated(this.app, [match.file.path], "tps-controller");
+        logger.flow("AutoCreate", "inline-task-update:done", {
+            path: match.file.path,
+            line: mutationState.lineIndex + 1,
+            startChanged: changes.startChanged,
+            endChanged: changes.endChanged,
+            metadataKeys: Object.keys(metadataUpdates).sort(),
+        });
+        return true;
+    }
+
     private async createTaskInTaskNote(
         event: ExternalCalendarEvent,
         calendarInfo: CalendarAutoCreateConfig | null,
-    ): Promise<TFile | null> {
+    ): Promise<{ action: "created" | "updated" | "none"; file: TFile } | null> {
         const file = calendarInfo?.taskTargetPath
             ? await this.ensureTaskTargetFile(calendarInfo.taskTargetPath)
             : await this.ensureDailyNoteFile(event.startDate);
-        const content = await this.app.vault.read(file);
         const externalId = buildCalendarExternalId(this.app, event);
-        if (externalId && (content.includes(externalId) || content.includes(encodeURIComponent(externalId)))) {
-            await this.ensureExistingTaskCalendarTag(file, content, externalId, calendarInfo);
-            return file;
-        }
         const taskLine = this.buildExternalEventTaskLine(event, calendarInfo, externalId);
-        const nextContent = this.insertExternalCalendarTaskLine(content, taskLine);
-        await this.app.vault.modify(file, nextContent);
-        return file;
+        const tag = normalizeTagValue(calendarInfo?.tag || "");
+        const state: {
+            action: "created" | "updated" | "none";
+            outcome: ExternalTaskLineMutationOutcome | "inserted";
+            lineIndex: number;
+        } = {
+            action: "none",
+            outcome: "not-found",
+            lineIndex: -1,
+        };
+
+        try {
+            await this.app.vault.process(file, (content) => {
+                const lines = content.split(/\r\n|\n|\r/);
+                const footnoteMetadata = this.parseInlineMetadataFootnotes(lines);
+                const existingTask = mutateExternalTaskLineContent(
+                    content,
+                    (line) => {
+                        const props = this.parseInlineDataviewProperties(line, footnoteMetadata);
+                        return this.normalizeIdentityValue(props.get("externalid")) === externalId;
+                    },
+                    (line) => tag ? addTagToInlineTaskLine(line, tag) : line,
+                );
+                state.outcome = existingTask.outcome;
+                state.lineIndex = existingTask.lineIndex;
+                if (existingTask.outcome === "changed") {
+                    state.action = "updated";
+                    return existingTask.content;
+                }
+                if (existingTask.outcome === "unchanged") {
+                    state.action = "none";
+                    return content;
+                }
+                if (existingTask.outcome !== "not-found") {
+                    return content;
+                }
+
+                const insertion = this.insertExternalCalendarTaskLine(content, taskLine);
+                if (insertion.unsafeFrontmatter) {
+                    state.outcome = "unsafe-frontmatter";
+                    return content;
+                }
+                state.action = insertion.inserted ? "created" : "none";
+                state.outcome = insertion.inserted ? "inserted" : "unchanged";
+                state.lineIndex = insertion.lineIndex;
+                return insertion.content;
+            });
+        } catch (error) {
+            logger.flowError("AutoCreate", "calendar-task-upsert:failed", error, {
+                path: file.path,
+            });
+            return null;
+        }
+
+        if (state.action === "created" || state.action === "updated") {
+            emitFilesUpdated(this.app, [file.path], "tps-controller");
+            logger.flow("AutoCreate", "calendar-task-upsert:done", {
+                action: state.action,
+                path: file.path,
+                line: state.lineIndex + 1,
+            });
+        } else if (
+            state.outcome === "ambiguous"
+            || state.outcome === "invalid-result"
+            || state.outcome === "unsafe-frontmatter"
+        ) {
+            logger.flowWarn("AutoCreate", "calendar-task-upsert:skipped", {
+                path: file.path,
+                outcome: state.outcome,
+            });
+        }
+        return { action: state.action, file };
     }
 
     private async ensureTaskTargetFile(rawPath: string): Promise<TFile> {
@@ -749,106 +997,27 @@ export class AutoCreateService {
         });
     }
 
-    private insertExternalCalendarTaskLine(content: string, taskLine: string): string {
-        const newline = content.includes("\r\n") ? "\r\n" : "\n";
-        const endsWithNewline = /\r?\n$/.test(content);
-        const lines = content.split(/\r?\n/);
-        if (endsWithNewline) lines.pop();
-
-        const frontmatterEndIndex = this.findFrontmatterEndIndex(lines);
-        const insertionIndex = frontmatterEndIndex >= 0 ? frontmatterEndIndex + 1 : 0;
-        const calendarTaskLines: string[] = [taskLine];
-        const remainingLines: string[] = [];
-
-        for (const line of lines) {
-            if (this.isExternalCalendarTaskLine(line)) {
-                calendarTaskLines.push(line);
-            } else {
-                remainingLines.push(line);
-            }
-        }
-
-        calendarTaskLines.sort((left, right) => {
-            const leftTime = this.getTaskLineScheduledTime(left);
-            const rightTime = this.getTaskLineScheduledTime(right);
-            if (leftTime !== rightTime) return leftTime - rightTime;
-            return left.localeCompare(right, undefined, { sensitivity: "base" });
-        });
-
-        const nextLines = [
-            ...remainingLines.slice(0, insertionIndex),
-            ...calendarTaskLines,
-            ...this.ensureSpacerAfterInsertedTasks(remainingLines, insertionIndex),
-            ...remainingLines.slice(insertionIndex),
-        ];
-
-        return `${nextLines.join(newline)}${endsWithNewline || nextLines.length > 0 ? newline : ""}`;
-    }
-
-    private findFrontmatterEndIndex(lines: string[]): number {
-        if (lines[0]?.trim() !== "---") return -1;
-        for (let index = 1; index < lines.length; index++) {
-            if (lines[index].trim() === "---") return index;
-        }
-        return -1;
-    }
-
-    private ensureSpacerAfterInsertedTasks(lines: string[], insertionIndex: number): string[] {
-        if (lines.length <= insertionIndex) return [""];
-        return lines[insertionIndex]?.trim() === "" ? [] : [""];
-    }
-
-    private isExternalCalendarTaskLine(line: string): boolean {
-        if (!/^\s*(?:[-*+]|\d+[.)])\s+\[[^\]]?]\s+/.test(line)) return false;
-        const lower = line.toLowerCase();
-        if (!lower.includes("tpsinlineprops")) return false;
-        return lower.includes("externalid") || lower.includes(this.config.eventIdKey.toLowerCase()) || lower.includes(this.config.uidKey.toLowerCase());
-    }
-
-    private getTaskLineScheduledTime(line: string): number {
-        const key = this.escapeRegExp(this.config.startProperty || "scheduled");
-        const match = line.match(new RegExp(`\\[\\s*${key}\\s*::\\s*([^\\]\\r\\n]+)\\]`, "i"));
-        const parsed = match ? parseFrontmatterDate(match[1].trim()) : null;
-        return parsed?.getTime() ?? Number.MAX_SAFE_INTEGER;
-    }
-
-    private async ensureExistingTaskCalendarTag(
-        file: TFile,
+    private insertExternalCalendarTaskLine(
         content: string,
-        externalId: string,
-        calendarInfo: CalendarAutoCreateConfig | null,
-    ): Promise<void> {
-        const tag = normalizeTagValue(calendarInfo?.tag || "");
-        if (!tag) return;
+        taskLine: string,
+    ): { content: string; lineIndex: number; inserted: boolean; unsafeFrontmatter: boolean } {
+        const lines = content.split(/\r\n|\n|\r/);
+        const footnoteMetadata = this.parseInlineMetadataFootnotes(lines);
+        return insertTaskLineAfterLeadingTaskBlocks(
+            content,
+            taskLine,
+            (line) => this.isExternalCalendarTaskLine(line, footnoteMetadata),
+        );
+    }
 
-        const lines = content.split(/\r?\n/);
-        let lineIndex = lines.findIndex((line) => line.includes(`[externalId:: ${externalId}]`));
-        if (lineIndex < 0) {
-            lineIndex = lines.findIndex((line) => line.includes("[tpsInlineProps::") && line.includes(encodeURIComponent(externalId)));
-            if (lineIndex < 0) {
-                lineIndex = lines.findIndex((line) => line.includes("data-tps-inline-props=") && line.includes(encodeURIComponent(externalId)));
-            }
-            if (lineIndex < 0) {
-                const footnoteIndex = lines.findIndex((line) => line.startsWith("[^tps-inline:") && line.includes(encodeURIComponent(externalId)));
-                if (footnoteIndex >= 0) {
-                    const refId = lines[footnoteIndex].match(/^\[\^tps-inline:([^\]]+)]:/)?.[1] || "";
-                    lineIndex = refId ? lines.findIndex((line) => line.includes(`[^tps-inline:${refId}]`)) : -1;
-                }
-            }
-            if (lineIndex < 0) {
-                const hiddenIndex = lines.findIndex((line) => line.includes("tps-inline-props:") && line.includes(externalId));
-                if (hiddenIndex > 0) lineIndex = hiddenIndex - 1;
-            }
-        }
-        if (lineIndex < 0) return;
-
-        const line = lines[lineIndex];
-        const tagToken = `#${tag}`;
-        const tagPattern = new RegExp(`(^|\\s)#${this.escapeRegExp(tag)}(?=\\s|$)`, "i");
-        if (tagPattern.test(line)) return;
-
-        lines[lineIndex] = this.insertTokenBeforeHiddenInlineMetadata(line, tagToken);
-        await this.app.vault.modify(file, lines.join("\n"));
+    private isExternalCalendarTaskLine(line: string, footnoteMetadata?: Map<string, string>): boolean {
+        if (!isMarkdownCheckboxTaskLine(line)) return false;
+        const props = this.parseInlineDataviewProperties(line, footnoteMetadata);
+        return !!(
+            this.normalizeIdentityValue(props.get("externalid"))
+            || this.normalizeIdentityValue(props.get(this.config.eventIdKey.toLowerCase()) || props.get("externaleventid"))
+            || this.normalizeIdentityValue(props.get(this.config.uidKey.toLowerCase()) || props.get("tpscalendaruid"))
+        );
     }
 
     private buildExternalEventTaskLine(
@@ -856,13 +1025,13 @@ export class AutoCreateService {
         calendarInfo: CalendarAutoCreateConfig | null,
         externalId: string,
     ): string {
+        const temporal = this.getInlineTaskTemporalValues(event);
         const parts = [
             `- [ ] ${event.title || "External calendar event"}`,
-            `[${this.config.startProperty}:: ${event.isAllDay ? this.formatAllDayDate(event.startDate) : formatDateTimeForFrontmatter(event.startDate)}]`,
+            `[${this.config.startProperty}:: ${temporal.start}]`,
         ];
-        if (!event.isAllDay) {
-            const duration = Math.max(1, Math.round((event.endDate.getTime() - event.startDate.getTime()) / 60000));
-            parts.push(`[${this.config.endProperty}:: ${duration}]`);
+        if (temporal.end !== "") {
+            parts.push(`[${this.config.endProperty}:: ${temporal.end}]`);
         }
         const hiddenProps: Record<string, unknown> = {
             externalId,
@@ -870,7 +1039,7 @@ export class AutoCreateService {
             [this.config.uidKey]: event.uid || this.extractUid(event.id) || "",
             [this.config.sourceUrlKey]: event.sourceUrl || "",
         };
-        const tag = calendarInfo?.tag ? String(calendarInfo.tag).replace(/^#/, "").trim() : "";
+        const tag = normalizeTagValue(calendarInfo?.tag || "");
         if (tag) parts.push(`#${tag}`);
         if (event.location) hiddenProps.location = event.location;
         if (event.url) hiddenProps.url = event.url;
@@ -885,16 +1054,15 @@ export class AutoCreateService {
         return `${year}-${month}-${day}`;
     }
 
-    private escapeRegExp(value: string): string {
-        return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    }
-
-    private insertTokenBeforeHiddenInlineMetadata(line: string, token: string): string {
-        const hiddenMatch = line.match(/\s+(?:\[tpsInlineProps::\s*[^\]]+]|(?:\[\^tps-inline:[^\]]+]|<span\b[^>]*data-tps-inline-props=|<!--\s*tps-inline-props:|%%\s*tps-inline-props:))/);
-        if (!hiddenMatch || hiddenMatch.index == null) return `${line.trimEnd()} ${token}`;
-        const before = line.slice(0, hiddenMatch.index).trimEnd();
-        const after = line.slice(hiddenMatch.index).trimStart();
-        return `${before} ${token} ${after}`;
+    private getInlineTaskTemporalValues(event: ExternalCalendarEvent): InlineTaskTemporalValues {
+        return resolveInlineTaskTemporalValues({
+            isAllDay: event.isAllDay,
+            useEndDuration: this.config.useEndDuration,
+            allDayStart: this.formatAllDayDate(event.startDate),
+            timedStart: formatDateTimeForFrontmatter(event.startDate),
+            timedEnd: formatDateTimeForFrontmatter(event.endDate),
+            durationMinutes: (event.endDate.getTime() - event.startDate.getTime()) / 60000,
+        });
     }
 
     private async ensureDailyNoteFile(date: Date): Promise<TFile> {
@@ -1007,30 +1175,63 @@ export class AutoCreateService {
     }
 
     private async markInlineTaskCancelled(note: VaultNote, event: ExternalCalendarEvent): Promise<boolean> {
-        const content = await this.app.vault.read(note.file);
-        const lines = content.split(/\r?\n/);
-        const footnoteMetadata = this.parseInlineMetadataFootnotes(lines);
         const expectedExternalId = buildCalendarExternalId(this.app, event);
         const normalizedSourceUrl = this.normalizeSourceUrl(event.sourceUrl);
-        const lineIndex = lines.findIndex((line) => {
-            if (!/^\s*[-*]\s+\[[ xX]\]\s+/.test(line)) return false;
-            const props = this.parseInlineDataviewProperties(line, footnoteMetadata);
-            const externalId = this.normalizeIdentityValue(props.get("externalid"));
-            if (expectedExternalId && externalId === expectedExternalId) return true;
-            const eventId = this.normalizeIdentityValue(props.get(this.config.eventIdKey.toLowerCase()) || props.get("externaleventid"));
-            const sourceUrl = this.normalizeSourceUrl(props.get(this.config.sourceUrlKey.toLowerCase()) || props.get("tpscalendarsourceurl"));
-            return eventId === event.id && (!normalizedSourceUrl || sourceUrl === normalizedSourceUrl);
-        });
-        if (lineIndex < 0) {
-            logger.flowWarn("AutoCreate", "event:cancelled-inline-task-missing", { path: note.file.path });
+        const state: { outcome: ExternalTaskLineMutationOutcome; lineIndex: number } = {
+            outcome: "not-found",
+            lineIndex: -1,
+        };
+        try {
+            await this.app.vault.process(note.file, (content) => {
+                const lines = content.split(/\r\n|\n|\r/);
+                const footnoteMetadata = this.parseInlineMetadataFootnotes(lines);
+                const mutation = mutateExternalTaskLineContent(
+                    content,
+                    (line, currentLineIndex) => {
+                        if (
+                            typeof note.taskLineIndex === "number"
+                            && currentLineIndex === note.taskLineIndex
+                            && line === note.taskRawLine
+                        ) {
+                            return true;
+                        }
+                        const props = this.parseInlineDataviewProperties(line, footnoteMetadata);
+                        const externalId = this.normalizeIdentityValue(props.get("externalid"));
+                        if (expectedExternalId && externalId === expectedExternalId) return true;
+                        const eventId = this.normalizeIdentityValue(
+                            props.get(this.config.eventIdKey.toLowerCase()) || props.get("externaleventid"),
+                        );
+                        const sourceUrl = this.normalizeSourceUrl(
+                            props.get(this.config.sourceUrlKey.toLowerCase()) || props.get("tpscalendarsourceurl"),
+                        );
+                        return eventId === event.id && (!normalizedSourceUrl || sourceUrl === normalizedSourceUrl);
+                    },
+                    (line) => cancelOpenInlineTaskLine(line) || line,
+                );
+                state.outcome = mutation.outcome;
+                state.lineIndex = mutation.lineIndex;
+                return mutation.content;
+            });
+        } catch (error) {
+            logger.flowError("AutoCreate", "event:cancelled-inline-task-failed", error, {
+                path: note.file.path,
+            });
             return false;
         }
 
-        const cancelledLine = cancelOpenInlineTaskLine(lines[lineIndex]);
-        if (!cancelledLine) return false;
-        lines[lineIndex] = cancelledLine;
-        const newline = content.includes("\r\n") ? "\r\n" : "\n";
-        await this.app.vault.modify(note.file, lines.join(newline));
+        if (state.outcome === "unchanged") return false;
+        if (state.outcome !== "changed") {
+            logger.flowWarn("AutoCreate", "event:cancelled-inline-task-skipped", {
+                path: note.file.path,
+                outcome: state.outcome,
+            });
+            return false;
+        }
+        emitFilesUpdated(this.app, [note.file.path], "tps-controller");
+        logger.flow("AutoCreate", "event:cancelled-inline-task-done", {
+            path: note.file.path,
+            line: state.lineIndex + 1,
+        });
         return true;
     }
 

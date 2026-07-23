@@ -40,6 +40,7 @@ test('parser and auto-create reconciliation route use the cancellation helpers',
   assert.match(parserSource, /isCancelledCalendarTitle\(summary\)/);
   assert.match(autoCreateSource, /match\.isInlineTask/);
   assert.match(autoCreateSource, /markInlineTaskCancelled\(match, event\)/);
-  assert.match(autoCreateSource, /cancelOpenInlineTaskLine\(lines\[lineIndex\]\)/);
-  assert.match(autoCreateSource, /event:cancelled-inline-task-missing/);
+  assert.match(autoCreateSource, /mutateExternalTaskLineContent\(/);
+  assert.match(autoCreateSource, /cancelOpenInlineTaskLine\(line\) \|\| line/);
+  assert.match(autoCreateSource, /event:cancelled-inline-task-skipped/);
 });

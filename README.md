@@ -1,5 +1,15 @@
 # TPS Controller
 
+## 0.1.5
+
+- Fixed external-calendar task reconciliation corrupting a containing note's YAML closing fence. The legacy tag repair assumed hidden task metadata lived on the next line; when a synced task used a nonstandard checkbox state such as `[-]`, Controller could append the calendar tag to the preceding `---` delimiter.
+- Calendar task indexing, tag repair, schedule updates, cancellation, and creation now resolve one actual Markdown task line below frontmatter and outside fenced examples. Ambiguous identities and malformed frontmatter fail closed instead of mutating a nearby line.
+- Inline event changes stay on their owning task record and use atomic vault writes. Inline events are excluded from note-level orphan archive/delete handling, and task insertion preserves nested children, headings, whitespace, and existing CR/LF bytes.
+- All supported one-character checkbox states and ordered/unordered task prefixes are indexed. All-day tasks keep a date-only schedule with no duration, while timed tasks consistently honor duration-versus-end-time mode.
+- Validation passed the 22 focused identity regressions and the complete 104-test suite, followed by the required separate production-mode build and test-vault deployment. Obsidian 1.12.7 was reloaded with `Reload app without saving`; runtime state was preserved and production was not directly changed.
+- Existing notes whose closing delimiter was already changed (for example, `---- #hca`) are not rewritten automatically; restore that line to `---` once, then this release prevents the faulty write from recurring.
+- This backward-compatible patch keeps the minimum supported Obsidian version at 1.12.0 and requires no settings or data migration.
+
 ## 0.1.4
 
 - Settings persistence now reloads the newest plugin data and applies only locally changed top-level fields, preserving synchronized changes and unknown newer-release fields instead of replacing the whole settings file.
@@ -80,6 +90,10 @@ Device role, reminder alert reset, calendar quarantine review, historical backfi
 - `Force Calendar Sync Now` uses the normal non-backfill window.
 - Task-mode calendar events are written as inline Markdown tasks. Blank task target paths write to the scheduled day's daily note; a single task note is used only when a target note path is explicitly configured.
 - Task-mode calendar events keep external calendar identity in hidden `%% tps-inline-props:... %%` metadata instead of a visible `[tpsInlineProps:: ...]` inline field, so large source URLs/UIDs do not leak into rendered task text.
+- Existing task-mode events are reconciled only through their owning checkbox line; Controller never infers the owner by selecting the line before hidden metadata. Frontmatter, fenced examples, and duplicate/ambiguous identities are non-targets.
+- Task-mode creation and updates use atomic file processing. New events are inserted after the leading managed task blocks without relocating nested children or heading-scoped content, and existing mixed/CR-only line endings are preserved.
+- Inline calendar tasks participate in identity matching and cancellation but never in file-level orphan cleanup, because archiving or deleting their containing daily/task note would also remove unrelated content.
+- All-day inline events use date-only `scheduled` values and no end/duration field. Timed events use the configured duration or end-datetime representation consistently for both creation and later reconciliation.
 - External-event reminder matching indexes both event-note frontmatter and inline task calendar payloads, so synced task-mode events are not re-emitted as unmatched external reminders.
 - Calendar identity matching scans the whole vault for `externalId`, legacy event id, UID/start, event URL, and title/day matches before creating anything. This prevents duplicate event notes if an existing synced file was moved out of the configured calendar folder.
 - Synced event notes use lean frontmatter: Controller does not synthesize `folderPath`, writes `allDay` only when true, and removes that configured field case-insensitively when a previously all-day event becomes timed. Identity, parent links, templates, physical folder routing, and task-line metadata remain unchanged; existing notes are not bulk-migrated.
