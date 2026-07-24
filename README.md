@@ -1,5 +1,13 @@
 # TPS Controller
 
+## 0.2.0
+
+- Replaced the deep settings tree with a sticky five-destination **Choose what to configure** hub: Overview, Calendar rules, Reminder rules, Automations, and Advanced. Only the active page renders, and mobile uses a compact horizontal strip.
+- Calendar feeds now show concise source/output summaries and one selected Configure editor. Reminder actions and rule editing remain available while evaluation is off, with defaults, filters, snooze choices, and maintenance on the same page.
+- Split Automations into direct Archive files and Upload attachments selectors so only one workflow editor is visible at a time. Route and conditional rerenders restore keyboard focus without changing saved settings.
+- Preserved all existing setting keys, defaults, and actions; no settings migration is required. Minimum supported Obsidian remains 1.12.0.
+- Validation passed the complete declared suite and standalone production-mode build. Obsidian 1.12.7 was reloaded in the isolated test vault; the five routes, disabled-reminder configuration, and both automation editors were checked without changing settings. Production was not directly changed.
+
 ## 0.1.5
 
 - Fixed external-calendar task reconciliation corrupting a containing note's YAML closing fence. The legacy tag repair assumed hidden task metadata lived on the next line; when a synced task used a nonstandard checkbox state such as `[-]`, Controller could append the calendar tag to the preceding `---` delimiter.
@@ -66,7 +74,11 @@ Device role, reminder alert reset, calendar quarantine review, historical backfi
 
 ## Settings surface
 
-- Settings use direct collapsible sections with descriptive titles such as external calendar feeds, archive move schedule, calendar sync rules, reminder evaluation, snooze presets, and debug logging.
+- Settings keep an always-visible **Choose what to configure** hub with five destinations: Overview, Calendar rules, Reminder rules, Automations, and Advanced. Only the active destination renders, and the current button is exposed with `aria-pressed`.
+- Overview is the default and keeps device role/status visible alongside direct buttons for calendar rules, reminder rules, and automations.
+- Calendar rules puts Add Calendar and Sync Now before compact feed summaries. Each feed reports its URL host and creation outcome, and only the selected Configure editor is shown. Task mode exposes task destinations while note mode exposes folders and templates; global sync/safety rules stay on the same page.
+- Reminder rules puts the master toggle and Add/Install/Check actions before the rule list. Rule cards are the only settings disclosures; rules, shared defaults, global filters, snooze presets, and maintenance remain configurable while reminder evaluation is disabled.
+- Automations uses a two-choice in-page selector so only Archive files or Upload attachments renders at once. Advanced owns shared calendar field names and troubleshooting controls. The settings redesign changes navigation only and does not migrate or rename stored settings.
 - Device role: controller vs replica/user.
 - External calendars: URL, color, enabled state, auto-create toggle, create-as mode, task destination, task target note, type folder, folder, tag, and template.
 - Calendar sync rules: sync interval, no-loss sync mode, deletion behavior, archive folder, calendar filter, canceled status value, and shared frontmatter keys (`title`, `status`, previous status, start, end/duration).
@@ -272,6 +284,7 @@ Notification and overdue diagnostics log sidebar open routing, overdue scan tota
 
 ## Settings layout
 
-Device role is the root-level core control. Calendar feeds, automation, archive, attachment upload, field mapping, reminders, snooze, and diagnostics open as collapsed top-level groups. Reminder rule cards are the second and final collapse level; their core and optional fields use flat labeled groups so rules never create a third accordion level.
+The responsive destination hub remains sticky at the top of every settings page, with a compact horizontal mobile layout. Navigation has one active page at a time and remembers that transient route across settings rerenders. User-invoked route changes move keyboard focus to the new page heading, while conditional field rerenders preserve scroll position. Top-level content uses flat sections rather than accordions; reminder rule cards are the sole disclosure level, and their editor groups remain flat.
 
 - 2026-07-13: Audited and flattened settings navigation. First open now closes every accordion, recommended-rule setup no longer expands implicitly, and reminder editor subgroups are non-collapsible to enforce a maximum depth of two. Validation: settings hierarchy audit, full test suite, production build/deploy, and Obsidian reload.
+- 2026-07-24 (0.2.0): Consolidated Controller settings into Overview, Calendar rules, Reminder rules, Automations, and Advanced destinations. Calendar feed and reminder rule actions now precede their lists, feed rows show output summaries, only one feed editor is shown, and irrelevant task/note destination fields stay out of view. Reminder configuration remains reachable while evaluation is off, and conditional rerenders restore keyboard focus. The complete suite, standalone build, test-vault reload, and live route/automation UI checks passed. This is a settings-navigation-only change with no persisted schema migration.

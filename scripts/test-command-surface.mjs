@@ -57,6 +57,10 @@ const settingsTabSource = await readFile(
   fileURLToPath(new URL("../src/settings-tab.ts", import.meta.url)),
   "utf8",
 );
+const settingsStylesSource = await readFile(
+  fileURLToPath(new URL("../styles-ui.css", import.meta.url)),
+  "utf8",
+);
 const settingsPersistenceBundle = await build({
   entryPoints: [fileURLToPath(new URL("../src/services/settings-persistence.ts", import.meta.url))],
   bundle: true,
@@ -286,6 +290,93 @@ test("Controller settings integration awaits saves and unload only drains reques
   assert.doesNotMatch(unloadSource, /this\.saveSettings\(\)/);
   assert.doesNotMatch(settingsTabSource, /\bdebouncedSave\b/);
   assert.doesNotMatch(settingsTabSource, /import\s*\{[^}]*\bdebounce\b/);
+});
+
+test("Controller settings use one routed page with an explicit five-destination hub", () => {
+  const displaySource = settingsTabSource.slice(
+    settingsTabSource.indexOf("display(): void"),
+    settingsTabSource.indexOf("// Helpers"),
+  );
+  const reminderPageSource = settingsTabSource.slice(
+    settingsTabSource.indexOf("private renderReminderSettingsPage"),
+    settingsTabSource.indexOf("private createDefaultReminder"),
+  );
+  const calendarEditorStart = settingsTabSource.indexOf("private renderExternalCalendars");
+  const calendarEditorSource = settingsTabSource.slice(
+    calendarEditorStart,
+    settingsTabSource.indexOf("renderSnoozeOptions(container", calendarEditorStart),
+  );
+
+  assert.match(settingsTabSource, /private activePage: ControllerSettingsPage = 'overview'/);
+  assert.match(settingsTabSource, /private activeAutomation: ControllerAutomationPage = 'archive'/);
+  assert.match(settingsTabSource, /Choose what to configure/);
+  assert.match(settingsTabSource, /setAttr\('aria-pressed', String\(this\.activePage === destination\.id\)\)/);
+  for (const destination of ["Overview", "Calendar rules", "Reminder rules", "Automations", "Advanced"]) {
+    assert.match(settingsTabSource, new RegExp(`label: '${destination}'`));
+  }
+  assert.equal((settingsTabSource.match(/\{ id: '(?:overview|calendar|reminders|automations|advanced)'/g) || []).length, 5);
+  assert.doesNotMatch(displaySource, /createEl\(['"]details['"]/);
+  assert.match(settingsTabSource, /createEl\('details', \{ cls: 'tps-controller-reminder-rule' \}\)/);
+  assert.match(settingsTabSource, /private navigateToPage[\s\S]*heading\?\.focus\(\{ preventScroll: false \}\)/);
+  assert.match(settingsTabSource, /private redisplayPreservingScroll\(focusSelector\?: string\)[\s\S]*this\.containerEl\.scrollTop = scrollTop[\s\S]*focus\(\{ preventScroll: true \}\)/);
+
+  for (const shortcut of ["Open calendar rules", "Open reminder rules", "Open automations"]) {
+    assert.match(settingsTabSource, new RegExp(`'${shortcut}'`));
+  }
+
+  assert.ok(
+    displaySource.indexOf(".setName('Calendar actions')") < displaySource.indexOf("this.renderExternalCalendars(calendarsContainer)"),
+    "calendar actions should render before feed cards",
+  );
+  assert.match(calendarEditorSource, /this\.selectedCalendarId !== calendar\.id\) return/);
+  assert.match(calendarEditorSource, /toggle\.setAttr\('aria-label', `Enable \$\{this\.buildCalendarDisplayName/);
+  assert.match(calendarEditorSource, /configureBtn\.setAttr\('aria-expanded'/);
+  assert.match(calendarEditorSource, /configureBtn\.setAttr\('aria-controls', editorId\)/);
+  assert.match(calendarEditorSource, /configureBtn\.dataset\.calendarAction = 'configure'/);
+  assert.match(calendarEditorSource, /editor\.id = editorId/);
+  assert.match(calendarEditorSource, /drop\.selectEl\.dataset\.calendarAction = 'create-mode'/);
+  assert.match(calendarEditorSource, /focusCalendarControl\(container, calendarId, 'configure'\)/);
+  assert.match(calendarEditorSource, /save\(true, \{ calendarId, action: 'create-mode' \}\)/);
+  assert.match(calendarEditorSource, /nextCalendarId[\s\S]*focusCalendarControl\(container, nextCalendarId, 'configure'\)/);
+  assert.match(calendarEditorSource, /if \(\(calendar\.autoCreateMode \|\| "note"\) === "task"\)/);
+  assert.match(calendarEditorSource, /\} else \{\s*new Setting\(acContent\)\s*\.setName\("Type Folder"\)/);
+  assert.match(calendarEditorSource, /if \(\(calendar\.autoCreateMode \|\| "note"\) === "note"\) \{\s*new Setting\(acContent\)\s*\.setName\("Template"\)/);
+
+  assert.ok(
+    reminderPageSource.indexOf(".setName('Rule actions')") < reminderPageSource.indexOf("this.renderReminderRules(rulesContainer)"),
+    "reminder actions should render before the rule list",
+  );
+  assert.ok(
+    reminderPageSource.indexOf("this.renderReminderRules(rulesContainer)") < reminderPageSource.indexOf("'Reminder defaults'"),
+    "the rule list should render before shared defaults",
+  );
+  const disabledCallout = reminderPageSource.indexOf('Reminder evaluation is off');
+  const ruleActions = reminderPageSource.indexOf(".setName('Rule actions')");
+  const ruleList = reminderPageSource.indexOf('this.renderReminderRules(rulesContainer)');
+  const reminderDefaults = reminderPageSource.indexOf("'Reminder defaults'");
+  assert.ok(disabledCallout >= 0);
+  assert.ok(ruleActions > disabledCallout, 'rule actions should remain reachable while reminder evaluation is off');
+  assert.ok(ruleList > ruleActions, 'the rule list should remain reachable while reminder evaluation is off');
+  assert.ok(reminderDefaults > ruleList, 'shared defaults should remain reachable while reminder evaluation is off');
+  assert.doesNotMatch(reminderPageSource.slice(disabledCallout, ruleActions), /\}\s*else\s*\{/);
+  assert.ok(
+    reminderPageSource.indexOf("'Snooze defaults'") > disabledCallout,
+    "snooze defaults should remain reachable after the disabled-reminders branch",
+  );
+  assert.match(reminderPageSource, /if \(presetSummary\) this\.renderRecommendedReminderSummary\(presetSummary\)/);
+
+  assert.match(displaySource, /this\.renderAutomationSelector\(containerEl\)/);
+  assert.match(displaySource, /if \(this\.activeAutomation === 'archive'\)/);
+  assert.match(displaySource, /if \(this\.activeAutomation === 'attachments'\)/);
+  assert.match(settingsTabSource, /role', 'group'/);
+  assert.match(settingsTabSource, /aria-label', 'Controller settings pages'/);
+  assert.match(settingsTabSource, /data-automation/);
+  assert.match(settingsStylesSource, /\.tps-settings-destination-hub \{[\s\S]*position: sticky/);
+  assert.match(settingsStylesSource, /\.tps-settings-inline-selector-button\[aria-pressed="true"\]/);
+  assert.match(settingsStylesSource, /\.tps-settings-destination-button:focus-visible/);
+  assert.match(settingsStylesSource, /\.tps-settings-destination-button \{[\s\S]*\n  height: auto;/);
+  assert.match(settingsStylesSource, /@media \(max-width: 900px\)[\s\S]*grid-template-columns: repeat\(5, minmax\(132px, 1fr\)\)[\s\S]*overflow-x: auto/);
+  assert.match(settingsStylesSource, /@media \(max-width: 520px\)[\s\S]*\.tps-settings-destination-description \{[\s\S]*display: none/);
 });
 
 test("command palette only exposes controller actions that are user-facing and complete", () => {

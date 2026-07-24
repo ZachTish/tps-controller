@@ -5,6 +5,21 @@ import { normalizeCalendarUrl } from './utils';
 import { renderListWithControls } from './utils/list-renderer';
 
 const createCalendarId = () => `calendar-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+type ControllerSettingsPage = 'overview' | 'calendar' | 'reminders' | 'automations' | 'advanced';
+type ControllerAutomationPage = 'archive' | 'attachments';
+
+const CONTROLLER_SETTINGS_DESTINATIONS: Array<{
+    id: ControllerSettingsPage;
+    label: string;
+    description: string;
+}> = [
+    { id: 'overview', label: 'Overview', description: 'Device role and quick links.' },
+    { id: 'calendar', label: 'Calendar rules', description: 'Feeds, destinations, and sync safety.' },
+    { id: 'reminders', label: 'Reminder rules', description: 'Notification timing, matching, and snooze defaults.' },
+    { id: 'automations', label: 'Automations', description: 'Archive and attachment workflows.' },
+    { id: 'advanced', label: 'Advanced', description: 'Field names and troubleshooting.' },
+];
+
 const normalizeTaskTargetNotePath = (value: string): string => {
     const normalized = normalizePath(String(value || "")
         .trim()
@@ -13,28 +28,22 @@ const normalizeTaskTargetNotePath = (value: string): string => {
     if (!normalized || normalized === "." || normalized === ".md" || normalized.endsWith("/.md")) return "";
     return normalized.toLowerCase().endsWith(".md") ? normalized : `${normalized}.md`;
 };
-const createCollapsibleSection = (
+const createSettingsSection = (
     parent: HTMLElement,
     title: string,
-    description?: string,
-    defaultOpen = false
+    description?: string
 ): HTMLElement => {
-    const details = parent.createEl('details', { cls: 'tps-collapsible-section' });
-    if (defaultOpen) {
-        details.setAttr('open', 'true');
-    }
-
-    const summary = details.createEl('summary', { cls: 'tps-collapsible-section-summary' });
-    summary.createSpan({ cls: 'tps-collapsible-section-title', text: title });
+    const section = parent.createDiv({ cls: 'tps-settings-section' });
+    section.createEl('h3', { cls: 'tps-settings-section-title', text: title });
 
     if (description) {
-        details.createEl('p', {
-            cls: 'tps-collapsible-section-description',
+        section.createEl('p', {
+            cls: 'tps-settings-section-description',
             text: description
         });
     }
 
-    return details.createDiv({ cls: 'tps-collapsible-section-content' });
+    return section.createDiv({ cls: 'tps-settings-section-content' });
 };
 
 // ============================================================================
@@ -43,11 +52,11 @@ const createCollapsibleSection = (
 
 export class TPSControllerSettingTab extends PluginSettingTab {
     plugin: TPSControllerPlugin;
-    private settingsViewState = new Map<string, boolean>();
+    private activePage: ControllerSettingsPage = 'overview';
+    private activeAutomation: ControllerAutomationPage = 'archive';
+    private selectedCalendarId: string | null = null;
     private reminderRuleViewState = new Map<string, boolean>();
     private reminderRuleFilterQuery = '';
-    private settingsScrollTop = 0;
-    private hasRenderedSettings = false;
 
     constructor(app: App, plugin: TPSControllerPlugin) {
         super(app, plugin);
@@ -56,7 +65,6 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
     display(): void {
         const { containerEl } = this;
-        this.captureSettingsViewState(containerEl);
         containerEl.empty();
 
         containerEl.createEl('h2', { text: 'TPS Controller Settings' });
@@ -64,9 +72,17 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             text: 'This is the suite-level owner for background automation, calendar sync, reminders, and shared calendar field mappings. Other TPS plugins should stay focused on UI and local interaction.',
             cls: 'setting-item-description'
         });
+        this.renderSettingsDestinationHub(containerEl);
+
+        if (this.activePage === 'overview') {
+            this.renderPageHeading(
+                containerEl,
+                'Overview',
+                'See what this device owns, then jump directly to the rules or automation you want to change.'
+            );
         // ── Device Role ─────────────────────────────────────────────
         const roleSection = containerEl.createDiv({ cls: 'tps-settings-core' });
-        new Setting(roleSection).setName('Core settings').setHeading();
+        new Setting(roleSection).setName('Device role').setHeading();
 
         const roleDesc = roleSection.createDiv({ cls: 'tps-controller-role-desc' });
         const updateRoleDesc = (role: string) => {
@@ -96,48 +112,78 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     new Notice(`Device set to ${value === 'controller' ? 'CONTROLLER' : 'USER'} mode.`);
                 }));
 
-        // ── External Calendars ─────────────────────────────────────
-        const extCalSection = createCollapsibleSection(
-            containerEl,
-            'External Calendar Feeds and Sync Destinations',
-            'Calendar sources and auto-create destinations. These are the controller settings most users will change first.',
-            false
+        const overviewCards = containerEl.createDiv({ cls: 'tps-settings-overview-grid' });
+        this.renderOverviewCard(
+            overviewCards,
+            'Calendar rules',
+            `${this.plugin.settings.externalCalendars?.length || 0} configured feed${this.plugin.settings.externalCalendars?.length === 1 ? '' : 's'} · sync every ${this.plugin.settings.syncIntervalMinutes} minutes`,
+            'Open calendar rules',
+            'calendar'
         );
-        const calendarsContainer = extCalSection.createDiv();
-        this.renderExternalCalendars(calendarsContainer);
+        this.renderOverviewCard(
+            overviewCards,
+            'Reminder rules',
+            `${this.plugin.settings.enableReminders ? 'Enabled' : 'Disabled'} · ${this.plugin.settings.reminders?.length || 0} rule${this.plugin.settings.reminders?.length === 1 ? '' : 's'}`,
+            'Open reminder rules',
+            'reminders'
+        );
+        const enabledAutomationCount = Number(this.plugin.settings.twoStageArchive?.enabled === true)
+            + Number(this.plugin.settings.s3agleAttachmentAutomation?.enabled === true);
+        this.renderOverviewCard(
+            overviewCards,
+            'Automations',
+            `${enabledAutomationCount} of 2 enabled`,
+            'Open automations',
+            'automations'
+        );
+        }
+
+        // ── External Calendars ─────────────────────────────────────
+        if (this.activePage === 'calendar') {
+        this.renderPageHeading(
+            containerEl,
+            'Calendar rules',
+            'Connect external feeds, choose what each feed creates, and control global sync safety.'
+        );
+        const extCalSection = createSettingsSection(
+            containerEl,
+            'External calendar feeds',
+            'Add a source, then choose Configure on a feed to edit its destination rule.'
+        );
 
         new Setting(extCalSection)
-            .setName('Add New Calendar')
-            .setDesc('Add an external iCal feed (Google, Outlook, etc).')
-            .addButton((btn) => btn
-                .setIcon('plus')
-                .setButtonText('Add Calendar')
-                .setCta()
-                .onClick(async () => {
-                    this.plugin.settings.externalCalendars.push({
-                        id: createCalendarId(),
-                        url: "",
-                        color: "#3b82f6",
-                        enabled: true,
-                        autoCreateEnabled: true,
-                        autoCreateMode: "note",
-                        autoCreateTaskDestination: "daily-note",
-                        autoCreateTaskTargetPath: "",
-                        autoCreateTypeFolder: "",
-                        autoCreateFolder: "",
-                        autoCreateTag: "",
-                        autoCreateTemplate: "",
+            .setName('Calendar actions')
+            .setDesc('Add an iCal source or run the current rules immediately.')
+            .addButton((btn) => {
+                btn.buttonEl.dataset.tpsSettingsFocus = 'add-calendar';
+                return btn
+                    .setIcon('plus')
+                    .setButtonText('Add Calendar')
+                    .setCta()
+                    .onClick(async () => {
+                        const calendar: ExternalCalendarConfig = {
+                            id: createCalendarId(),
+                            url: "",
+                            color: "#3b82f6",
+                            enabled: true,
+                            autoCreateEnabled: true,
+                            autoCreateMode: "note",
+                            autoCreateTaskDestination: "daily-note",
+                            autoCreateTaskTargetPath: "",
+                            autoCreateTypeFolder: "",
+                            autoCreateFolder: "",
+                            autoCreateTag: "",
+                            autoCreateTemplate: "",
+                        };
+                        this.plugin.settings.externalCalendars.push(calendar);
+                        this.selectedCalendarId = calendar.id;
+                        await this.plugin.saveSettings();
+                        this.renderExternalCalendars(calendarsContainer);
+                        this.focusCalendarControl(calendarsContainer, calendar.id, 'configure');
                     });
-                    await this.plugin.saveSettings();
-                    this.renderExternalCalendars(calendarsContainer);
-                }));
-
-        new Setting(extCalSection)
-            .setName('Sync External Calendars')
-            .setDesc('Run external calendar sync immediately.')
+            })
             .addButton(btn => btn
                 .setButtonText('Sync Now')
-                .setCta()
                 .onClick(async () => {
                     btn.setButtonText('Syncing...');
                     btn.setDisabled(true);
@@ -151,12 +197,24 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     btn.setDisabled(false);
                 }));
 
+        const calendarsContainer = extCalSection.createDiv({ cls: 'tps-calendar-feed-list' });
+        this.renderExternalCalendars(calendarsContainer);
+        }
+
         // ── Two-Stage Archive ─────────────────────────────────────
-        const twoStageArchiveSection = createCollapsibleSection(
+        if (this.activePage === 'automations') {
+        this.renderPageHeading(
             containerEl,
-            'Archive to _archive Move Schedule',
-            'Controller-owned folder sweep for moving files from an active archive folder into a deeper cold archive on a schedule.',
-            false
+            'Automations',
+            'Configure background archive and attachment workflows without mixing them into calendar or reminder rules.'
+        );
+        this.renderAutomationSelector(containerEl);
+
+        if (this.activeAutomation === 'archive') {
+        const twoStageArchiveSection = createSettingsSection(
+            containerEl,
+            'Archive files',
+            'Move files from an active archive folder into a deeper cold archive on a schedule.'
         );
 
         new Setting(twoStageArchiveSection)
@@ -195,17 +253,22 @@ export class TPSControllerSettingTab extends PluginSettingTab {
         new Setting(twoStageArchiveSection)
             .setName('Cadence')
             .setDesc('Monthly end runs once on the last day of the month after the configured run time.')
-            .addDropdown(drop => drop
-                .addOption('monthly-end', 'End of month')
-                .addOption('weekly', 'Weekly')
-                .addOption('daily', 'Daily')
-                .setValue(this.plugin.settings.twoStageArchive.cadence)
-                .onChange(async (value) => {
-                    this.plugin.settings.twoStageArchive.cadence = value as any;
-                    await this.plugin.saveSettings();
-                    this.plugin.restartTwoStageArchiveLoop();
-                }));
+            .addDropdown(drop => {
+                drop.selectEl.dataset.tpsSettingsFocus = 'archive-cadence';
+                return drop
+                    .addOption('monthly-end', 'End of month')
+                    .addOption('weekly', 'Weekly')
+                    .addOption('daily', 'Daily')
+                    .setValue(this.plugin.settings.twoStageArchive.cadence)
+                    .onChange(async (value) => {
+                        this.plugin.settings.twoStageArchive.cadence = value as any;
+                        await this.plugin.saveSettings();
+                        this.plugin.restartTwoStageArchiveLoop();
+                        this.redisplayPreservingScroll('[data-tps-settings-focus="archive-cadence"]');
+                    });
+            });
 
+        if (this.plugin.settings.twoStageArchive.cadence === 'weekly') {
         new Setting(twoStageArchiveSection)
             .setName('Weekly Day')
             .setDesc('Used only for weekly cadence.')
@@ -223,6 +286,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                     this.plugin.restartTwoStageArchiveLoop();
                 }));
+        }
 
         new Setting(twoStageArchiveSection)
             .setName('Run Time')
@@ -269,13 +333,14 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     btn.setButtonText('Run Now');
                     btn.setDisabled(false);
                 }));
+        }
 
         // ── S3 Attachment Upload Automation ────────────────────────
-        const s3agleSection = createCollapsibleSection(
+        if (this.activeAutomation === 'attachments') {
+        const s3agleSection = createSettingsSection(
             containerEl,
-            'S3 Attachment Upload Automation',
-            'Uploads active-note local attachments directly to S3-compatible storage, rewrites links, then asks the controller device to archive successfully replaced source files.',
-            false
+            'Upload attachments',
+            'Upload active-note attachments to S3-compatible storage, rewrite links, and optionally archive replaced source files.'
         );
 
         new Setting(s3agleSection)
@@ -477,14 +542,19 @@ export class TPSControllerSettingTab extends PluginSettingTab {
         new Setting(s3agleSection)
             .setName('Archive Unreferenced Bucket Objects')
             .setDesc('On the Controller device, move Controller-uploaded S3 objects into the bucket archive prefix after their generated URL is no longer found in vault notes.')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.s3agleAttachmentAutomation.archiveUnreferencedBucketObjects === true)
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.archiveUnreferencedBucketObjects = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.restartS3BucketArchiveLoop();
-                }));
+            .addToggle(toggle => {
+                toggle.toggleEl.dataset.tpsSettingsFocus = 'bucket-archive-toggle';
+                return toggle
+                    .setValue(this.plugin.settings.s3agleAttachmentAutomation.archiveUnreferencedBucketObjects === true)
+                    .onChange(async (value) => {
+                        this.plugin.settings.s3agleAttachmentAutomation.archiveUnreferencedBucketObjects = value;
+                        await this.plugin.saveSettings();
+                        this.plugin.restartS3BucketArchiveLoop();
+                        this.redisplayPreservingScroll('[data-tps-settings-focus="bucket-archive-toggle"]');
+                    });
+            });
 
+        if (this.plugin.settings.s3agleAttachmentAutomation.archiveUnreferencedBucketObjects === true) {
         new Setting(s3agleSection)
             .setName('Bucket Archive Prefix')
             .setDesc('Object key prefix for unreferenced bucket objects. Supports {YYYY}, {MM}, and {DD}.')
@@ -521,6 +591,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     this.plugin.settings.s3agleAttachmentAutomation.bucketArchiveOrphanDelayMinutes = value;
                     await this.plugin.saveSettings();
                 }));
+        }
 
         new Setting(s3agleSection)
             .setName('Debounce (seconds)')
@@ -590,13 +661,15 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     btn.setButtonText('Run Now');
                     btn.setDisabled(false);
                 }));
+        }
+        }
 
         // ── Calendar Sync Rules ────────────────────────────────────
-        const calSection = createCollapsibleSection(
+        if (this.activePage === 'calendar') {
+        const calSection = createSettingsSection(
             containerEl,
-            'Calendar Sync Timing, Deletion, and Status Rules',
-            'Global sync behavior for external calendars.',
-            false
+            'Sync and safety',
+            'Global timing, deletion, filtering, and cancellation behavior for every external feed.'
         );
 
         new Setting(calSection)
@@ -666,12 +739,18 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     this.plugin.settings.canceledStatusValue = value;
                     await this.plugin.saveSettings();
                 }));
+        }
 
-        const fmContent = createCollapsibleSection(
-            calSection,
-            'Calendar Note Frontmatter Keys',
-            'Controller-owned calendar sync fields. Shared identity is managed by TPS Global Context Menu as tpsId and externalId.',
-            false
+        if (this.activePage === 'advanced') {
+        this.renderPageHeading(
+            containerEl,
+            'Advanced',
+            'Change shared field names or use troubleshooting controls. Normal calendar and reminder rules do not require these options.'
+        );
+        const fmContent = createSettingsSection(
+            containerEl,
+            'Calendar field names',
+            'Controller-owned calendar sync fields. Shared identity is managed by TPS Global Context Menu as tpsId and externalId.'
         );
 
         const fmKeys: { key: keyof typeof this.plugin.settings; label: string; placeholder: string }[] = [
@@ -693,29 +772,178 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                         await this.plugin.saveSettings();
                     }));
         }
+        }
 
-        // ── Reminder Rules ──────────────────────────────────────────
-        const remSection = createCollapsibleSection(
+        if (this.activePage === 'reminders') {
+            this.renderReminderSettingsPage(containerEl);
+        }
+
+        // ── Debug ───────────────────────────────────────────────────
+        if (this.activePage === 'advanced') {
+        const debugSection = createSettingsSection(
             containerEl,
-            'Reminder Evaluation Rules and Notification Sorting',
-            'Polling, ignore lists, and per-rule reminders.',
-            false
+            'Troubleshooting',
+            'Low-frequency diagnostics and reminder-state recovery controls.'
         );
 
-        const reminderConfigContent = remSection.createDiv({ cls: 'tps-reminder-config-content' });
-
-        new Setting(remSection)
-            .setName('Enable Reminders')
-            .setDesc('Master toggle for reminder evaluation and notifications.')
+        new Setting(debugSection)
+            .setName('Enable Logging')
+            .setDesc('Print detailed logs to console.')
             .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.enableReminders ?? true)
+                .setValue(this.plugin.settings.enableLogging)
                 .onChange(async (value) => {
-                    this.plugin.settings.enableReminders = value;
+                    this.plugin.settings.enableLogging = value;
                     await this.plugin.saveSettings();
-                    this.display();
                 }));
 
-        new Setting(remSection)
+        new Setting(debugSection)
+            .setName('Reset Alert State')
+            .setDesc('Clear all stored alert tracking (will re-trigger all reminders).')
+            .addButton(btn => btn
+                .setButtonText('Reset')
+                .setWarning()
+                .onClick(async () => {
+                    this.plugin.settings.alertState = {};
+                    await this.plugin.saveSettings();
+                    new Notice('Alert state cleared.');
+                }));
+        }
+    }
+
+    // ========================================================================
+    // Helpers
+    // ========================================================================
+
+    private renderSettingsDestinationHub(container: HTMLElement): void {
+        const hub = container.createDiv({ cls: 'tps-settings-destination-hub' });
+        hub.createEl('h3', { text: 'Choose what to configure', cls: 'tps-settings-destination-heading' });
+        const buttons = hub.createDiv({ cls: 'tps-settings-destination-grid' });
+        buttons.setAttr('role', 'group');
+        buttons.setAttr('aria-label', 'Controller settings pages');
+
+        for (const destination of CONTROLLER_SETTINGS_DESTINATIONS) {
+            const button = buttons.createEl('button', { cls: 'tps-settings-destination-button' });
+            button.setAttr('type', 'button');
+            button.setAttr('aria-pressed', String(this.activePage === destination.id));
+            button.createSpan({ cls: 'tps-settings-destination-label', text: destination.label });
+            button.createSpan({ cls: 'tps-settings-destination-description', text: destination.description });
+            button.addEventListener('click', () => {
+                if (this.activePage === destination.id) return;
+                this.navigateToPage(destination.id);
+            });
+        }
+    }
+
+    private renderPageHeading(container: HTMLElement, title: string, description: string): void {
+        const heading = container.createDiv({ cls: 'tps-settings-page-heading' });
+        const titleEl = heading.createEl('h2', { text: title });
+        titleEl.setAttr('tabindex', '-1');
+        heading.createEl('p', { text: description, cls: 'setting-item-description' });
+    }
+
+    private renderOverviewCard(
+        container: HTMLElement,
+        title: string,
+        summary: string,
+        buttonLabel: string,
+        destination: ControllerSettingsPage
+    ): void {
+        const card = container.createDiv({ cls: 'tps-settings-overview-card' });
+        card.createEl('h3', { text: title });
+        card.createEl('p', { text: summary, cls: 'setting-item-description' });
+        const button = card.createEl('button', { text: buttonLabel, cls: 'mod-cta' });
+        button.setAttr('type', 'button');
+        button.addEventListener('click', () => {
+            this.navigateToPage(destination);
+        });
+    }
+
+    private navigateToPage(destination: ControllerSettingsPage): void {
+        this.activePage = destination;
+        this.display();
+        const heading = this.containerEl.querySelector<HTMLElement>('.tps-settings-page-heading h2');
+        heading?.focus({ preventScroll: false });
+    }
+
+    private redisplayPreservingScroll(focusSelector?: string): void {
+        const scrollTop = this.containerEl.scrollTop;
+        this.display();
+        this.containerEl.scrollTop = scrollTop;
+        if (focusSelector) {
+            this.containerEl.querySelector<HTMLElement>(focusSelector)?.focus({ preventScroll: true });
+        }
+    }
+
+    private focusCalendarControl(
+        container: HTMLElement,
+        calendarId: string,
+        action: 'configure' | 'create-mode'
+    ): void {
+        const card = Array.from(container.querySelectorAll<HTMLElement>('.tps-calendar-feed-card'))
+            .find((element) => element.dataset.calendarId === calendarId);
+        card?.querySelector<HTMLElement>(`[data-calendar-action="${action}"]`)
+            ?.focus({ preventScroll: true });
+    }
+
+    private renderAutomationSelector(container: HTMLElement): void {
+        const selector = container.createDiv({ cls: 'tps-settings-inline-selector' });
+        selector.setAttr('role', 'group');
+        selector.setAttr('aria-label', 'Choose an automation to configure');
+
+        const destinations: Array<{ id: ControllerAutomationPage; label: string }> = [
+            { id: 'archive', label: 'Archive files' },
+            { id: 'attachments', label: 'Upload attachments' },
+        ];
+
+        for (const destination of destinations) {
+            const button = selector.createEl('button', {
+                cls: 'tps-settings-inline-selector-button',
+                text: destination.label
+            });
+            button.setAttr('type', 'button');
+            button.setAttr('data-automation', destination.id);
+            button.setAttr('aria-pressed', String(this.activeAutomation === destination.id));
+            button.addEventListener('click', () => {
+                if (this.activeAutomation === destination.id) return;
+                const scrollTop = this.containerEl.scrollTop;
+                this.activeAutomation = destination.id;
+                this.display();
+                this.containerEl.scrollTop = scrollTop;
+                this.containerEl
+                    .querySelector<HTMLElement>(`[data-automation="${destination.id}"]`)
+                    ?.focus({ preventScroll: true });
+            });
+        }
+    }
+
+    private renderReminderSettingsPage(container: HTMLElement): void {
+        this.renderPageHeading(
+            container,
+            'Reminder rules',
+            'Create and edit notification rules first, then adjust shared defaults, filters, and snooze choices.'
+        );
+
+        const rulesSection = createSettingsSection(
+            container,
+            'Rules',
+            'Turn reminder evaluation on, then add or open a rule to control what fires and when.'
+        );
+
+        new Setting(rulesSection)
+            .setName('Enable Reminders')
+            .setDesc('Master toggle for reminder evaluation and notifications.')
+            .addToggle(toggle => {
+                toggle.toggleEl.dataset.tpsSettingsFocus = 'enable-reminders';
+                return toggle
+                    .setValue(this.plugin.settings.enableReminders ?? true)
+                    .onChange(async (value) => {
+                        this.plugin.settings.enableReminders = value;
+                        await this.plugin.saveSettings();
+                        this.redisplayPreservingScroll('[data-tps-settings-focus="enable-reminders"]');
+                    });
+            });
+
+        new Setting(rulesSection)
             .setName('Hourly Time Tracking Reminders')
             .setDesc('When this device is the Controller, send a TPS Notifier reminder on the hour for each active time tracking session.')
             .addToggle(toggle => toggle
@@ -726,14 +954,64 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     this.plugin.restartTimeTrackingReminderLoop();
                 }));
 
+        let rulesContainer: HTMLElement | null = null;
+        let presetSummary: HTMLElement | null = null;
         if (!(this.plugin.settings.enableReminders ?? true)) {
-            remSection.createEl('p', {
-                text: 'Reminders are disabled. Enable the master toggle to show reminder configuration.',
+            rulesSection.createEl('p', {
+                text: 'Reminder evaluation is off. You can still add, edit, and review rules below before enabling notifications.',
                 cls: 'setting-item-description'
             });
-        } else {
+        }
 
-        new Setting(reminderConfigContent)
+        new Setting(rulesSection)
+            .setName('Rule actions')
+            .setDesc('Create a custom rule, install any missing recommended rules, or evaluate the current set now.')
+            .addButton(btn => btn
+                .setButtonText('Add Rule')
+                .setCta()
+                .onClick(async () => {
+                    const reminder = this.createDefaultReminder();
+                    this.plugin.settings.reminders.push(reminder);
+                    this.reminderRuleViewState.set(reminder.id, true);
+                    await this.plugin.saveSettings();
+                    if (rulesContainer) this.renderReminderRules(rulesContainer);
+                }))
+            .addButton(btn => btn
+                .setButtonText('Install Recommended')
+                .onClick(async () => {
+                    const added = this.addMissingRecommendedReminderRules();
+                    await this.plugin.saveSettings();
+                    if (rulesContainer) this.renderReminderRules(rulesContainer);
+                    if (presetSummary) this.renderRecommendedReminderSummary(presetSummary);
+                    new Notice(added > 0
+                        ? `Added ${added} reminder rule${added === 1 ? '' : 's'}.`
+                        : 'Recommended reminder rules are already present.');
+                }))
+            .addButton(btn => btn
+                .setButtonText('Check Now')
+                .onClick(async () => {
+                    btn.setButtonText('Checking…');
+                    btn.setDisabled(true);
+                    try {
+                        await (this.plugin as any).runReminderCheck();
+                        new Notice('Reminder check complete.');
+                    } catch (e) {
+                        new Notice('Reminder check failed.');
+                    }
+                    btn.setButtonText('Check Now');
+                    btn.setDisabled(false);
+                }));
+
+        rulesContainer = rulesSection.createDiv({ cls: 'tps-controller-reminder-rules' });
+        this.renderReminderRules(rulesContainer);
+
+        const defaultsSection = createSettingsSection(
+            container,
+            'Reminder defaults',
+            'Shared evaluation and display behavior used by the rule list.'
+        );
+
+        new Setting(defaultsSection)
             .setName('Check Interval (minutes)')
             .setDesc('How often to evaluate reminder rules.')
             .addSlider(slider => slider
@@ -745,7 +1023,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-        new Setting(reminderConfigContent)
+        new Setting(defaultsSection)
             .setName('Batch Notifications')
             .setDesc('Send one combined notification for multiple triggers.')
             .addToggle(toggle => toggle
@@ -755,7 +1033,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-        new Setting(reminderConfigContent)
+        new Setting(defaultsSection)
             .setName('Notification Sort Direction')
             .setDesc('Controls whether the notification sidebar and reminder modal show oldest due items first or newest due items first.')
             .addDropdown(dropdown => dropdown
@@ -768,9 +1046,9 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     this.plugin.refreshNotificationViews();
                 }));
 
-        new Setting(reminderConfigContent)
+        new Setting(defaultsSection)
             .setName('Default All-Day Base Time')
-            .setDesc('Time of day (HH:MM) used as the trigger base for all-day events when a reminder has no per-rule "All-Day Base Time" set. Without this, all-day events default to midnight and notifications fire at the start of the day.')
+            .setDesc('Time of day (HH:MM) used for all-day reminders when a rule does not specify its own base time.')
             .addText(text => text
                 .setPlaceholder('09:00')
                 .setValue(this.plugin.settings.defaultAllDayBaseTime || '09:00')
@@ -779,47 +1057,10 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-        let rulesContainer: HTMLElement | null = null;
-        const presetSection = createCollapsibleSection(
-            reminderConfigContent,
-            'Install Recommended Reminder Rules',
-            'Adds the three common rules: timed scheduled notes/tasks, unmatched external calendar events, and all-day scheduled notes/events.',
-            false
-        );
-        const presetSummary = presetSection.createDiv({ cls: 'tps-reminder-preset-summary' });
-        this.renderRecommendedReminderSummary(presetSummary);
-        new Setting(presetSection)
-            .setName('Install recommended rules')
-            .setDesc('Adds any missing standard rules without deleting your custom rules.')
-            .addButton(btn => btn
-                .setButtonText('Add Missing Rules')
-                .setCta()
-                .onClick(async () => {
-                    const added = this.addMissingRecommendedReminderRules();
-                    await this.plugin.saveSettings();
-                    this.renderRecommendedReminderSummary(presetSummary);
-                    if (rulesContainer) this.renderReminderRules(rulesContainer);
-                    new Notice(added > 0 ? `Added ${added} reminder rule${added === 1 ? '' : 's'}.` : 'Recommended reminder rules are already present.');
-                }));
-        new Setting(presetSection)
-            .setName('Reset to recommended rules')
-            .setDesc('Replaces the current reminder rule list with the standard three-rule setup.')
-            .addButton(btn => btn
-                .setButtonText('Replace Rules')
-                .setWarning()
-                .onClick(async () => {
-                    this.plugin.settings.reminders = this.getRecommendedReminderRules();
-                    await this.plugin.saveSettings();
-                    this.renderRecommendedReminderSummary(presetSummary);
-                    if (rulesContainer) this.renderReminderRules(rulesContainer);
-                    new Notice('Reminder rules reset to the recommended setup.');
-                }));
-
-        const ignoreContent = createCollapsibleSection(
-            reminderConfigContent,
-            'Reminder Global Ignore Paths, Tags, Statuses, and Checkbox States',
-            'Shared filters applied before individual reminder rules.',
-            false
+        const ignoreContent = createSettingsSection(
+            container,
+            'Global reminder filters',
+            'Shared ignore filters applied before individual reminder rules.'
         );
 
         new Setting(ignoreContent)
@@ -866,50 +1107,15 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-        // Individual reminder rules
-        rulesContainer = reminderConfigContent.createDiv({ cls: 'tps-controller-reminder-rules' });
-        this.renderReminderRules(rulesContainer);
-
-        new Setting(reminderConfigContent)
-            .addButton(btn => btn
-                .setButtonText('Add Reminder Rule')
-                .setCta()
-                .onClick(async () => {
-                    this.plugin.settings.reminders.push(this.createDefaultReminder());
-                    await this.plugin.saveSettings();
-                    this.renderReminderRules(rulesContainer);
-                }));
-
-        new Setting(reminderConfigContent)
-            .setName('Run Reminder Check')
-            .setDesc('Evaluate all reminder rules now.')
-            .addButton(btn => btn
-                .setButtonText('Check Now')
-                .onClick(async () => {
-                    btn.setButtonText('Checking…');
-                    btn.setDisabled(true);
-                    try {
-                        await (this.plugin as any).runReminderCheck();
-                        new Notice('Reminder check complete.');
-                    } catch (e) {
-                        new Notice('Reminder check failed.');
-                    }
-                    btn.setButtonText('Check Now');
-                    btn.setDisabled(false);
-                }));
-        }
-
-        // ── Snooze ─────────────────────────────────────────────────
-        const snoozeSection = createCollapsibleSection(
-            containerEl,
-            'Reminder Snooze Property and Presets',
-            'Reminder snooze field configuration and presets.',
-            false
+        const snoozeSection = createSettingsSection(
+            container,
+            'Snooze defaults',
+            'Choose the property and quick durations shown in reminder interfaces.'
         );
 
         new Setting(snoozeSection)
             .setName('Snooze Property')
-            .setDesc('Frontmatter property name for snooze time (e.g., reminderSnooze)')
+            .setDesc('Frontmatter property name for snooze time (e.g., reminderSnooze).')
             .addText(text => text
                 .setPlaceholder('reminderSnooze')
                 .setValue(this.plugin.settings.snoozeProperty || 'reminderSnooze')
@@ -918,92 +1124,42 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-        const snoozePresetsEl = createCollapsibleSection(
-            snoozeSection,
-            'Quick Snooze Durations',
-            'Quick snooze durations shown in the reminder UI.',
-            false
-        );
-        this.renderSnoozeOptions(snoozePresetsEl);
-        new Setting(snoozePresetsEl)
-            .addButton((btn) =>
-                btn.setButtonText('Add Preset').setCta().onClick(async () => {
+        const snoozeOptions = snoozeSection.createDiv({ cls: 'tps-snooze-options' });
+        this.renderSnoozeOptions(snoozeOptions);
+        new Setting(snoozeSection)
+            .setName('Quick Snooze Durations')
+            .setDesc('Add another duration to the reminder UI.')
+            .addButton(btn => btn
+                .setButtonText('Add Preset')
+                .onClick(async () => {
                     if (!Array.isArray(this.plugin.settings.snoozeOptions)) this.plugin.settings.snoozeOptions = [];
                     this.plugin.settings.snoozeOptions.push({ label: '15 Minutes', minutes: 15 });
                     await this.plugin.saveSettings();
-                    this.renderSnoozeOptions(snoozePresetsEl);
-                })
-            );
-
-        // ── Debug ───────────────────────────────────────────────────
-        const debugSection = createCollapsibleSection(
-            containerEl,
-            'Debug Logging and Alert Reset',
-            'Low-frequency troubleshooting controls.',
-            false
-        );
-
-        new Setting(debugSection)
-            .setName('Enable Logging')
-            .setDesc('Print detailed logs to console.')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.enableLogging)
-                .onChange(async (value) => {
-                    this.plugin.settings.enableLogging = value;
-                    await this.plugin.saveSettings();
+                    this.renderSnoozeOptions(snoozeOptions);
                 }));
 
-        new Setting(debugSection)
-            .setName('Reset Alert State')
-            .setDesc('Clear all stored alert tracking (will re-trigger all reminders).')
+        const maintenanceSection = createSettingsSection(
+            container,
+            'Rule maintenance',
+            'Review or replace the recommended baseline. Replacing rules deletes the current custom rule list.'
+        );
+        const maintenanceSummary = maintenanceSection.createDiv({ cls: 'tps-reminder-preset-summary' });
+        presetSummary = maintenanceSummary;
+        this.renderRecommendedReminderSummary(maintenanceSummary);
+        new Setting(maintenanceSection)
+            .setName('Reset to recommended rules')
+            .setDesc('Replace every current rule with the standard recommended setup.')
             .addButton(btn => btn
-                .setButtonText('Reset')
+                .setButtonText('Replace Rules')
                 .setWarning()
                 .onClick(async () => {
-                    this.plugin.settings.alertState = {};
+                    this.plugin.settings.reminders = this.getRecommendedReminderRules();
                     await this.plugin.saveSettings();
-                    new Notice('Alert state cleared.');
+                    this.renderRecommendedReminderSummary(maintenanceSummary);
+                    if (rulesContainer) this.renderReminderRules(rulesContainer);
+                    new Notice('Reminder rules reset to the recommended setup.');
                 }));
-
-        this.restoreSettingsViewState(containerEl);
     }
-
-    // ========================================================================
-    // Helpers
-    // ========================================================================
-    private captureSettingsViewState(containerEl: HTMLElement): void {
-        this.settingsScrollTop = containerEl.scrollTop;
-        this.settingsViewState.clear();
-        const detailsEls = Array.from(containerEl.querySelectorAll('details'));
-        detailsEls.forEach((detailsEl, index) => {
-            const details = detailsEl as HTMLDetailsElement;
-            const summaryText = details.querySelector('summary')?.textContent?.trim() || '';
-            const key = `${index}:${summaryText}`;
-            this.settingsViewState.set(key, details.open);
-        });
-    }
-
-    private restoreSettingsViewState(containerEl: HTMLElement): void {
-        const detailsEls = Array.from(containerEl.querySelectorAll('details'));
-        if (!this.hasRenderedSettings) {
-            detailsEls.forEach((detailsEl) => {
-                (detailsEl as HTMLDetailsElement).removeAttribute('open');
-            });
-            this.hasRenderedSettings = true;
-            containerEl.scrollTop = 0;
-            return;
-        }
-        detailsEls.forEach((detailsEl, index) => {
-            const details = detailsEl as HTMLDetailsElement;
-            const summaryText = details.querySelector('summary')?.textContent?.trim() || '';
-            const key = `${index}:${summaryText}`;
-            const isOpen = this.settingsViewState.get(key);
-            if (isOpen) details.setAttr('open', 'true');
-            else details.removeAttribute('open');
-        });
-        containerEl.scrollTop = this.settingsScrollTop;
-    }
-
 
     private createDefaultReminder(): PropertyReminder {
         return {
@@ -1684,39 +1840,56 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             return;
         }
 
-        const save = async (rerender = false) => {
+        const save = async (
+            rerender = false,
+            focus?: { calendarId: string; action: 'configure' | 'create-mode' }
+        ) => {
             await this.plugin.saveSettings();
-            if (rerender) this.renderExternalCalendars(container);
+            if (rerender) {
+                this.renderExternalCalendars(container);
+                if (focus) this.focusCalendarControl(container, focus.calendarId, focus.action);
+            }
         };
 
         calendars.forEach((calendar, index) => {
-            const card = container.createDiv();
-            card.style.border = "1px solid var(--background-modifier-border)";
-            card.style.borderRadius = "8px";
-            card.style.padding = "12px";
-            card.style.marginBottom = "12px";
-            card.style.background = "var(--background-primary-alt)";
-
-            const header = card.createDiv();
-            header.style.display = "flex";
-            header.style.alignItems = "center";
-            header.style.gap = "10px";
-            header.style.marginBottom = "10px";
+            const calendarId = String(calendar.id || `calendar-index-${index}`);
+            const card = container.createDiv({ cls: 'tps-calendar-feed-card' });
+            card.dataset.calendarId = calendarId;
+            const header = card.createDiv({ cls: 'tps-calendar-feed-header' });
 
             // Title / Toggle
             const toggle = header.createEl("input", { type: "checkbox" });
+            toggle.setAttr('aria-label', `Enable ${this.buildCalendarDisplayName(calendar, index)}`);
             toggle.checked = calendar.enabled !== false;
             toggle.addEventListener("change", async () => {
                 calendar.enabled = toggle.checked;
+                summary.textContent = this.buildCalendarOutputSummary(calendar);
                 await save();
             });
 
-            const title = header.createEl("strong", {
-                text: calendar.url ? `Calendar ${index + 1}` : "New Calendar"
+            const identity = header.createDiv({ cls: 'tps-calendar-feed-identity' });
+            const title = identity.createEl("strong", {
+                text: this.buildCalendarDisplayName(calendar, index)
             });
-            title.style.flex = "1";
+            const summary = identity.createSpan({
+                cls: 'tps-calendar-feed-summary',
+                text: this.buildCalendarOutputSummary(calendar)
+            });
 
-            // Move Up/Down?
+            const editorId = `tps-calendar-feed-editor-${String(calendar.id || index).replace(/[^A-Za-z0-9_-]/g, '-')}`;
+            const configureBtn = header.createEl("button", {
+                text: this.selectedCalendarId === calendar.id ? "Close" : "Configure"
+            });
+            configureBtn.setAttr('type', 'button');
+            configureBtn.dataset.calendarAction = 'configure';
+            configureBtn.setAttr('aria-expanded', String(this.selectedCalendarId === calendar.id));
+            configureBtn.setAttr('aria-controls', editorId);
+            configureBtn.addEventListener("click", () => {
+                this.selectedCalendarId = this.selectedCalendarId === calendar.id ? null : calendar.id;
+                this.renderExternalCalendars(container);
+                this.focusCalendarControl(container, calendarId, 'configure');
+            });
+
             const move = (from: number, to: number) => {
                 const temp = calendars[from];
                 calendars[from] = calendars[to];
@@ -1724,41 +1897,62 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             };
 
             const upBtn = header.createEl("button", { text: "↑" });
+            upBtn.setAttr('aria-label', 'Move calendar up');
+            upBtn.setAttr('title', 'Move calendar up');
             upBtn.disabled = index === 0;
             upBtn.addEventListener("click", async () => {
                 if (index === 0) return;
                 move(index, index - 1);
-                await save(true);
+                await save(true, { calendarId, action: 'configure' });
             });
 
             const downBtn = header.createEl("button", { text: "↓" });
+            downBtn.setAttr('aria-label', 'Move calendar down');
+            downBtn.setAttr('title', 'Move calendar down');
             downBtn.disabled = index === calendars.length - 1;
             downBtn.addEventListener("click", async () => {
                 if (index >= calendars.length - 1) return;
                 move(index, index + 1);
-                await save(true);
+                await save(true, { calendarId, action: 'configure' });
             });
 
             // Delete
             const delBtn = header.createEl("button", { text: "Delete" });
             delBtn.classList.add("mod-warning");
             delBtn.addEventListener("click", async () => {
+                const nextCalendar = calendars[index + 1] || calendars[index - 1];
+                const nextCalendarId = nextCalendar ? String(nextCalendar.id || '') : '';
+                if (this.selectedCalendarId === calendar.id) this.selectedCalendarId = null;
                 calendars.splice(index, 1);
                 await save(true);
+                if (nextCalendarId) {
+                    this.focusCalendarControl(container, nextCalendarId, 'configure');
+                } else {
+                    this.containerEl
+                        .querySelector<HTMLElement>('[data-tps-settings-focus="add-calendar"]')
+                        ?.focus({ preventScroll: true });
+                }
             });
 
+            if (this.selectedCalendarId !== calendar.id) return;
+
+            const editor = card.createDiv({ cls: 'tps-calendar-feed-editor' });
+            editor.id = editorId;
+
             // Fields
-            new Setting(card)
+            new Setting(editor)
                 .setName("iCal URL")
                 .addText(text => text
                     .setPlaceholder("https://...")
                     .setValue(calendar.url)
                     .onChange(async (val) => {
                         calendar.url = val.trim();
+                        title.textContent = this.buildCalendarDisplayName(calendar, index);
+                        toggle.setAttr('aria-label', `Enable ${this.buildCalendarDisplayName(calendar, index)}`);
                         await save();
                     }));
 
-            new Setting(card)
+            new Setting(editor)
                 .setName("Color")
                 .addColorPicker(picker => picker
                     .setValue(calendar.color || "#3b82f6")
@@ -1767,12 +1961,8 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                         await save();
                     }));
 
-            const acContent = card.createDiv();
-            acContent.style.marginTop = "8px";
-            acContent.style.border = "1px solid var(--background-modifier-border)";
-            acContent.style.padding = "8px";
-            acContent.style.borderRadius = "4px";
-            acContent.createEl("h5", { text: "Auto-Create Settings" });
+            const acContent = editor.createDiv({ cls: 'tps-calendar-feed-output' });
+            acContent.createEl("h4", { text: "Creation rule" });
 
             new Setting(acContent)
                 .setName("Enable Auto-Create")
@@ -1780,20 +1970,24 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     .setValue(calendar.autoCreateEnabled !== false)
                     .onChange(async (val) => {
                         calendar.autoCreateEnabled = val;
+                        summary.textContent = this.buildCalendarOutputSummary(calendar);
                         await save();
                     }));
 
             new Setting(acContent)
                 .setName("Create as")
                 .setDesc("Choose whether synced external events become event notes or inline task items.")
-                .addDropdown(drop => drop
-                    .addOption("note", "Note")
-                    .addOption("task", "Task item")
-                    .setValue(calendar.autoCreateMode || "note")
-                    .onChange(async (val: "note" | "task") => {
-                        calendar.autoCreateMode = val;
-                        await save(true);
-                    }));
+                .addDropdown(drop => {
+                    drop.selectEl.dataset.calendarAction = 'create-mode';
+                    return drop
+                        .addOption("note", "Note")
+                        .addOption("task", "Task item")
+                        .setValue(calendar.autoCreateMode || "note")
+                        .onChange(async (val: "note" | "task") => {
+                            calendar.autoCreateMode = val;
+                            await save(true, { calendarId, action: 'create-mode' });
+                        });
+                });
 
             if ((calendar.autoCreateMode || "note") === "task") {
                 new Setting(acContent)
@@ -1802,11 +1996,12 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     .addDropdown(drop => drop
                         .addOption("daily-note", "Daily note")
                         .addOption("event-note", "Single task note")
-                        .setValue(calendar.autoCreateTaskDestination || "daily-note")
-                        .onChange(async (val: "daily-note" | "event-note") => {
-                            calendar.autoCreateTaskDestination = val;
-                            await save();
-                        }));
+                    .setValue(calendar.autoCreateTaskDestination || "daily-note")
+                    .onChange(async (val: "daily-note" | "event-note") => {
+                        calendar.autoCreateTaskDestination = val;
+                        summary.textContent = this.buildCalendarOutputSummary(calendar);
+                        await save();
+                    }));
 
                 new Setting(acContent)
                     .setName("Task target note")
@@ -1817,6 +2012,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                             if ((calendar.autoCreateTaskTargetPath || "") === normalized) return;
                             calendar.autoCreateTaskTargetPath = normalized;
                             t.setValue(normalized);
+                            summary.textContent = this.buildCalendarOutputSummary(calendar);
                             await save();
                         };
                         t.setValue(calendar.autoCreateTaskTargetPath || "")
@@ -1835,9 +2031,8 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                             void commit();
                         });
                     });
-            }
-
-            new Setting(acContent)
+            } else {
+                new Setting(acContent)
                 .setName("Type Folder")
                 .setDesc("High-level folder categorization (optional).")
                 .addText(t => t
@@ -1845,6 +2040,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     .setPlaceholder("Meetings/External")
                     .onChange(async (val) => {
                         calendar.autoCreateTypeFolder = val;
+                        summary.textContent = this.buildCalendarOutputSummary(calendar);
                         await save();
                     }));
 
@@ -1856,8 +2052,10 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     .setPlaceholder("Folder/Path")
                     .onChange(async (val) => {
                         calendar.autoCreateFolder = val;
+                        summary.textContent = this.buildCalendarOutputSummary(calendar);
                         await save();
                     }));
+            }
 
             new Setting(acContent)
                 .setName("Tag")
@@ -1870,17 +2068,43 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                         await save();
                     }));
 
-            new Setting(acContent)
-                .setName("Template")
-                .setDesc("Path to template file")
-                .addText(t => t
-                    .setValue(calendar.autoCreateTemplate || "")
-                    .setPlaceholder("Templates/Meeting.md")
-                    .onChange(async (val) => {
-                        calendar.autoCreateTemplate = val;
-                        await save();
-                    }));
+            if ((calendar.autoCreateMode || "note") === "note") {
+                new Setting(acContent)
+                    .setName("Template")
+                    .setDesc("Path to template file")
+                    .addText(t => t
+                        .setValue(calendar.autoCreateTemplate || "")
+                        .setPlaceholder("Templates/Meeting.md")
+                        .onChange(async (val) => {
+                            calendar.autoCreateTemplate = val;
+                            await save();
+                        }));
+            }
         });
+    }
+
+    private buildCalendarDisplayName(calendar: ExternalCalendarConfig, index: number): string {
+        const rawUrl = String(calendar.url || '').trim();
+        if (!rawUrl) return `New calendar ${index + 1}`;
+        try {
+            const parsed = new URL(rawUrl);
+            return parsed.hostname || `Calendar ${index + 1}`;
+        } catch {
+            return rawUrl.length > 44 ? `${rawUrl.slice(0, 41)}…` : rawUrl;
+        }
+    }
+
+    private buildCalendarOutputSummary(calendar: ExternalCalendarConfig): string {
+        const state = calendar.enabled === false ? 'Disabled' : 'Enabled';
+        if (calendar.autoCreateEnabled === false) return `${state} · sync only`;
+        if ((calendar.autoCreateMode || 'note') === 'task') {
+            const destination = (calendar.autoCreateTaskDestination || 'daily-note') === 'daily-note'
+                ? 'daily note'
+                : calendar.autoCreateTaskTargetPath || 'single task note';
+            return `${state} · Task → ${destination}`;
+        }
+        const destination = calendar.autoCreateFolder || calendar.autoCreateTypeFolder || 'default note folder';
+        return `${state} · Note → ${destination}`;
     }
 
     renderSnoozeOptions(container: HTMLElement): void {
