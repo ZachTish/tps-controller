@@ -1,5 +1,14 @@
 # TPS Controller
 
+## 0.3.0
+
+- Added the default-off **Local Notices on User Devices** reminder option. Each active User-role Obsidian instance can now evaluate the normal reminder rules and show the existing clickable in-app notice without resolving or calling TPS Messager/Notifier.
+- Desktop Controller behavior is unchanged: due reminders still show a local Obsidian notice before optional Messager delivery. Mobile Controller roles remain passive, but may use the same local-only route when this option is enabled.
+- User-local and Controller/Messager alert histories are isolated in separate device-local storage, so one route cannot consume the other route's delivery. Checks are single-flight, stale in-flight results are discarded after lifecycle changes, role is rechecked before Messager dispatch, and alert reset clears both histories.
+- Reminder timing changes, the master toggle, role changes, and the new option replace the scheduler immediately. User-local delivery has normal rule parity, including read-only external-calendar feed evaluation when configured; it works only while Obsidian is loaded and cannot wake a closed or suspended app.
+- Validation passed the focused policy, scheduler, settings, role-race, state-isolation, and Messager-bypass regressions plus the complete declared suite and separate production-mode build. Obsidian 1.12.7 was reloaded in the isolated test vault; a disposable Inbox note produced one scheduled local notice on an active User instance and no duplicate on the next poll. Settings and alert state were restored, the note was moved directly to `_archive`, and production was not directly changed.
+- This backward-compatible feature release keeps the minimum supported Obsidian version at 1.12.0 and requires no settings or data migration.
+
 ## 0.2.0
 
 - Replaced the deep settings tree with a sticky five-destination **Choose what to configure** hub: Overview, Calendar rules, Reminder rules, Automations, and Advanced. Only the active page renders, and mobile uses a compact horizontal strip.
@@ -85,7 +94,7 @@ Device role, reminder alert reset, calendar quarantine review, historical backfi
 - External-calendar task target normalization rejects empty/root-only pseudo-paths such as `/.md`; task mode falls back to its configured daily-note/event-note route instead of targeting a meaningless `.md` file.
 - Two-stage archive: disabled by default, configured for `Archive` -> `_archive`, monthly-end cadence, local run time, weekly day for weekly cadence, and check interval.
 - S3 attachment upload automation: disabled by default, can run on active note open, active note modify, paste, or after user-defined command IDs such as a Linter/workflow command. It uploads directly from the active user instance using the configured S3-compatible endpoint, confirms public-read access when enabled, rewrites confirmed links, then requests controller-side archiving for confirmed uploaded source files.
-- Reminder controls: enable reminders, hourly time-tracking reminders, poll interval, batch notifications, default all-day base time, global ignore lists, per-rule reminder definitions, and a recommended rule install/reset flow.
+- Reminder controls: enable reminders, hourly time-tracking reminders, poll interval, batch notifications, default-off local notices on User devices, default all-day base time, global ignore lists, per-rule reminder definitions, and a recommended rule install/reset flow.
 - Settings writes are awaited and coalesced, external-calendar arrays and entries are normalized in place so open controls retain live references, and unload waits only for saves that were already requested. First-run legacy plugin migration fills only keys absent from the raw Controller payload, so explicit `false`, blank, and empty-list choices are preserved.
 - Reminder rule text inputs preserve their live rule object across autosave normalization, so rapid multi-character edits persist the complete value instead of only the first keystroke.
 - Reminder status filters and checkbox-state filters are configured separately. Status filters match note frontmatter status and task semantic status values such as `complete`, `working`, or `wont-do`; checkbox-state filters match raw Markdown task markers such as blank/open, `x`, `-`, `/`, or `?`.
@@ -181,6 +190,10 @@ Device role, reminder alert reset, calendar quarantine review, historical backfi
 - When Batch Notifications is disabled, each reminder is delivered individually.
 - Non-repeating vault note/task reminders are delivered only inside a bounded live window after their calculated trigger. The window is twice the configured poll interval, with a one-minute minimum and five-minute maximum; older one-shot triggers are consumed without notification instead of being delivered as stale catch-up alerts.
 - `Repeat until complete` rules are exempt from the stale one-shot guard and can continue notifying overdue work at their configured repeat interval. A separate repeating rule does not cause an expired one-shot rule such as `15 minutes before` to fire again.
+- Desktop Controller runs keep their existing behavior: each due batch first shows a clickable local Obsidian notice, then uses TPS Messager/Notifier when its send API is available.
+- **Local Notices on User Devices** is off by default. When enabled, each loaded User instance evaluates the same rules and shows the same clickable Obsidian notice without looking up or calling TPS Messager. This is in-app delivery only: it cannot wake or notify a device while Obsidian is closed or the operating system has suspended it.
+- User-device and Controller/Messager delivery state use separate device-local storage and are never written into synchronized Controller data. One active device therefore cannot suppress another, and locally consuming a reminder cannot suppress Messenger delivery if that device is later promoted to Controller.
+- Local User checks retain normal rule parity, including read-only external-calendar feed fetches when an enabled rule includes unmatched external events. Reminder evaluation is single-flight per active instance, and changing role, the master toggle, the User-device option, poll timing, or repeat timing immediately replaces the effective loop.
 
 ## Cross-device sync request safety
 
@@ -199,7 +212,7 @@ Device role, reminder alert reset, calendar quarantine review, historical backfi
 - Controller exposes a plugin API with `isController`, `getRole`, `getSettings`, `getCalendarSettingsSnapshot`, `getReminders`, `getOverdueItems`, and `snoozeFile`.
 - Calendar integration uses TPS Calendar Base settings as a fallback source for external calendar definitions and respects Calendar Base hidden-external-event state when building unmatched external reminder candidates.
 - Global Context Menu integration is used for shared external identity helpers, file-updated event emission, guarded status writes, and parent/child maintenance when the GCM API is available.
-- Notifier integration remains optional: Controller falls back to local Obsidian notices when TPS Notifier is unavailable or exposes no send API.
+- Messager/Notifier integration remains optional: desktop Controller delivery always includes a local Obsidian notice, while opted-in User instances use a separate local-only route that bypasses the integration entirely.
 - Controller intentionally does not intercept Notebook Navigator file selections. Notebook Navigator and Obsidian determine whether selections reuse the current leaf, open a note, extend a multi-selection, or begin a drag; Controller does not patch global leaf-opening APIs to override that behavior.
 
 ## Diagnostics
@@ -288,3 +301,4 @@ The responsive destination hub remains sticky at the top of every settings page,
 
 - 2026-07-13: Audited and flattened settings navigation. First open now closes every accordion, recommended-rule setup no longer expands implicitly, and reminder editor subgroups are non-collapsible to enforce a maximum depth of two. Validation: settings hierarchy audit, full test suite, production build/deploy, and Obsidian reload.
 - 2026-07-24 (0.2.0): Consolidated Controller settings into Overview, Calendar rules, Reminder rules, Automations, and Advanced destinations. Calendar feed and reminder rule actions now precede their lists, feed rows show output summaries, only one feed editor is shown, and irrelevant task/note destination fields stay out of view. Reminder configuration remains reachable while evaluation is off, and conditional rerenders restore keyboard focus. The complete suite, standalone build, test-vault reload, and live route/automation UI checks passed. This is a settings-navigation-only change with no persisted schema migration.
+- 2026-07-28 (0.3.0): Added default-off local reminder notices for active User devices with strict Messager bypass, separate per-device delivery state, lifecycle-safe single-flight scheduling, and Controller-role race guards. Focused regressions, the complete suite, a separate build, test-vault reload, and a scheduled disposable-note UI check passed; the next poll did not duplicate the notice. Production was not directly changed.

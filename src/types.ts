@@ -190,6 +190,7 @@ export interface TPSControllerSettings {
     reminders: PropertyReminder[];
     alertState: AlertState;
     batchNotifications: boolean;
+    enableLocalReminderNoticesOnUserDevices: boolean;
     globalIgnorePaths: string[];
     globalIgnoreTags: string[];
     globalIgnoreStatuses: string[];
@@ -271,6 +272,7 @@ export const DEFAULT_CONTROLLER_SETTINGS: TPSControllerSettings = {
     reminders: [],
     alertState: {},
     batchNotifications: true,
+    enableLocalReminderNoticesOnUserDevices: false,
     globalIgnorePaths: ["System/"],
     globalIgnoreTags: ["archive", "template"],
     globalIgnoreStatuses: ["complete", "wont-do"],

@@ -10,6 +10,7 @@ const reminderCandidateSource = readFileSync(new URL('../src/services/reminder-c
 const reminderTargetSource = readFileSync(new URL('../src/services/reminder-target-service.ts', import.meta.url), 'utf8');
 const reminderSettingsSource = readFileSync(new URL('../src/services/reminder-settings-service.ts', import.meta.url), 'utf8');
 const reminderDeliveryWindowSource = readFileSync(new URL('../src/services/reminder-delivery-window.ts', import.meta.url), 'utf8');
+const reminderRuntimePolicySource = readFileSync(new URL('../src/services/reminder-runtime-policy.ts', import.meta.url), 'utf8');
 const timeCalculationSource = readFileSync(new URL('../src/utils/time-calculation-service.ts', import.meta.url), 'utf8');
 const notificationViewSource = readFileSync(new URL('../src/views/notification-view.ts', import.meta.url), 'utf8');
 const notificationSignatureSource = readFileSync(new URL('../src/views/notification-view-signature.ts', import.meta.url), 'utf8');
@@ -58,6 +59,18 @@ function loadReminderDeliveryWindowModule() {
   return module.exports;
 }
 
+function loadReminderRuntimePolicyModule() {
+  const compiled = ts.transpileModule(reminderRuntimePolicySource, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2018 },
+  });
+  const module = { exports: {} };
+  const load = new Function('module', 'exports', 'require', compiled.outputText);
+  load(module, module.exports, () => {
+    throw new Error('Reminder runtime policy must not load external modules');
+  });
+  return module.exports;
+}
+
 function loadNotificationSignatureModule() {
   const compiled = ts.transpileModule(notificationSignatureSource, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2018 },
@@ -79,6 +92,74 @@ test('all-day task reminders can repeat until their stop condition', () => {
 test('reminder scheduler wakes at the shortest active repeat interval', () => {
   assert.match(mainSource, /const activeRepeatMs = \(this\.settings\.reminders \|\| \[\]\)/);
   assert.match(mainSource, /Math\.min\(pollMs, \.\.\.activeRepeatMs\)/);
+});
+
+test('active-instance reminder policy is default-off on User devices and never promotes mobile to Controller delivery', () => {
+  const { resolveReminderDeliveryMode } = loadReminderRuntimePolicyModule();
+  const resolve = (overrides = {}) => resolveReminderDeliveryMode({
+    enableReminders: true,
+    enableLocalReminderNoticesOnUserDevices: false,
+    isController: false,
+    isMobile: false,
+    ...overrides,
+  });
+
+  assert.equal(resolve(), null);
+  assert.equal(resolve({ enableLocalReminderNoticesOnUserDevices: true }), 'local-only');
+  assert.equal(resolve({
+    enableLocalReminderNoticesOnUserDevices: true,
+    isMobile: true,
+  }), 'local-only');
+  assert.equal(resolve({ isController: true }), 'controller');
+  assert.equal(resolve({
+    enableLocalReminderNoticesOnUserDevices: true,
+    isController: true,
+  }), 'controller');
+  assert.equal(resolve({
+    isController: true,
+    isMobile: true,
+  }), null);
+  assert.equal(resolve({
+    enableLocalReminderNoticesOnUserDevices: true,
+    isController: true,
+    isMobile: true,
+  }), 'local-only');
+  assert.equal(resolve({
+    enableReminders: false,
+    enableLocalReminderNoticesOnUserDevices: true,
+    isController: true,
+  }), null);
+  assert.equal(resolve({
+    enableReminders: 'true',
+    enableLocalReminderNoticesOnUserDevices: true,
+  }), null);
+});
+
+test('User-device reminder checks keep separate local state and return before Messager lookup', () => {
+  assert.match(typesSource, /enableLocalReminderNoticesOnUserDevices: boolean/);
+  assert.match(typesSource, /enableLocalReminderNoticesOnUserDevices: false/);
+  assert.match(mainSource, /tps-controller-local-user-alert-state-/);
+  assert.match(mainSource, /const evaluationAlertState = this\.cloneAlertState\(activeAlertState\)/);
+  assert.match(mainSource, /const evaluationSettings: TPSControllerSettings = \{[\s\S]*alertState: evaluationAlertState/);
+  assert.match(mainSource, /this\.localUserAlertState = evaluationAlertState;[\s\S]*this\.persistLocalUserAlertStateToLocalStorage\(\)/);
+
+  const localOnlyReturn = mainSource.indexOf('if (isLocalOnly) {', mainSource.indexOf('this.showLocalReminderNotices(batches);'));
+  const notifierLookup = mainSource.indexOf('const notifier = this.getNotifierPlugin();', localOnlyReturn);
+  assert.ok(localOnlyReturn > 0, 'local-only delivery must have an explicit exit');
+  assert.ok(notifierLookup > localOnlyReturn, 'Messager lookup must occur only after the local-only exit');
+  assert.match(mainSource.slice(localOnlyReturn, notifierLookup), /return;/);
+  assert.match(mainSource, /delivery:messager-skipped-role-change/);
+  assert.match(mainSource, /check:join-active/);
+  assert.match(mainSource, /check:discarded-stopped-run/);
+});
+
+test('active User reminder loops start and stop with lifecycle, role, and captured delivery mode', () => {
+  assert.match(mainSource, /if \(this\.deviceRoleManager\.isController\(\)\) \{[\s\S]*this\.enterControllerMode\(\);[\s\S]*\} else \{[\s\S]*this\.restartReminderLoop\(\)/);
+  assert.match(mainSource, /if \(Platform\.isMobile\) \{[\s\S]*this\.stopAllAutomation\(\);[\s\S]*this\.restartReminderLoop\(\)/);
+  assert.match(mainSource, /private exitControllerMode\(\) \{[\s\S]*this\.stopAllAutomation\(\);[\s\S]*this\.restartReminderLoop\(\)/);
+  assert.match(mainSource, /const deliveryMode = this\.getReminderDeliveryMode\(\)/);
+  assert.match(mainSource, /this\.runReminderCheck\(deliveryMode, runGeneration\)/);
+  assert.match(mainSource, /private stopReminderLoop\(\) \{[\s\S]*this\.reminderRunGeneration\+\+/);
 });
 
 test('stale one-shot reminders expire without blocking repeat-until-complete rules', () => {

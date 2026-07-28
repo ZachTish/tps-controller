@@ -379,6 +379,49 @@ test("Controller settings use one routed page with an explicit five-destination 
   assert.match(settingsStylesSource, /@media \(max-width: 520px\)[\s\S]*\.tps-settings-destination-description \{[\s\S]*display: none/);
 });
 
+test("local User-device notices are explicit, default-off, and restart their active-instance loop", () => {
+  const reminderPageSource = settingsTabSource.slice(
+    settingsTabSource.indexOf("private renderReminderSettingsPage"),
+    settingsTabSource.indexOf("private renderReminderRules"),
+  );
+  const localNoticeSetting = reminderPageSource.indexOf(".setName('Local Notices on User Devices')");
+  const reminderDefaults = reminderPageSource.indexOf("'Reminder defaults'");
+  const sortDirection = reminderPageSource.indexOf(".setName('Notification Sort Direction')");
+
+  assert.ok(localNoticeSetting > reminderDefaults);
+  assert.ok(localNoticeSetting < sortDirection);
+  assert.match(
+    reminderPageSource,
+    /This does not use TPS Messager and cannot notify while Obsidian is closed\./,
+  );
+  assert.match(
+    reminderPageSource,
+    /setValue\(this\.plugin\.settings\.enableLocalReminderNoticesOnUserDevices === true\)/,
+  );
+  assert.match(
+    reminderPageSource,
+    /this\.plugin\.settings\.enableLocalReminderNoticesOnUserDevices = value;[\s\S]*await this\.plugin\.saveSettings\(\);[\s\S]*this\.plugin\.restartReminderLoop\(\)/,
+  );
+  assert.match(
+    reminderPageSource,
+    /this\.plugin\.settings\.enableReminders = value;[\s\S]*await this\.plugin\.saveSettings\(\);[\s\S]*this\.plugin\.restartReminderLoop\(\)/,
+  );
+  assert.match(
+    reminderPageSource,
+    /this\.plugin\.settings\.pollMinutes = value;[\s\S]*await this\.plugin\.saveSettings\(\);[\s\S]*this\.plugin\.restartReminderLoop\(\)/,
+  );
+  assert.match(
+    settingsTabSource,
+    /rem\.enabled = value;[\s\S]*await this\.plugin\.saveSettings\(\);[\s\S]*this\.plugin\.restartReminderLoop\(\)/,
+  );
+  assert.match(
+    settingsTabSource,
+    /rem\.repeatIntervalMinutes = num;[\s\S]*await this\.plugin\.saveSettings\(\);[\s\S]*this\.plugin\.restartReminderLoop\(\)/,
+  );
+  assert.match(settingsTabSource, /optional local reminder notices can run when Obsidian is open/);
+  assert.match(settingsTabSource, /await this\.plugin\.resetReminderDeliveryState\(\)/);
+});
+
 test("command palette only exposes controller actions that are user-facing and complete", () => {
   for (const id of [
     "force-calendar-sync",

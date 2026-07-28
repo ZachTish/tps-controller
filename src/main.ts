@@ -31,6 +31,10 @@ import {
     mergeSettingsChangeSet,
     normalizeExternalCalendarsInPlace,
 } from "./services/settings-persistence";
+import {
+    resolveReminderDeliveryMode,
+    type ReminderDeliveryMode,
+} from "./services/reminder-runtime-policy";
 
 const normalizeTaskTargetPathSetting = (value: string): string => {
     const normalized = normalizePath(String(value || "").trim().replace(/^\[\[|\]\]$/g, "").replace(/^\/+/, ""));
@@ -148,6 +152,9 @@ export default class TPSControllerPlugin extends Plugin {
     private reminderStateNextSaveAt = 0;
     private reminderStateFlushTimer: number | null = null;
     private reminderStateSaveDirty = false;
+    private localUserAlertState: AlertState = {};
+    private reminderCheckPromise: Promise<void> | null = null;
+    private reminderRunGeneration = 0;
 
     // Core services
     private autoCreateService: AutoCreateService;
@@ -317,6 +324,7 @@ export default class TPSControllerPlugin extends Plugin {
         if (this.deviceRoleManager.isController()) {
             this.enterControllerMode();
         } else {
+            this.restartReminderLoop();
             if (!Platform.isMobile) {
                 void this.requestSync(["calendar"]);
             } else {
@@ -402,6 +410,7 @@ export default class TPSControllerPlugin extends Plugin {
         } else {
             this.settings.alertState = {};
         }
+        this.localUserAlertState = this.loadLocalUserAlertStateFromLocalStorage();
         this.sanitizeFrontmatterKeySettings();
         this.sanitizeTwoStageArchiveSettings();
         this.sanitizeS3agleAttachmentAutomationSettings();
@@ -539,6 +548,8 @@ export default class TPSControllerPlugin extends Plugin {
             role: this.deviceRoleManager?.role || "unknown",
             enableLogging: this.settings.enableLogging === true,
             enableReminders: this.settings.enableReminders === true,
+            enableLocalReminderNoticesOnUserDevices:
+                this.settings.enableLocalReminderNoticesOnUserDevices === true,
             externalCalendars: this.settings.externalCalendars?.length || 0,
             enabledExternalCalendars: (this.settings.externalCalendars || []).filter((calendar) => calendar.enabled !== false).length,
             noLossSyncMode: this.settings.noLossSyncMode !== false,
@@ -757,6 +768,7 @@ export default class TPSControllerPlugin extends Plugin {
         logger.flow("Automation", "enter-controller-mode", { isMobile: Platform.isMobile });
         if (Platform.isMobile) {
             this.stopAllAutomation();
+            this.restartReminderLoop();
             new Notice("Controller automation is disabled on mobile. This device will behave as a passive user device.", 4000);
             logger.warn("Controller role is set, but mobile devices do not run background automation.");
             return;
@@ -768,6 +780,7 @@ export default class TPSControllerPlugin extends Plugin {
     private exitControllerMode() {
         logger.flow("Automation", "exit-controller-mode");
         this.stopAllAutomation();
+        this.restartReminderLoop();
         new Notice("User mode activated.", 3000);
     }
 
@@ -1052,15 +1065,37 @@ export default class TPSControllerPlugin extends Plugin {
         else this.stopTimeTrackingReminderLoop();
     }
 
+    restartReminderLoop(): void {
+        this.startReminderLoop();
+    }
+
+    private getReminderDeliveryMode(): ReminderDeliveryMode | null {
+        return resolveReminderDeliveryMode({
+            enableReminders: this.settings.enableReminders,
+            enableLocalReminderNoticesOnUserDevices:
+                this.settings.enableLocalReminderNoticesOnUserDevices,
+            isController: this.deviceRoleManager?.isController?.() === true,
+            isMobile: Platform.isMobile,
+        });
+    }
+
     private startReminderLoop() {
         this.stopReminderLoop();
-        if (!this.settings.enableReminders) {
-            logger.flow("ReminderLoop", "start:not-enabled");
+        const deliveryMode = this.getReminderDeliveryMode();
+        if (!deliveryMode) {
+            logger.flow("ReminderLoop", "start:not-enabled", {
+                role: this.deviceRoleManager?.role || "unknown",
+                remindersEnabled: this.settings.enableReminders === true,
+                localUserNoticesEnabled:
+                    this.settings.enableLocalReminderNoticesOnUserDevices === true,
+                isMobile: Platform.isMobile,
+            });
             return;
         }
+        const runGeneration = this.reminderRunGeneration;
         this.reminderStartupTimeoutId = window.setTimeout(() => {
             this.reminderStartupTimeoutId = null;
-            void this.runReminderCheck();
+            void this.runReminderCheck(deliveryMode, runGeneration);
         }, 10000);
         const pollMs = Math.max(30000, this.settings.pollMinutes * 60 * 1000);
         const activeRepeatMs = (this.settings.reminders || [])
@@ -1068,15 +1103,19 @@ export default class TPSControllerPlugin extends Plugin {
             .map((reminder) => Number(reminder.repeatIntervalMinutes) * 60 * 1000);
         const ms = Math.max(30000, Math.min(pollMs, ...activeRepeatMs));
         logger.flow("ReminderLoop", "start", {
+            deliveryMode,
             pollMs,
             intervalMs: ms,
             reminderRules: this.settings.reminders?.length || 0,
             activeRepeatingRules: activeRepeatMs.length,
         });
-        this.reminderIntervalId = window.setInterval(() => { void this.runReminderCheck(); }, ms);
+        this.reminderIntervalId = window.setInterval(() => {
+            void this.runReminderCheck(deliveryMode, runGeneration);
+        }, ms);
     }
 
     private stopReminderLoop() {
+        this.reminderRunGeneration++;
         if (this.reminderStartupTimeoutId !== null) {
             window.clearTimeout(this.reminderStartupTimeoutId);
             this.reminderStartupTimeoutId = null;
@@ -1275,24 +1314,70 @@ export default class TPSControllerPlugin extends Plugin {
         }
     }
 
-    private async runReminderCheck(): Promise<void> {
-        if (!this.settings.enableReminders) {
+    private runReminderCheck(
+        deliveryMode: ReminderDeliveryMode | null = this.getReminderDeliveryMode(),
+        runGeneration?: number,
+    ): Promise<void> {
+        if (!deliveryMode) {
             logger.flow("ReminderEngine", "check:skip-disabled");
-            return;
+            return Promise.resolve();
         }
-        const alertStateBeforeRun = this.cloneAlertState(this.settings.alertState);
+
+        if (this.reminderCheckPromise) {
+            logger.flow("ReminderEngine", "check:join-active", { deliveryMode });
+            return this.reminderCheckPromise;
+        }
+
+        const promise = this.executeReminderCheck(deliveryMode, runGeneration).finally(() => {
+            if (this.reminderCheckPromise === promise) this.reminderCheckPromise = null;
+        });
+        this.reminderCheckPromise = promise;
+        return promise;
+    }
+
+    private async executeReminderCheck(
+        deliveryMode: ReminderDeliveryMode,
+        runGeneration?: number,
+    ): Promise<void> {
+        const isLocalOnly = deliveryMode === "local-only";
+        const activeAlertState = isLocalOnly
+            ? this.localUserAlertState
+            : this.settings.alertState;
+        const alertStateBeforeRun = this.cloneAlertState(activeAlertState);
+        const evaluationAlertState = this.cloneAlertState(activeAlertState);
+        const evaluationSettings: TPSControllerSettings = {
+            ...this.settings,
+            alertState: evaluationAlertState,
+        };
         const result = await logger.timeAsync("ReminderEngine", "check", {
+            deliveryMode,
             rules: this.settings.reminders?.length || 0,
             batchNotifications: this.settings.batchNotifications === true,
-        }, () => this.reminderEngine.evaluateReminders(this.settings));
-        if (result.stateChanged) this.scheduleReminderStateSave();
+        }, () => this.reminderEngine.evaluateReminders(evaluationSettings));
+
+        if (runGeneration !== undefined && runGeneration !== this.reminderRunGeneration) {
+            logger.flow("ReminderEngine", "check:discarded-stopped-run", { deliveryMode });
+            return;
+        }
+
+        if (result.stateChanged) {
+            if (isLocalOnly) {
+                this.localUserAlertState = evaluationAlertState;
+                this.persistLocalUserAlertStateToLocalStorage();
+            } else {
+                this.settings.alertState = evaluationAlertState;
+                this.scheduleReminderStateSave();
+            }
+        }
         this.app.workspace.trigger(TPS_EVENTS.REMINDERS_UPDATED as any, {
             sourcePluginId: this.manifest.id,
             timestamp: Date.now(),
+            deliveryMode,
             notificationCount: result.notifications.length,
             stateChanged: result.stateChanged,
         });
         logger.flow("ReminderEngine", "check:result", {
+            deliveryMode,
             notifications: result.notifications.length,
             stateChanged: result.stateChanged,
         });
@@ -1303,6 +1388,7 @@ export default class TPSControllerPlugin extends Plugin {
         const nonAllDayNotifications = result.notifications.filter((n) => !n.isAllDay && n.sourceType !== "external-event");
         const batches = this.buildReminderNotificationBatches(nonAllDayNotifications, allDayNotifications, externalNotifications);
         logger.flow("ReminderEngine", "delivery:prepared", {
+            deliveryMode,
             notifications: result.notifications.length,
             batches: batches.length,
             nonAllDay: nonAllDayNotifications.length,
@@ -1311,6 +1397,22 @@ export default class TPSControllerPlugin extends Plugin {
         });
 
         this.showLocalReminderNotices(batches);
+
+        if (isLocalOnly) {
+            logger.flow("ReminderEngine", "delivery:done", {
+                batches: batches.length,
+                route: "local-obsidian",
+            });
+            return;
+        }
+
+        if (!this.deviceRoleManager.isController() || Platform.isMobile) {
+            logger.flowWarn("ReminderEngine", "delivery:messager-skipped-role-change", {
+                role: this.deviceRoleManager.role,
+                isMobile: Platform.isMobile,
+            });
+            return;
+        }
 
         const notifier = this.getNotifierPlugin();
         if (!notifier) {
@@ -1515,29 +1617,77 @@ export default class TPSControllerPlugin extends Plugin {
         return `tps-controller-alert-state-${this.app.vault.getName()}`;
     }
 
+    private getLocalUserAlertStateStorageKey(): string {
+        return `tps-controller-local-user-alert-state-${this.app.vault.getName()}`;
+    }
+
     private hasAlertStateEntries(state: AlertState | null | undefined): boolean {
         return !!state && Object.keys(state).length > 0;
     }
 
     private loadAlertStateFromLocalStorage(): AlertState {
+        return this.loadAlertStateStorage(
+            this.getAlertStateStorageKey(),
+            "Controller reminder alert state",
+        );
+    }
+
+    private loadLocalUserAlertStateFromLocalStorage(): AlertState {
+        return this.loadAlertStateStorage(
+            this.getLocalUserAlertStateStorageKey(),
+            "local user reminder alert state",
+        );
+    }
+
+    private loadAlertStateStorage(storageKey: string, label: string): AlertState {
         try {
-            const raw = window.localStorage.getItem(this.getAlertStateStorageKey());
+            const raw = window.localStorage.getItem(storageKey);
             if (!raw) return {};
             const parsed = JSON.parse(raw);
             if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
             return parsed as AlertState;
         } catch (error) {
-            logger.warn("Failed to read local reminder alert state; resetting state.", error);
+            logger.warn(`Failed to read ${label}; resetting state.`, error);
             return {};
         }
     }
 
     private persistAlertStateToLocalStorage(state: AlertState): void {
+        this.persistAlertStateStorage(
+            this.getAlertStateStorageKey(),
+            state,
+            "Controller reminder alert state",
+        );
+    }
+
+    private persistLocalUserAlertStateToLocalStorage(): void {
+        this.persistAlertStateStorage(
+            this.getLocalUserAlertStateStorageKey(),
+            this.localUserAlertState,
+            "local user reminder alert state",
+        );
+    }
+
+    private persistAlertStateStorage(
+        storageKey: string,
+        state: AlertState,
+        label: string,
+    ): void {
         try {
-            window.localStorage.setItem(this.getAlertStateStorageKey(), JSON.stringify(state || {}));
+            window.localStorage.setItem(storageKey, JSON.stringify(state || {}));
         } catch (error) {
-            logger.warn("Failed to persist local reminder alert state.", error);
+            logger.warn(`Failed to persist ${label}.`, error);
         }
+    }
+
+    async resetReminderDeliveryState(): Promise<void> {
+        this.restartReminderLoop();
+        this.settings.alertState = {};
+        this.localUserAlertState = {};
+        this.reminderStateSaveDirty = false;
+        this.persistAlertStateToLocalStorage(this.settings.alertState);
+        this.persistLocalUserAlertStateToLocalStorage();
+        await this.saveSettings();
     }
 
     // ========================================================================

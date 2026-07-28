@@ -93,7 +93,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     ${isCtrl ? '🟢 Controller (Background Automation)' : '⚪ User (Normal Use)'}
                 </span>
                 <br><small class="tps-role-hint">
-                    ${isCtrl ? 'This device runs automation (calendar sync, reminders, and maintenance) while keeping the normal Obsidian UI available.' : 'This device is in normal user mode — no automation runs.'}
+                    ${isCtrl ? 'This device runs automation (calendar sync, reminders, and maintenance) while keeping the normal Obsidian UI available.' : 'This device is in normal user mode — Controller automation stays off, while optional local reminder notices can run when Obsidian is open.'}
                 </small>
             `;
         };
@@ -803,9 +803,8 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                 .setButtonText('Reset')
                 .setWarning()
                 .onClick(async () => {
-                    this.plugin.settings.alertState = {};
-                    await this.plugin.saveSettings();
-                    new Notice('Alert state cleared.');
+                    await this.plugin.resetReminderDeliveryState();
+                    new Notice('Controller and local User alert state cleared.');
                 }));
         }
     }
@@ -939,6 +938,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     .onChange(async (value) => {
                         this.plugin.settings.enableReminders = value;
                         await this.plugin.saveSettings();
+                        this.plugin.restartReminderLoop();
                         this.redisplayPreservingScroll('[data-tps-settings-focus="enable-reminders"]');
                     });
             });
@@ -974,6 +974,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     this.plugin.settings.reminders.push(reminder);
                     this.reminderRuleViewState.set(reminder.id, true);
                     await this.plugin.saveSettings();
+                    this.plugin.restartReminderLoop();
                     if (rulesContainer) this.renderReminderRules(rulesContainer);
                 }))
             .addButton(btn => btn
@@ -981,6 +982,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                 .onClick(async () => {
                     const added = this.addMissingRecommendedReminderRules();
                     await this.plugin.saveSettings();
+                    if (added > 0) this.plugin.restartReminderLoop();
                     if (rulesContainer) this.renderReminderRules(rulesContainer);
                     if (presetSummary) this.renderRecommendedReminderSummary(presetSummary);
                     new Notice(added > 0
@@ -1021,6 +1023,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                 .onChange(async (value) => {
                     this.plugin.settings.pollMinutes = value;
                     await this.plugin.saveSettings();
+                    this.plugin.restartReminderLoop();
                 }));
 
         new Setting(defaultsSection)
@@ -1031,6 +1034,17 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                 .onChange(async (value) => {
                     this.plugin.settings.batchNotifications = value;
                     await this.plugin.saveSettings();
+                }));
+
+        new Setting(defaultsSection)
+            .setName('Local Notices on User Devices')
+            .setDesc('Evaluate reminder rules locally and show an Obsidian notice on each active User device. This does not use TPS Messager and cannot notify while Obsidian is closed.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.enableLocalReminderNoticesOnUserDevices === true)
+                .onChange(async (value) => {
+                    this.plugin.settings.enableLocalReminderNoticesOnUserDevices = value;
+                    await this.plugin.saveSettings();
+                    this.plugin.restartReminderLoop();
                 }));
 
         new Setting(defaultsSection)
@@ -1155,6 +1169,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                 .onClick(async () => {
                     this.plugin.settings.reminders = this.getRecommendedReminderRules();
                     await this.plugin.saveSettings();
+                    this.plugin.restartReminderLoop();
                     this.renderRecommendedReminderSummary(maintenanceSummary);
                     if (rulesContainer) this.renderReminderRules(rulesContainer);
                     new Notice('Reminder rules reset to the recommended setup.');
@@ -1446,6 +1461,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                 this.plugin.settings.reminders.splice(index + 1, 0, duplicated);
                 this.reminderRuleViewState.set(duplicated.id, true);
                 await this.plugin.saveSettings();
+                this.plugin.restartReminderLoop();
                 this.renderReminderRules(container);
             });
 
@@ -1453,6 +1469,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                 this.plugin.settings.reminders.splice(index, 1);
                 this.reminderRuleViewState.delete(ruleId);
                 await this.plugin.saveSettings();
+                this.plugin.restartReminderLoop();
                 this.renderReminderRules(container);
             });
 
@@ -1484,6 +1501,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     .onChange(async (value) => {
                         rem.enabled = value;
                         await this.plugin.saveSettings();
+                        this.plugin.restartReminderLoop();
                         labelSpan.textContent = `${value ? '🟢' : '⚫'} ${rem.label || `Rule ${index + 1}`}`;
                     }));
 
@@ -1549,6 +1567,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                         rem.repeatEndAt = value === 'off' ? undefined : value as 'trigger-base' | 'stop-condition';
                         repeatWrapper.style.display = value === 'off' ? 'none' : '';
                         await this.plugin.saveSettings();
+                        this.plugin.restartReminderLoop();
                         descSpan.textContent = this.buildRuleDesc(rem);
                     }));
 
@@ -1566,6 +1585,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                         if (!isNaN(num) && num > 0) {
                             rem.repeatIntervalMinutes = num;
                             await this.plugin.saveSettings();
+                            this.plugin.restartReminderLoop();
                             descSpan.textContent = this.buildRuleDesc(rem);
                         }
                     }));
