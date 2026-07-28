@@ -13,10 +13,34 @@ function loadTypeScriptModule(url) {
   return module.exports;
 }
 
+function loadTypeScriptModuleWithRequire(url, requireImpl) {
+  const sourceText = readFileSync(url, 'utf8');
+  const compiled = ts.transpileModule(sourceText, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2018 },
+  });
+  const module = { exports: {} };
+  new Function('module', 'exports', 'require', compiled.outputText)(module, module.exports, requireImpl);
+  return module.exports;
+}
+
 const source = readFileSync(new URL('../src/services/reminder-target-service.ts', import.meta.url), 'utf8');
 const createSource = readFileSync(new URL('../src/services/external-event-modal.ts', import.meta.url), 'utf8');
 const autoCreateSource = readFileSync(new URL('../src/services/auto-create-service.ts', import.meta.url), 'utf8');
+const gcmApiSource = readFileSync(new URL('../src/tps-gcm-api.ts', import.meta.url), 'utf8');
 const inlineTaskHelper = loadTypeScriptModule(new URL('../src/services/external-calendar-inline-task.ts', import.meta.url));
+const dailyNoteTemplate = loadTypeScriptModule(new URL('../src/services/daily-note-template.ts', import.meta.url));
+const gcmApi = loadTypeScriptModuleWithRequire(
+  new URL('../src/tps-gcm-api.ts', import.meta.url),
+  (specifier) => {
+    if (specifier === './tps-contracts') {
+      return {
+        TPS_EVENTS: { FILES_UPDATED: 'tps:files-updated' },
+        TPS_LEGACY_EVENTS: { GCM_FILES_UPDATED: 'tps-gcm-files-updated' },
+      };
+    }
+    throw new Error(`Unexpected test require: ${specifier}`);
+  },
+);
 const duplicateCleanupSource = readFileSync(new URL('../src/services/external-calendar-duplicate-cleanup-service.ts', import.meta.url), 'utf8');
 const settingsTabSource = readFileSync(new URL('../src/settings-tab.ts', import.meta.url), 'utf8');
 const calendarAutomationSource = readFileSync(new URL('../src/services/calendar-automation.ts', import.meta.url), 'utf8');
@@ -87,6 +111,113 @@ test('external calendar task target note setting commits full normalized paths',
   assert.match(settingsTabSource, /normalized === "\.md"/);
   assert.match(calendarAutomationSource, /normalized === "\.md"/);
   assert.match(mainSource, /normalized === "\.md"/);
+});
+
+test('GCM daily-note adapter distinguishes unavailable integration from an available result', async () => {
+  const expectedFile = { path: 'Daily/2026-07-28.md' };
+  const requested = [];
+  const availableApp = {
+    plugins: {
+      getPlugin(id) {
+        if (id !== 'tps-global-context-menu') return null;
+        return {
+          api: {
+            dailyNotes: {
+              async ensureForIsoDate(isoDate) {
+                requested.push(isoDate);
+                return expectedFile;
+              },
+            },
+          },
+        };
+      },
+    },
+  };
+
+  assert.deepEqual(
+    await gcmApi.ensureDailyNoteForIsoDateViaGcm(availableApp, ' 2026-07-28 '),
+    { available: true, file: expectedFile },
+  );
+  assert.deepEqual(requested, ['2026-07-28']);
+
+  const unavailableApp = { plugins: { getPlugin: () => null, plugins: {} } };
+  assert.deepEqual(
+    await gcmApi.ensureDailyNoteForIsoDateViaGcm(unavailableApp, '2026-07-28'),
+    { available: false, file: null },
+  );
+});
+
+test('GCM daily-note adapter propagates creation failures instead of authorizing a competing fallback', async () => {
+  const expectedError = new Error('daily note creation failed');
+  const app = {
+    plugins: {
+      getPlugin() {
+        return {
+          api: {
+            dailyNotes: {
+              async ensureForIsoDate() {
+                throw expectedError;
+              },
+            },
+          },
+        };
+      },
+    },
+  };
+
+  await assert.rejects(
+    () => gcmApi.ensureDailyNoteForIsoDateViaGcm(app, '2026-07-28'),
+    (error) => error === expectedError,
+  );
+});
+
+test('standalone daily-note templates expand core variables and preserve Templater expressions', () => {
+  const template = [
+    '---',
+    'title: "{{date:dddd, MMMM Do YYYY}}"',
+    'dailyTitle: "{{title}}"',
+    'created: "{{time:HH:mm:ss}}"',
+    'templater: "<% tp.date.now(\\"YYYY-MM-DD\\") %>"',
+    '---',
+    '# {{date}} at {{time}}',
+    '',
+  ].join('\n');
+  const rendered = dailyNoteTemplate.applyDailyNoteTemplateVariables(template, {
+    title: '2026-07-28',
+    formatDate: (format) => ({
+      'dddd, MMMM Do YYYY': 'Tuesday, July 28th 2026',
+      'YYYY-MM-DD': '2026-07-28',
+    })[format] || `date:${format}`,
+    formatTime: (format) => ({
+      'HH:mm:ss': '07:39:12',
+      'HH:mm': '07:39',
+    })[format] || `time:${format}`,
+  });
+
+  assert.match(rendered, /title: "Tuesday, July 28th 2026"/);
+  assert.match(rendered, /dailyTitle: "2026-07-28"/);
+  assert.match(rendered, /created: "07:39:12"/);
+  assert.match(rendered, /# 2026-07-28 at 07:39/);
+  assert.match(rendered, /<% tp\.date\.now/);
+});
+
+test('external-calendar daily-note creation uses GCM first and only falls back when unavailable', () => {
+  assert.match(gcmApiSource, /dailyNotes\?:\s*\{[\s\S]*ensureForIsoDate\?: \(isoDate: string\) => Promise<TFile \| null>/);
+  assert.match(autoCreateSource, /ensureDailyNoteForIsoDateViaGcm\(this\.app, isoDate\)/);
+
+  const ensureStart = autoCreateSource.indexOf('private async ensureDailyNoteFile');
+  const ensureEnd = autoCreateSource.indexOf('private async buildStandaloneDailyNoteContent', ensureStart);
+  const ensureSource = autoCreateSource.slice(ensureStart, ensureEnd);
+  assert.ok(ensureSource.indexOf('ensureDailyNoteForIsoDateViaGcm') < ensureSource.indexOf('buildStandaloneDailyNoteContent'));
+  assert.match(ensureSource, /if \(gcmAttempt\.available\) \{[\s\S]*gcmAttempt\.file instanceof TFile[\s\S]*throw new Error/);
+  assert.match(ensureSource, /catch \(error\) \{[\s\S]*daily-note:gcm-failed[\s\S]*throw error/);
+  assert.match(autoCreateSource, /Configured Daily Notes template was not found/);
+  assert.match(autoCreateSource, /applyDailyNoteTemplateVariables\(templateContent/);
+  assert.match(autoCreateSource, /overwrite_file_commands/);
+  assert.match(autoCreateSource, /hasRuntimeFolder/);
+  assert.match(autoCreateSource, /hasRuntimeTemplate/);
+  assert.match(autoCreateSource, /if \(!hasRuntimeTemplate && typeof parsed\?\.template === "string"\)/);
+  assert.doesNotMatch(ensureSource, /gcmAttempt\.available[\s\S]*daily-note:standalone-created[\s\S]*return created[\s\S]*gcmAttempt/);
 });
 
 test('task-mode calendar sync stores external identity in hidden comment metadata', () => {

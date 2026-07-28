@@ -1,5 +1,13 @@
 # TPS Controller
 
+## 0.3.1
+
+- Task-mode calendar sync now asks GCM for the canonical scheduled-day Daily Note before considering any Controller-local path. An available GCM result is authoritative, preventing an unrelated same-date file from bypassing Core/Periodic Notes template and title ownership.
+- When GCM is unavailable, Controller’s standalone fallback merges partial runtime and persisted Daily Notes/Templates settings, resolves extensionless templates, creates nested date-format folders, expands Core variables with the current insertion time, and shares concurrent first creation.
+- Templater expressions finish before Controller appends an external-calendar task. Explicit processing coordinates with Templater’s create hook and fails closed when a configured template is missing, unreadable, unavailable to Templater, or still contains unprocessed commands.
+- Validation passed all 10 behavioral Daily Note creation regressions, the complete declared suite, TypeScript, and the required production-mode builds. The final runtime loaded with GCM and Calendar in reloaded Obsidian 1.12.7 during the combined templated Daily Note verification; Controller feeds and outbound automation remained disabled.
+- This is a backward-compatible patch release with no settings or note-data migration. Minimum supported Obsidian remains 1.12.0.
+
 ## 0.3.0
 
 - Added the default-off **Local Notices on User Devices** reminder option. Each active User-role Obsidian instance can now evaluate the normal reminder rules and show the existing clickable in-app notice without resolving or calling TPS Messager/Notifier.
@@ -110,6 +118,7 @@ Device role, reminder alert reset, calendar quarantine review, historical backfi
 - Historical backfill is not part of the streamlined command palette. Normal manual sync uses the current forward-looking sync window.
 - `Force Calendar Sync Now` uses the normal non-backfill window.
 - Task-mode calendar events are written as inline Markdown tasks. Blank task target paths write to the scheduled day's daily note; a single task note is used only when a target note path is explicitly configured.
+- When a task-mode event needs a missing daily note, Controller delegates creation to GCM's canonical Daily Note service first so configured Core/Periodic paths, templates, readable titles, and shared normalization are preserved. If GCM is unavailable, Controller merges runtime and persisted Daily Notes/Templates settings, expands core template variables, creates any folders introduced by the date format, and completes Templater before returning a writable file. A configured template that cannot be read or fully processed fails closed instead of creating or writing into a bare note.
 - Task-mode calendar events keep external calendar identity in hidden `%% tps-inline-props:... %%` metadata instead of a visible `[tpsInlineProps:: ...]` inline field, so large source URLs/UIDs do not leak into rendered task text.
 - Existing task-mode events are reconciled only through their owning checkbox line; Controller never infers the owner by selecting the line before hidden metadata. Frontmatter, fenced examples, and duplicate/ambiguous identities are non-targets.
 - Task-mode creation and updates use atomic file processing. New events are inserted after the leading managed task blocks without relocating nested children or heading-scoped content, and existing mixed/CR-only line endings are preserved.

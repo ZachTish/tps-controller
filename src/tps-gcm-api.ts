@@ -1,4 +1,4 @@
-import { App } from 'obsidian';
+import type { App, TFile } from 'obsidian';
 import { TPS_EVENTS, TPS_LEGACY_EVENTS } from './tps-contracts';
 import type { ExternalCalendarEvent } from './types';
 
@@ -8,11 +8,19 @@ export interface GcmEventsApi {
 
 export interface GcmApi {
   events?: GcmEventsApi;
+  dailyNotes?: {
+    ensureForIsoDate?: (isoDate: string) => Promise<TFile | null>;
+  };
   identity?: {
     buildCalendarExternalId?: (event: ExternalCalendarEvent) => string;
     ensureInternalIdInFrontmatter?: (frontmatter: Record<string, unknown>) => string;
     getExternalId?: (frontmatter: Record<string, unknown> | null | undefined) => string | null;
   };
+}
+
+export interface GcmDailyNoteEnsureAttempt {
+  available: boolean;
+  file: TFile | null;
 }
 
 export function getGcmApi(app: App): GcmApi | null {
@@ -22,6 +30,24 @@ export function getGcmApi(app: App): GcmApi | null {
     || plugins?.getPlugin?.('TPS-Global-Context-Menu (Dev)')
     || plugins?.plugins?.['TPS-Global-Context-Menu (Dev)'];
   return plugin?.api || null;
+}
+
+/**
+ * Ask GCM's canonical daily-note service to resolve or create a date.
+ * `available: false` means Controller may use its standalone fallback.
+ * Errors and available-but-null results remain distinct so callers can fail
+ * closed instead of creating a competing, incomplete daily note.
+ */
+export async function ensureDailyNoteForIsoDateViaGcm(
+  app: App,
+  isoDate: string,
+): Promise<GcmDailyNoteEnsureAttempt> {
+  const ensureForIsoDate = getGcmApi(app)?.dailyNotes?.ensureForIsoDate;
+  if (typeof ensureForIsoDate !== 'function') {
+    return { available: false, file: null };
+  }
+  const file = await ensureForIsoDate(String(isoDate || '').trim());
+  return { available: true, file: file ?? null };
 }
 
 export function emitFilesUpdated(app: App, paths: string[], sourcePluginId: string): void {
