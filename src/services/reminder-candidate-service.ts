@@ -9,9 +9,8 @@ function hasReminderFrontmatter(file: TFile, app: App, reminderProperties: Set<s
     const frontmatter = app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
     if (!frontmatter) return false;
 
-    const keys = new Set(Object.keys(frontmatter).map((key) => key.trim().toLowerCase()));
-    for (const property of reminderProperties) {
-        if (keys.has(property)) return true;
+    for (const key of Object.keys(frontmatter)) {
+        if (reminderProperties.has(key.trim().toLowerCase())) return true;
     }
     return false;
 }

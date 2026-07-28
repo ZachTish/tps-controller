@@ -59,6 +59,19 @@ function loadReminderDeliveryWindowModule() {
   return module.exports;
 }
 
+function loadReminderCandidateModule() {
+  const compiled = ts.transpileModule(reminderCandidateSource, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2018 },
+  });
+  const module = { exports: {} };
+  const requireStub = (id) => {
+    throw new Error(`Unexpected require: ${id}`);
+  };
+  const load = new Function('module', 'exports', 'require', compiled.outputText);
+  load(module, module.exports, requireStub);
+  return module.exports;
+}
+
 function loadReminderRuntimePolicyModule() {
   const compiled = ts.transpileModule(reminderRuntimePolicySource, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2018 },
@@ -263,11 +276,61 @@ test('reminder candidate discovery includes task-line reminder entities without 
   assert.equal(reminderCandidateSource.includes('const TASK_LINE_PATTERN = /^\\s*(?:[-*+]|\\d+[.)])\\s+\\[[^\\]]?]\\s+/;'), true);
   assert.equal(reminderCandidateSource.includes('const INLINE_PROPERTY_PATTERN = /\\[([^\\[\\]:]+)::\\s*([^\\]]+)\\]/g;'), true);
   assert.match(reminderCandidateSource, /if \(hasReminderFrontmatter\(file, app, propertySet\)\) \{/);
+  assert.match(reminderCandidateSource, /for \(const key of Object\.keys\(frontmatter\)\) \{/);
+  assert.match(reminderCandidateSource, /reminderProperties\.has\(key\.trim\(\)\.toLowerCase\(\)\)/);
+  assert.doesNotMatch(reminderCandidateSource, /const keys = new Set/);
   assert.match(reminderCandidateSource, /await app\.vault\.cachedRead\(file\)/);
   assert.match(reminderCandidateSource, /if \(!TASK_LINE_PATTERN\.test\(line\)\) continue;/);
   assert.match(reminderCandidateSource, /if \(key && reminderProperties\.has\(key\)\) return true;/);
   assert.match(source, /discoverReminderCandidateFiles\(this\.app, settings, properties\)/);
   assert.match(overdueSource, /getReminderCandidateFiles\(\s*this\.app,/);
+});
+
+test('reminder candidate discovery normalizes own frontmatter keys without a per-file key collection', async () => {
+  const { getReminderCandidateFiles } = loadReminderCandidateModule();
+  const files = [
+    { path: 'Zeta.md' },
+    { path: 'None.md' },
+    { path: 'Inherited.md' },
+    { path: 'Inline.md' },
+    { path: 'Alpha.md' },
+  ];
+  const inheritedFrontmatter = Object.create({ scheduled: '2026-07-28' });
+  inheritedFrontmatter.other = true;
+  const frontmatterByPath = new Map([
+    ['Zeta.md', { '  SCHEDULED  ': '2026-07-28' }],
+    ['None.md', { unrelated: true }],
+    ['Inherited.md', inheritedFrontmatter],
+    ['Inline.md', { unrelated: true }],
+    ['Alpha.md', { DuE: '2026-07-28' }],
+  ]);
+  const contentByPath = new Map([
+    ['None.md', 'No reminder here.'],
+    ['Inherited.md', 'Inherited frontmatter properties are not candidates.'],
+    ['Inline.md', '- [ ] Follow up [ Scheduled :: 2026-07-28]'],
+  ]);
+  const cachedReads = [];
+  const app = {
+    metadataCache: {
+      getFileCache(file) {
+        return { frontmatter: frontmatterByPath.get(file.path) };
+      },
+    },
+    vault: {
+      getMarkdownFiles() {
+        return files.slice();
+      },
+      async cachedRead(file) {
+        cachedReads.push(file.path);
+        return contentByPath.get(file.path) || '';
+      },
+    },
+  };
+
+  const result = await getReminderCandidateFiles(app, {}, [' scheduled ', 'dUe', '  ']);
+
+  assert.deepEqual(result.files.map(({ path }) => path), ['Alpha.md', 'Inline.md', 'Zeta.md']);
+  assert.deepEqual(cachedReads, ['Inherited.md', 'Inline.md', 'None.md']);
 });
 
 test('reminder task parsing ignores task examples inside fenced code blocks', () => {

@@ -1,5 +1,12 @@
 # TPS Controller
 
+## 0.3.2
+
+- Reminder candidate discovery now checks normalized frontmatter keys directly against the existing reminder-property set instead of allocating a second normalized-key set for every Markdown file.
+- Candidate membership, key normalization, inherited-key exclusion, inline reminder fallback reads, file ordering, settings, and stored reminder state remain unchanged.
+- This patch records the already validated direct-key implementation in the tagged source so source, release metadata, and BRAT artifacts are aligned. Minimum supported Obsidian remains 1.12.0, with no migration.
+- Validation at 0.3.2 passed all 124 declared tests and a separate production-mode build in the isolated test vault. After reloading Obsidian 1.12.7 in passive User mode, the notification sidebar opened normally; runtime-owned `data.json` remained unchanged.
+
 ## 0.3.1
 
 - Task-mode calendar sync now asks GCM for the canonical scheduled-day Daily Note before considering any Controller-local path. An available GCM result is authoritative, preventing an unrelated same-date file from bypassing Core/Periodic Notes template and title ownership.
