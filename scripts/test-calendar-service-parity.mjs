@@ -18,3 +18,9 @@ test('controller fetch service retains structured status required by sync decisi
   assert.match(fetchSource, /fromCache:/);
   assert.match(fetchSource, /statusCode:/);
 });
+
+test('controller clears the bounded fetch timeout after every settled race', () => {
+  assert.match(fetchSource, /let timeoutId: ReturnType<typeof setTimeout> \| undefined;/);
+  assert.match(fetchSource, /timeoutId = setTimeout\(/);
+  assert.match(fetchSource, /finally \{[\s\S]*if \(timeoutId !== undefined\) clearTimeout\(timeoutId\);[\s\S]*\}/);
+});

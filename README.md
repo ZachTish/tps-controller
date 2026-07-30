@@ -1,5 +1,13 @@
 # TPS Controller
 
+## 0.3.4
+
+- External-calendar requests now clear their 15-second timeout handle as soon as the request, HTTP-status handling, or parsing path settles instead of leaving the timer pending after fast results.
+- In a deterministic 100-request comparison, the released implementation scheduled 100 timers, cleared 0, and left 100 pending; this release schedules the same 100 bounded timeouts, clears all 100, and leaves 0 pending.
+- Success results, cache writes, non-200 status results, request failures, parser failures, logs, and genuine 15-second timeout errors remain unchanged. Controller continues to use Obsidian's public `requestUrl`; because that API has no abort signal, an underlying request that loses a genuine timeout race is still not forcibly cancelled.
+- This backward-compatible performance and reliability patch adds no fallback, monkeypatch, setting, command, or data migration. Minimum supported Obsidian remains 1.12.0.
+- Validation passed all 128 release-declared checks, two separate containment checks, TypeScript, and the required versioned build. Final test-vault reload, runtime-state preservation, exact-commit reproducibility, and release-asset verification are recorded in the public 0.3.4 release.
+
 ## 0.3.3
 
 - Overlapping calendar-sync requests now join one physical reconciliation instead of letting later wrappers report completion and run recurrence maintenance while the first sync is still active.

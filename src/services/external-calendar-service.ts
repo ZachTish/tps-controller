@@ -84,6 +84,7 @@ export class ExternalCalendarService {
 
     const startedAt = Date.now();
     logger.flow("ExternalCalendar", "fetch:start", context);
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
     try {
       const fetchPromise = requestUrl({
         url: normalizedUrl,
@@ -92,9 +93,12 @@ export class ExternalCalendarService {
           Accept: 'text/calendar, text/plain;q=0.9, */*;q=0.8',
         },
       });
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`Fetch timed out after ${this.FETCH_TIMEOUT_MS}ms`)), this.FETCH_TIMEOUT_MS)
-      );
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(
+          () => reject(new Error(`Fetch timed out after ${this.FETCH_TIMEOUT_MS}ms`)),
+          this.FETCH_TIMEOUT_MS
+        );
+      });
       const response = await Promise.race([fetchPromise, timeoutPromise]);
       const fetchDurationMs = Date.now() - startedAt;
 
@@ -151,6 +155,8 @@ export class ExternalCalendarService {
         fromCache: false,
         error,
       };
+    } finally {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
     }
   }
 
