@@ -16,6 +16,7 @@ interface CalendarPluginAPI {
  */
 export class CalendarAutomationService {
     private calendarSyncIntervalId: number | null = null;
+    private activeSyncPromise: Promise<void> | null = null;
 
     constructor(
         private app: App,
@@ -78,10 +79,26 @@ export class CalendarAutomationService {
         }
     }
 
-    async runSync(force = false, options: { backfillPastEvents?: boolean } = {}): Promise<void> {
+    runSync(force = false, options: { backfillPastEvents?: boolean } = {}): Promise<void> {
+        const backfillPastEvents = options.backfillPastEvents === true;
+        if (this.activeSyncPromise) {
+            logger.flow("CalendarSync", "run:join-active", { force, backfillPastEvents });
+            return this.activeSyncPromise;
+        }
+
+        const run = Promise.resolve().then(() => this.executeSync(force, { backfillPastEvents }));
+        this.activeSyncPromise = run;
+        const clearActiveRun = () => {
+            if (this.activeSyncPromise === run) this.activeSyncPromise = null;
+        };
+        void run.then(clearActiveRun, clearActiveRun);
+        return run;
+    }
+
+    private async executeSync(force: boolean, options: { backfillPastEvents: boolean }): Promise<void> {
         await logger.timeAsync("CalendarSync", "run", {
             force,
-            backfillPastEvents: options.backfillPastEvents === true,
+            backfillPastEvents: options.backfillPastEvents,
         }, async () => {
             this.app.workspace.trigger(TPS_EVENTS.CALENDAR_SYNC_STARTED as any, {
                 sourcePluginId: "tps-controller",
@@ -189,7 +206,7 @@ export class CalendarAutomationService {
                 settings.externalCalendarFilter,
                 calendarConfigs,
                 force,
-                { backfillPastEvents: options.backfillPastEvents === true },
+                { backfillPastEvents: options.backfillPastEvents },
             );
 
             await this.onSyncComplete();

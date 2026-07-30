@@ -1,5 +1,13 @@
 # TPS Controller
 
+## 0.3.3
+
+- Overlapping calendar-sync requests now join one physical reconciliation instead of letting later wrappers report completion and run recurrence maintenance while the first sync is still active.
+- The first caller owns force/backfill options for that flight; all joined callers settle with the same result, and a later request starts normally after success, failure, or a readiness skip.
+- Calendar sources, valid Calendar-plugin fallback behavior, event creation/reconciliation, settings, and stored state remain unchanged.
+- This backward-compatible reliability and performance patch keeps the minimum supported Obsidian version at 1.12.0 and requires no migration.
+- Validation passed all 127 release checks and the separate final build. After reloading Obsidian 1.12.7 in passive User mode, the notification surface, Overview, Calendar rules, and Force Calendar Sync command remained available without running a feed or changing settings; runtime-owned `data.json` remained unchanged.
+
 ## 0.3.2
 
 - Reminder candidate discovery now checks normalized frontmatter keys directly against the existing reminder-property set instead of allocating a second normalized-key set for every Markdown file.
@@ -79,6 +87,7 @@ Selecting a frozen version instead of **Latest** intentionally prevents automati
 Canonical source, tests, Git metadata, and dependencies live in `/Users/zachtisherman/TishOS Plugin Development/TPS-Controller (Dev)`, outside both vaults. `npm run build` and watch builds deploy byte-changed runtime artifacts by default only to `/Users/zachtisherman/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian Plugin Test Vault/.obsidian/plugins/tps-controller`; `npm test` is therefore isolated even though it ends with a production-mode build. Promotion to `/Users/zachtisherman/TishOS v0.1/.obsidian/plugins/tps-controller` is an explicit guarded post-validation action. Neither target overwrites `data.json` or other runtime-owned state.
 
 - 2026-07-16 isolation validation: all 76 declared tests and the required final `npm run build` passed; both production-mode builds reported `[runtime-deploy] target=test ... unchanged`. Obsidian 1.12.7 loaded Controller in passive `User` mode in the registered test vault. No live promotion occurred, and production runtime checksums remained unchanged.
+- 2026-07-30 calendar single-flight validation: five focused concurrency regressions and all 127 release checks passed. A 100-caller blocked-flight comparison reduced wrapper/configuration/AutoCreate entries from 100 to one and premature completion-maintenance callbacks from 99 to zero; success, failure, readiness-skip, first-call option ownership, and synchronous re-entry paths remained retryable and deterministic. The separate final build deployed only to `[runtime-deploy] target=test`. After **Reload app without saving**, Obsidian 1.12.7 remained in passive **User (Normal Use)** mode, **All caught up!** rendered, **TPS Controller: Force Calendar Sync Now** remained registered, and Overview/Calendar rules showed zero configured feeds without invoking Sync Now or changing settings. Source/runtime artifacts were byte-identical, test-runtime `data.json` remained SHA-256 `6cac531dcd6d0b6971dc4c14ccc7dbc0b940c72b3f87f4a2dff8663129fa75d0`, and production was not accessed or promoted.
 
 ## Mobile modal contract
 
@@ -121,6 +130,7 @@ Device role, reminder alert reset, calendar quarantine review, historical backfi
 
 ## Calendar sync
 
+- Calendar sync is single-flight. Overlapping interval, manual, settings, startup, or cross-device triggers join the active physical run; they do not queue a second run. The first caller's force and backfill choices own that flight, and completion/recurrence maintenance emits once after physical reconciliation actually settles.
 - Normal calendar sync processes events from today forward. It does not backfill past external calendar events.
 - Historical backfill is not part of the streamlined command palette. Normal manual sync uses the current forward-looking sync window.
 - `Force Calendar Sync Now` uses the normal non-backfill window.
