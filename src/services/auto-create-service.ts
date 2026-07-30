@@ -94,6 +94,7 @@ export interface AutoCreateServiceConfig {
 interface VaultNote {
     file: TFile;
     isInlineTask: boolean;
+    inSyncScope: boolean;
     taskLineIndex?: number;
     taskRawLine?: string;
     externalId: string | null;
@@ -173,7 +174,8 @@ export class AutoCreateService {
             if (forceRegenerate) new Notice("Calendar Sync skipped: auto-create is disabled for all configured calendars.");
             return;
         }
-        if (!this.getConfiguredScanRoots().length) {
+        const scanRoots = this.getConfiguredScanRoots();
+        if (!scanRoots.length) {
             logger.flowWarn("AutoCreate", "sync:skip-no-scan-roots");
             if (forceRegenerate) new Notice("Calendar Sync skipped: no calendar note folder is configured.");
             return;
@@ -195,7 +197,7 @@ export class AutoCreateService {
             logger.flow("AutoCreate", "sync:start", {
                 urls: urls.length,
                 configs: Object.keys(calendarConfigs).length,
-                scanRoots: this.getConfiguredScanRoots().length,
+                scanRoots: scanRoots.length,
                 filterTerms: filterTerms.length,
                 forceRegenerate,
                 backfillPastEvents: options.backfillPastEvents === true,
@@ -211,8 +213,8 @@ export class AutoCreateService {
                 failedUrls: fetchResult.failedUrls.size,
             });
             const { byEventKey, byLegacyEventId, byUidStart, byTitleDay, byEventUrl, allNotes } = await logger.timeAsync("AutoCreate", "vault-index", {
-                scanRoots: this.getConfiguredScanRoots().length,
-            }, () => this.buildVaultIndex());
+                scanRoots: scanRoots.length,
+            }, () => this.buildVaultIndex(scanRoots));
             logger.flow("AutoCreate", "vault-index:result", {
                 notes: allNotes.length,
                 eventKeys: byEventKey.size,
@@ -387,7 +389,7 @@ export class AutoCreateService {
         return { events, successfulUrls, failedUrls };
     }
 
-    private async buildVaultIndex(): Promise<{
+    private async buildVaultIndex(scanRoots: readonly string[]): Promise<{
         byEventKey: Map<string, VaultNote>;
         byLegacyEventId: Map<string, VaultNote[]>;
         byUidStart: Map<string, VaultNote>;
@@ -406,12 +408,12 @@ export class AutoCreateService {
             if (normalizePath(file.path).toLowerCase().startsWith(".trash")) continue;
             const normPath = normalizeComparablePath(file.path);
             const normBase = normalizeComparablePath(file.basename);
-            const inSyncScope = this.isInConfiguredSyncScope(file);
+            const inSyncScope = this.isInConfiguredSyncScope(file, scanRoots);
             const ignoredForSync = (this.config.globalIgnorePaths || []).some((pattern) => matchesExclusionPattern(normPath, normBase, pattern));
             const includeInOrphanSweep = inSyncScope && !ignoredForSync;
 
             const fm = await this.getFrontmatterForFile(file);
-            const inlineNotes = await this.getInlineExternalTaskNotes(file);
+            const inlineNotes = await this.getInlineExternalTaskNotes(file, inSyncScope);
             for (const note of inlineNotes) {
                 // Inline events share a note with unrelated content. They must never
                 // enter note-level orphan cleanup, which can archive/delete the file.
@@ -448,6 +450,7 @@ export class AutoCreateService {
             const note: VaultNote = {
                 file,
                 isInlineTask: false,
+                inSyncScope,
                 externalId,
                 eventId,
                 uid,
@@ -485,7 +488,7 @@ export class AutoCreateService {
         return { byEventKey, byLegacyEventId, byUidStart, byTitleDay, byEventUrl, allNotes };
     }
 
-    private async getInlineExternalTaskNotes(file: TFile): Promise<VaultNote[]> {
+    private async getInlineExternalTaskNotes(file: TFile, inSyncScope: boolean): Promise<VaultNote[]> {
         const content = await this.app.vault.cachedRead(file);
         const lines = content.split(/\r\n|\n|\r/);
         const bodyStartLine = findMarkdownBodyStartLine(lines);
@@ -512,6 +515,7 @@ export class AutoCreateService {
             notes.push({
                 file,
                 isInlineTask: true,
+                inSyncScope,
                 taskLineIndex: lineIndex,
                 taskRawLine: line,
                 externalId,
@@ -1555,8 +1559,7 @@ export class AutoCreateService {
         return this.getScopedMarkdownFiles();
     }
 
-    private isInConfiguredSyncScope(file: TFile): boolean {
-        const roots = this.getConfiguredScanRoots();
+    private isInConfiguredSyncScope(file: TFile, roots: readonly string[]): boolean {
         if (!roots.length || roots.includes("")) return true;
         const normalizedPath = normalizePath(file.path);
         return roots.some((root) => normalizedPath === root || normalizedPath.startsWith(`${root}/`));
@@ -1799,8 +1802,8 @@ export class AutoCreateService {
             index.set(key, note);
             return;
         }
-        if (this.isInConfiguredSyncScope(existing.file) && !this.isInConfiguredSyncScope(note.file)) return;
-        if (!this.isInConfiguredSyncScope(existing.file) && this.isInConfiguredSyncScope(note.file)) {
+        if (existing.inSyncScope && !note.inSyncScope) return;
+        if (!existing.inSyncScope && note.inSyncScope) {
             index.set(key, note);
         }
     }

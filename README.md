@@ -1,5 +1,15 @@
 # TPS Controller
 
+## 0.3.5
+
+- Calendar vault indexing now compiles the configured scan roots once for one physical sync and reuses that immutable invocation-local snapshot for the no-root guard, diagnostics, scope checks, and duplicate preference.
+- Every released identity route remains whole-vault: canonical `externalId`, source-scoped legacy event ID, UID/start, event URL, title/day, moved notes, ignored notes, archived notes, and inline task identity. Roots and ignore patterns still restrict only note-level orphan handling, inline tasks never enter orphan cleanup, and the existing archive/scope/traversal duplicate ordering is unchanged.
+- Each file's scope is evaluated once and carried only on its in-memory index record. The implementation adds no persistent cache, listener, observer, retry, fallback, monkeypatch, unsupported API, setting, command, or migration. A root edit during an active scan now takes effect coherently on the next sync instead of creating a partially old/partially new index.
+- In the identical compiled real-service workload with 20,000 Markdown files and 40 roots, exact 0.3.4 rebuilt the roots 20,001 times and normalized configured roots 800,040 times per index invocation; 0.3.5 does each once and 40 times respectively. Across 35 measured iterations after five warmups, median index time fell from 369.567 ms to 97.780 ms (73.5%) and p95 fell from 374.750 ms to 105.203 ms (71.9%). These figures isolate vault-index scope classification rather than claiming an end-to-end calendar-sync speedup.
+- The same four compiled behavioral gates pass against exact 0.3.4 in legacy mode and the candidate, covering every identity-map projection, scope/ignore/orphan behavior, inline tasks, `.trash`, root normalization and boundaries, case sensitivity, duplicate preference in both directions, file-read counts, and mid-index configuration changes. The new single-compilation/coherent-snapshot gate fails exact 0.3.4 and passes 0.3.5.
+- The versioned worktree passed all 134 checks, including the 132 release checks plus two preserved containment checks, and the required separate build. After **Reload app without saving**, Obsidian 1.12.7 reopened the isolated test vault in passive **TPS: User** mode; the three-day Calendar QA Base retained four results and the notification surface rendered **All caught up!** without running a feed, changing settings, or mutating a note. Runtime `data.json` remained SHA-256 `6cac531dcd6d0b6971dc4c14ccc7dbc0b940c72b3f87f4a2dff8663129fa75d0`.
+- This is a backward-compatible patch release. Minimum supported Obsidian remains 1.12.0 and no settings or note-data migration is required.
+
 ## 0.3.4
 
 - External-calendar requests now clear their 15-second timeout handle as soon as the request, HTTP-status handling, or parsing path settles instead of leaving the timer pending after fast results.

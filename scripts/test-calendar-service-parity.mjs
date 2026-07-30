@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import './test-calendar-vault-index-roots.mjs';
 
 const parserSource = readFileSync(new URL('../src/services/ical-parser-service.ts', import.meta.url), 'utf8');
 const fetchSource = readFileSync(new URL('../src/services/external-calendar-service.ts', import.meta.url), 'utf8');
