@@ -38,55 +38,18 @@ export class OverdueService {
         const existingCount = workspace.getLeavesOfType(NOTIFICATION_VIEW_TYPE).length;
         logger.flow("NotificationView", "open:start", {
             existingLeaves: existingCount,
-            rightCollapsed: !!(workspace as any).rightSplit?.collapsed,
         });
         workspace.detachLeavesOfType(NOTIFICATION_VIEW_TYPE);
-        const leaf = typeof (workspace as any).ensureSideLeaf === "function"
-            ? await (workspace as any).ensureSideLeaf(NOTIFICATION_VIEW_TYPE, "right", {
-                active: true,
-                reveal: true,
-                state: {},
-            })
-            : workspace.getRightLeaf(true);
-        if (!leaf) {
-            logger.flowError("NotificationView", "open:no-leaf", new Error("Failed to get right leaf"), { existingLeaves: existingCount });
-            return;
-        }
-        await leaf.setViewState({ type: NOTIFICATION_VIEW_TYPE, state: {}, active: true });
-        (workspace as any).rightSplit?.expand?.();
-        this.activateLeafTab(leaf);
-        logger.flow("NotificationView", "open:leaf-ready", {
-            existingLeaves: existingCount,
-            rightCollapsed: !!(workspace as any).rightSplit?.collapsed,
-            parentTabIndex: this.getLeafTabIndex(leaf),
-            parentCurrentTab: (leaf as any).parent?.currentTab,
+        const leaf = await workspace.ensureSideLeaf(NOTIFICATION_VIEW_TYPE, "right", {
+            active: true,
+            state: {},
         });
         await workspace.revealLeaf(leaf);
-        this.activateLeafTab(leaf);
-        workspace.setActiveLeaf(leaf, { focus: true } as any);
-        await leaf.loadIfDeferred?.();
-        await (leaf.view as any)?.refresh?.();
-        (workspace as any).requestSaveLayout?.();
+        workspace.setActiveLeaf(leaf, { focus: true });
+        void workspace.requestSaveLayout();
         logger.flow("NotificationView", "open:done", {
             durationMs: Math.round(performance.now() - started),
-            parentTabIndex: this.getLeafTabIndex(leaf),
         });
-    }
-
-    private getLeafTabIndex(leaf: WorkspaceLeaf): number {
-        const children = (leaf as any).parent?.children;
-        return Array.isArray(children) ? children.indexOf(leaf) : -1;
-    }
-
-    private activateLeafTab(leaf: WorkspaceLeaf): void {
-        const parent = (leaf as any).parent;
-        const tabIndex = this.getLeafTabIndex(leaf);
-        if (tabIndex < 0) return;
-        if (typeof parent.selectTabIndex === "function") {
-            parent.selectTabIndex(tabIndex);
-            return;
-        }
-        parent.currentTab = tabIndex;
     }
 
     async getOverdueItems(): Promise<OverdueItem[]> {

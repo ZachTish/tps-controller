@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import ts from 'typescript';
+import './test-notification-open-lifecycle.mjs';
 
 const source = readFileSync(new URL('../src/services/reminder-engine.ts', import.meta.url), 'utf8');
 const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
@@ -255,19 +256,15 @@ test('status and snooze clear actions delete only their configured properties', 
 test('notification command expands and focuses the sidebar view leaf', () => {
   assert.match(overdueSource, /workspace\.detachLeavesOfType\(NOTIFICATION_VIEW_TYPE\)/);
   assert.match(overdueSource, /ensureSideLeaf\(NOTIFICATION_VIEW_TYPE, "right"/);
-  assert.match(overdueSource, /workspace\.getRightLeaf\(true\)/);
-  assert.match(overdueSource, /await leaf\.setViewState\(\{ type: NOTIFICATION_VIEW_TYPE, state: \{\}, active: true \}\)/);
-  assert.doesNotMatch(overdueSource, /getViewState\(\)\.type !== NOTIFICATION_VIEW_TYPE/);
-  assert.match(overdueSource, /private activateLeafTab\(leaf: WorkspaceLeaf\): void/);
-  assert.match(overdueSource, /parent\.selectTabIndex\(tabIndex\)/);
-  assert.match(overdueSource, /parent\.currentTab = tabIndex/);
-  assert.match(overdueSource, /rightSplit\?\.\s*expand\?\.\(\)/);
-  assert.match(overdueSource, /logger\.flow\("NotificationView", "open:leaf-ready"/);
   assert.match(overdueSource, /await workspace\.revealLeaf\(leaf\)/);
-  assert.match(overdueSource, /workspace\.setActiveLeaf\(leaf, \{ focus: true \} as any\)/);
-  assert.match(overdueSource, /await leaf\.loadIfDeferred\?\.\(\)/);
-  assert.match(overdueSource, /await \(leaf\.view as any\)\?\.refresh\?\.\(\)/);
-  assert.match(overdueSource, /requestSaveLayout\?\.\(\)/);
+  assert.match(overdueSource, /workspace\.setActiveLeaf\(leaf, \{ focus: true \}\)/);
+  assert.match(overdueSource, /void workspace\.requestSaveLayout\(\)/);
+  assert.doesNotMatch(overdueSource, /getRightLeaf\(true\)/);
+  assert.doesNotMatch(overdueSource, /leaf\.setViewState/);
+  assert.doesNotMatch(overdueSource, /rightSplit/);
+  assert.doesNotMatch(overdueSource, /activateLeafTab/);
+  assert.doesNotMatch(overdueSource, /leaf\.loadIfDeferred/);
+  assert.doesNotMatch(overdueSource, /await \(leaf\.view as any\)\?\.refresh\?\.\(\)/);
 });
 
 test('reminder candidate discovery includes task-line reminder entities without parent frontmatter', () => {
