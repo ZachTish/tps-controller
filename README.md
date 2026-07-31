@@ -1,5 +1,15 @@
 # TPS Controller
 
+## 0.3.8
+
+- Two-stage archive now reuses the source and destination roots already normalized by the rule resolver, builds each boundary prefix once, and normalizes each vault file path once before both source and nested-destination checks.
+- Folder validation, boundary-safe membership, lexical move order, original `TFile` identity, relative paths, nested-destination skips, collision suffixes, folder creation, rename-error handling, cadence persistence, logs, commands, settings, and stored data are unchanged.
+- The permanent actual-service gate passes the same 80 moves, 20 destination skips, collision target, cadence key, and settings save while reducing its path normalizations from 2,365 to 1,163 and configured-root normalizations from 1,105 to three. Exact public `0.3.7` fails that efficiency budget.
+- Across 500 seeded actual-class differential scenarios, exact `0.3.7` and `0.3.8` produced zero result, operation-order, logging, folder, collision, failure, save, final-path, or object-identity mismatches.
+- On an identical 20,000-file service fixture, `normalizePath` calls fell from 43,005 to 21,003 (51.16%) and configured-root normalizations from 21,005 to three (99.986%). Across 41 alternating prewarmed rounds, median seam time fell from 8.483 to 4.521 ms (46.71%) and p95 from 9.047 to 6.600 ms (27.05%); filesystem move latency is not included in that synthetic comparison.
+- Shipped service source shrinks from 224 to 221 lines and the production bundle shrinks by 105 bytes. The patch adds no cache, fallback, monkeypatch, timer, listener, state, setting, migration, or unsupported API. Minimum supported Obsidian remains 1.12.0.
+- Final development-worktree validation passed 140 checks with the same three intentionally disabled historical notification-comparison cases skipped; the two normally undeclared audit suites also passed their active checks. A separate build deployed byte-identical artifacts to the isolated test vault, Obsidian 1.12.7 reloaded in passive `TPS: User` mode with `All caught up!` and all six Controller commands present, and runtime-owned `data.json`, `.sync-request.json`, and `.hotreload` retained their exact hashes and mtimes. No automation or production vault was invoked.
+
 ## 0.3.7
 
 - Successful S3 bucket-archive runs now update and persist the live `bucketArchiveLastRunAt` cadence field. Startup and scheduled due checks therefore suppress a second manifest/vault scan inside the configured interval instead of saving an unchanged timestamp from a normalized copy.

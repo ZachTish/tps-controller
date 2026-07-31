@@ -38,8 +38,8 @@ export class TwoStageArchiveService {
     async runNow(nowMs = Date.now()): Promise<TwoStageArchiveResult> {
         const rule = this.getRule();
         const runKey = this.getRunKey(rule, nowMs);
-        const sourceFolder = this.normalizeFolder(rule.sourceFolder);
-        const destinationFolder = this.normalizeFolder(rule.destinationFolder);
+        const sourceFolder = rule.sourceFolder;
+        const destinationFolder = rule.destinationFolder;
         logger.flow("TwoStageArchive", "run:resolved", {
             runKey,
             sourceFolder,
@@ -58,10 +58,13 @@ export class TwoStageArchiveService {
         let movedCount = 0;
         let skippedCount = 0;
         let destinationSkipCount = 0;
+        const sourcePrefix = `${sourceFolder}/`;
+        const destinationPrefix = `${destinationFolder}/`;
         const files = this.app.vault.getFiles()
             .filter((file) => {
-                if (!this.isInFolder(file.path, sourceFolder)) return false;
-                if (this.isInFolder(file.path, destinationFolder)) {
+                const filePath = normalizePath(file.path);
+                if (!filePath.startsWith(sourcePrefix)) return false;
+                if (filePath.startsWith(destinationPrefix)) {
                     destinationSkipCount += 1;
                     return false;
                 }
@@ -163,12 +166,6 @@ export class TwoStageArchiveService {
 
     private normalizeFolder(value: string): string {
         return normalizePath(String(value || "").trim().replace(/^\/+|\/+$/g, ""));
-    }
-
-    private isInFolder(filePath: string, folderPath: string): boolean {
-        const file = normalizePath(filePath);
-        const folder = this.normalizeFolder(folderPath);
-        return !!folder && file.startsWith(`${folder}/`);
     }
 
     private async getAvailableTargetPath(targetPath: string): Promise<string> {
