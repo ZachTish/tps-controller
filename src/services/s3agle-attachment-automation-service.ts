@@ -51,6 +51,7 @@ export class S3agleAttachmentAutomationService {
     private eventDisposers: (() => void)[] = [];
     private runTimerId: number | null = null;
     private activeRun: Promise<S3agleAutomationResult | null> | null = null;
+    private activeBucketArchiveRun: Promise<S3BucketArchiveResult> | null = null;
     private lastRunByPath = new Map<string, number>();
     private originalExecuteCommandById: ((id: string, ...args: unknown[]) => unknown) | null = null;
     private commandPatchInstalled = false;
@@ -465,6 +466,22 @@ export class S3agleAttachmentAutomationService {
     }
 
     async runBucketArchiveNow(nowMs = Date.now()): Promise<S3BucketArchiveResult> {
+        if (this.activeBucketArchiveRun) {
+            logger.flow("S3BucketArchive", "run:join-active");
+            return this.activeBucketArchiveRun;
+        }
+        const run = this.executeBucketArchiveNow(nowMs);
+        this.activeBucketArchiveRun = run;
+        try {
+            return await run;
+        } finally {
+            if (this.activeBucketArchiveRun === run) {
+                this.activeBucketArchiveRun = null;
+            }
+        }
+    }
+
+    private async executeBucketArchiveNow(nowMs: number): Promise<S3BucketArchiveResult> {
         if (!this.isController()) {
             logger.flowWarn("S3BucketArchive", "run:skip-not-controller");
             return { archivedCount: 0, skippedCount: 0 };
@@ -541,8 +558,17 @@ export class S3agleAttachmentAutomationService {
         }
 
         if (changed) await this.writeUploadManifest(manifest);
-        rule.bucketArchiveLastRunAt = nowMs;
-        await this.saveSettings();
+        const settings = this.getSettings();
+        const previousLastRunAt = settings.s3agleAttachmentAutomation.bucketArchiveLastRunAt;
+        settings.s3agleAttachmentAutomation.bucketArchiveLastRunAt = nowMs;
+        try {
+            await this.saveSettings();
+        } catch (error) {
+            if (settings.s3agleAttachmentAutomation.bucketArchiveLastRunAt === nowMs) {
+                settings.s3agleAttachmentAutomation.bucketArchiveLastRunAt = previousLastRunAt;
+            }
+            throw error;
+        }
         logger.flow("S3BucketArchive", "run:done", { archivedCount, skippedCount });
         return { archivedCount, skippedCount, lastError, lastSkipReason };
     }

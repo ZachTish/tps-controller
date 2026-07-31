@@ -1,11 +1,27 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import vm from "node:vm";
+import ts from "typescript";
 
 const mainSource = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 const typesSource = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
 const settingsTabSource = readFileSync(new URL("../src/settings-tab.ts", import.meta.url), "utf8");
-const serviceSource = readFileSync(new URL("../src/services/s3agle-attachment-automation-service.ts", import.meta.url), "utf8");
+const comparisonServicePath = process.env.TPS_CONTROLLER_S3_SERVICE_SOURCE;
+const serviceSource = readFileSync(
+  comparisonServicePath
+    || new URL("../src/services/s3agle-attachment-automation-service.ts", import.meta.url),
+  "utf8",
+);
+if (comparisonServicePath) {
+  assert.equal(
+    createHash("sha256").update(serviceSource).digest("hex"),
+    process.env.TPS_CONTROLLER_S3_SERVICE_SHA256,
+    "external S3 service comparison source must match its pinned SHA-256",
+  );
+}
 const syncRequestSource = readFileSync(new URL("../src/services/sync-request-service.ts", import.meta.url), "utf8");
 
 test("S3 attachment upload automation exposes configurable triggers, settings, and manual command", () => {
@@ -114,6 +130,167 @@ test("S3 bucket archive moves unreferenced uploaded objects instead of deleting 
   assert.match(mainSource, /loop:skip-mobile/);
 });
 
+test("successful S3 bucket archive runs persist cadence and suppress duplicate interval work", async () => {
+  const harness = createBucketArchiveHarness();
+  const firstRunAt = 2_000_000;
+
+  await harness.service.runBucketArchiveNow(firstRunAt);
+
+  assert.equal(
+    harness.settings.s3agleAttachmentAutomation.bucketArchiveLastRunAt,
+    firstRunAt,
+  );
+  assert.deepEqual(harness.savedLastRunAt, [firstRunAt]);
+  assert.deepEqual(harness.workCounts(), {
+    manifestReads: 1,
+    manifestWrites: 1,
+    vaultEnumerations: 1,
+    noteReads: 1,
+    settingsSaves: 1,
+  });
+
+  const insideInterval = await harness.service.runBucketArchiveIfDue(
+    firstRunAt + 60_000,
+  );
+  assert.equal(insideInterval, null);
+  assert.deepEqual(harness.workCounts(), {
+    manifestReads: 1,
+    manifestWrites: 1,
+    vaultEnumerations: 1,
+    noteReads: 1,
+    settingsSaves: 1,
+  });
+
+  await harness.service.runBucketArchiveIfDue(firstRunAt + 3_600_000);
+  assert.equal(
+    harness.settings.s3agleAttachmentAutomation.bucketArchiveLastRunAt,
+    firstRunAt + 3_600_000,
+  );
+  assert.deepEqual(harness.savedLastRunAt, [
+    firstRunAt,
+    firstRunAt + 3_600_000,
+  ]);
+  assert.deepEqual(harness.workCounts(), {
+    manifestReads: 2,
+    manifestWrites: 2,
+    vaultEnumerations: 2,
+    noteReads: 2,
+    settingsSaves: 2,
+  });
+});
+
+test("S3 bucket archive cadence remains retryable across guards and save failures", async () => {
+  const disabled = createBucketArchiveHarness({
+    archiveUnreferencedBucketObjects: false,
+  });
+  assert.equal(await disabled.service.runBucketArchiveIfDue(2_000_000), null);
+  assert.equal(disabled.settingsSaves, 0);
+  assert.equal(disabled.manifestReads, 0);
+
+  const replica = createBucketArchiveHarness({}, { isController: false });
+  const replicaResult = await replica.service.runBucketArchiveNow(2_000_000);
+  assert.equal(replicaResult.archivedCount, 0);
+  assert.equal(replicaResult.skippedCount, 0);
+  assert.equal(
+    replica.settings.s3agleAttachmentAutomation.bucketArchiveLastRunAt,
+    0,
+  );
+  assert.equal(replica.settingsSaves, 0);
+  assert.equal(replica.manifestReads, 0);
+
+  const unconfigured = createBucketArchiveHarness({ bucket: "" });
+  const unconfiguredResult =
+    await unconfigured.service.runBucketArchiveNow(2_000_000);
+  assert.match(unconfiguredResult.lastError, /settings are incomplete/i);
+  assert.equal(
+    unconfigured.settings.s3agleAttachmentAutomation.bucketArchiveLastRunAt,
+    0,
+  );
+  assert.equal(unconfigured.settingsSaves, 0);
+  assert.equal(unconfigured.manifestReads, 0);
+
+  const failedSave = createBucketArchiveHarness(
+    { bucketArchiveLastRunAt: 1_000_000 },
+    { saveError: new Error("synthetic settings write failure") },
+  );
+  await assert.rejects(
+    failedSave.service.runBucketArchiveNow(2_000_000),
+    /synthetic settings write failure/,
+  );
+  assert.equal(
+    failedSave.settings.s3agleAttachmentAutomation.bucketArchiveLastRunAt,
+    1_000_000,
+  );
+  assert.equal(failedSave.settingsSaves, 1);
+});
+
+test("overlapping S3 bucket archive callers join one retryable run", async () => {
+  let releaseSave;
+  let reportSaveStarted;
+  const saveStarted = new Promise((resolve) => {
+    reportSaveStarted = resolve;
+  });
+  const saveBarrier = new Promise((resolve) => {
+    releaseSave = resolve;
+  });
+  const saveOptions = {
+    saveError: new Error("synthetic overlapping settings write failure"),
+    beforeSave: async () => {
+      reportSaveStarted();
+      await saveBarrier;
+    },
+  };
+  const harness = createBucketArchiveHarness(
+    { bucketArchiveLastRunAt: 1_000_000 },
+    saveOptions,
+  );
+
+  const scheduledRun = harness.service.runBucketArchiveNow(2_000_000);
+  await saveStarted;
+  const manualRun = harness.service.runBucketArchiveNow(3_000_000);
+  await new Promise((resolve) => setImmediate(resolve));
+  const blockedCounts = harness.workCounts();
+  releaseSave();
+  const [scheduledResult, manualResult] = await Promise.allSettled([
+    scheduledRun,
+    manualRun,
+  ]);
+
+  assert.deepEqual(blockedCounts, {
+    manifestReads: 1,
+    manifestWrites: 1,
+    vaultEnumerations: 1,
+    noteReads: 1,
+    settingsSaves: 1,
+  });
+  assert.equal(scheduledResult.status, "rejected");
+  assert.match(scheduledResult.reason.message, /overlapping settings write failure/);
+  assert.equal(manualResult.status, "rejected");
+  assert.match(manualResult.reason.message, /overlapping settings write failure/);
+  assert.equal(
+    harness.settings.s3agleAttachmentAutomation.bucketArchiveLastRunAt,
+    1_000_000,
+  );
+
+  saveOptions.saveError = null;
+  saveOptions.beforeSave = null;
+  const retryResult = await harness.service.runBucketArchiveNow(4_000_000);
+  assert.equal(retryResult.archivedCount, 0);
+  assert.equal(retryResult.skippedCount, 0);
+  assert.equal(
+    harness.settings.s3agleAttachmentAutomation.bucketArchiveLastRunAt,
+    4_000_000,
+  );
+  assert.deepEqual(harness.savedLastRunAt, [4_000_000]);
+  assert.deepEqual(harness.workCounts(), {
+    manifestReads: 2,
+    manifestWrites: 2,
+    vaultEnumerations: 2,
+    noteReads: 2,
+    settingsSaves: 2,
+  });
+});
+
 test("S3 attachment upload automation can run after user-defined workflow commands", () => {
   assert.match(serviceSource, /installCommandTriggerPatch/);
   assert.match(serviceSource, /scheduleAfterCommandIfConfigured/);
@@ -137,3 +314,209 @@ test("S3 credentials are resolved only for an execution and missing values fail 
   assert.match(serviceSource, /new Notice\(message, 12000\)/);
   assert.match(serviceSource, /credentials:unavailable/);
 });
+
+function createBucketArchiveHarness(
+  ruleOverrides = {},
+  options = {},
+) {
+  const settings = {
+    archiveFolder: "Archive",
+    s3agleAttachmentAutomation: {
+      enabled: false,
+      runOnActiveNoteOpen: true,
+      runOnActiveNoteModify: true,
+      runOnPaste: true,
+      runAfterCommandIds: [],
+      debounceSeconds: 10,
+      cooldownMinutes: 10,
+      archiveUploadedSources: true,
+      allowedAttachmentExtensions: [],
+      ignoredAttachmentExtensions: [],
+      makeUploadedObjectsPublic: true,
+      accessKeySecretName: "access-key",
+      secretKeySecretName: "secret-key",
+      region: "us-east-1",
+      bucket: "test-bucket",
+      folder: "",
+      endpoint: "https://s3.example.test",
+      useBucketSubdomain: false,
+      contentUrl: "",
+      hashFileName: false,
+      hashSeed: 0,
+      archiveUnreferencedBucketObjects: true,
+      bucketArchivePrefix: "_archive/s3/{YYYY}/{MM}/{DD}",
+      bucketArchiveCheckIntervalMinutes: 60,
+      bucketArchiveOrphanDelayMinutes: 60,
+      bucketArchiveLastRunAt: 0,
+      ...ruleOverrides,
+    },
+  };
+  const counts = {
+    manifestReads: 0,
+    manifestWrites: 0,
+    vaultEnumerations: 0,
+    noteReads: 0,
+    settingsSaves: 0,
+  };
+  const referencedUrl = "https://s3.example.test/test-bucket/image.png";
+  const manifest = [{
+    key: "image.png",
+    url: referencedUrl,
+    notePath: "Notes/Active.md",
+    sourcePath: "Attachments/image.png",
+    uploadedAt: 500_000,
+    lastSeenAt: 500_000,
+  }];
+  const app = {
+    vault: {
+      adapter: {
+        async read() {
+          counts.manifestReads += 1;
+          return JSON.stringify(manifest);
+        },
+        async exists() {
+          return true;
+        },
+        async write() {
+          counts.manifestWrites += 1;
+        },
+      },
+      getMarkdownFiles() {
+        counts.vaultEnumerations += 1;
+        return [{ path: "Notes/Active.md" }];
+      },
+      async cachedRead() {
+        counts.noteReads += 1;
+        return `Referenced: ${referencedUrl}`;
+      },
+    },
+  };
+  const savedLastRunAt = [];
+  const Service = loadS3AutomationService();
+  const service = new Service(
+    app,
+    () => settings,
+    () => options.isController !== false,
+    async () => {},
+    async () => {
+      counts.settingsSaves += 1;
+      settings.s3agleAttachmentAutomation = {
+        ...settings.s3agleAttachmentAutomation,
+      };
+      if (options.beforeSave) await options.beforeSave();
+      if (options.saveError) throw options.saveError;
+      savedLastRunAt.push(
+        settings.s3agleAttachmentAutomation.bucketArchiveLastRunAt,
+      );
+    },
+    () => "synthetic-secret",
+  );
+
+  return {
+    service,
+    settings,
+    savedLastRunAt,
+    workCounts: () => ({ ...counts }),
+    get manifestReads() {
+      return counts.manifestReads;
+    },
+    get settingsSaves() {
+      return counts.settingsSaves;
+    },
+  };
+}
+
+function loadS3AutomationService() {
+  const compiled = ts.transpileModule(serviceSource, {
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2020,
+      esModuleInterop: true,
+    },
+  }).outputText;
+  const nativeRequire = createRequire(import.meta.url);
+  class DummyCommand {
+    constructor(input) {
+      this.input = input;
+    }
+  }
+  class SyntheticCredentialError extends Error {
+    constructor(code = "missing-access-key-secret", message = "missing") {
+      super(message);
+      this.code = code;
+    }
+  }
+  const logger = {
+    flow() {},
+    flowWarn() {},
+    flowError() {},
+  };
+  const mockRequire = (id) => {
+    if (id === "obsidian") {
+      return {
+        App: class {},
+        Notice: class {},
+        TFile: class {},
+        normalizePath: (value) =>
+          String(value || "").replace(/\\/g, "/").replace(/\/+/g, "/"),
+        requestUrl: async () => ({ status: 200 }),
+      };
+    }
+    if (id === "@aws-sdk/client-s3") {
+      return {
+        CopyObjectCommand: DummyCommand,
+        DeleteObjectCommand: DummyCommand,
+        GetObjectCommand: DummyCommand,
+        PutObjectAclCommand: DummyCommand,
+        PutObjectCommand: DummyCommand,
+        S3Client: class {
+          async send() {
+            return {};
+          }
+        },
+      };
+    }
+    if (id === "@smithy/node-http-handler") {
+      return { NodeHttpHandler: class {} };
+    }
+    if (id === "crypto") return nativeRequire("node:crypto");
+    if (id === "../logger") return logger;
+    if (id === "./s3-credential-service") {
+      return {
+        resolveS3Credentials: () => ({
+          accessKeyId: "synthetic-access-key",
+          secretAccessKey: "synthetic-secret-key",
+        }),
+        S3CredentialConfigurationError: SyntheticCredentialError,
+      };
+    }
+    throw new Error(`Unexpected module in S3 cadence harness: ${id}`);
+  };
+  const moduleRecord = { exports: {} };
+  const context = vm.createContext({
+    ArrayBuffer,
+    Buffer,
+    DataView,
+    Date,
+    TextEncoder,
+    Uint8Array,
+    URL,
+    clearTimeout,
+    console,
+    document: {
+      addEventListener() {},
+      removeEventListener() {},
+    },
+    setTimeout,
+    window: {
+      clearTimeout,
+      setTimeout,
+    },
+  });
+  const execute = vm.runInContext(
+    `(function(require, module, exports) {${compiled}\n})`,
+    context,
+  );
+  execute(mockRequire, moduleRecord, moduleRecord.exports);
+  return moduleRecord.exports.S3agleAttachmentAutomationService;
+}
