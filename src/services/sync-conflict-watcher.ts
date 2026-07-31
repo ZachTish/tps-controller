@@ -1,9 +1,11 @@
-import { App, TFile, Notice, normalizePath, EventRef } from "obsidian";
+import { App, TFile, Notice, normalizePath } from "obsidian";
 import * as logger from "../logger";
 
 export class SyncConflictWatcher {
     private app: App;
-    private events: EventRef[] = [];
+    private eventDisposers: Array<() => void> = [];
+    private startupSweepTimerId: number | null = null;
+    private startupSweepGeneration = 0;
     private archiveFolder: string = "System/Archive";
     private eventIdKey: string = "externalEventId";
     private isSweeping = false;
@@ -44,46 +46,53 @@ export class SyncConflictWatcher {
             eventIdKey: this.eventIdKey,
         });
         // 1. Listen for new files being created or renamed by Sync
-        this.events.push(
-            this.app.vault.on("create", async (file) => {
-                if (file instanceof TFile && file.extension === "md") {
-                    await this.checkAndArchiveIfConflict(file, "vault-create");
-                }
-            })
-        );
-        this.events.push(
-            this.app.vault.on("rename", async (file) => {
-                if (file instanceof TFile && file.extension === "md") {
-                    await this.checkAndArchiveIfConflict(file, "vault-rename");
-                }
-            })
-        );
+        const createRef = this.app.vault.on("create", async (file) => {
+            if (file instanceof TFile && file.extension === "md") {
+                await this.checkAndArchiveIfConflict(file, "vault-create");
+            }
+        });
+        this.eventDisposers.push(() => this.app.vault.offref(createRef));
+        const renameRef = this.app.vault.on("rename", async (file) => {
+            if (file instanceof TFile && file.extension === "md") {
+                await this.checkAndArchiveIfConflict(file, "vault-rename");
+            }
+        });
+        this.eventDisposers.push(() => this.app.vault.offref(renameRef));
 
         // 2. Do an initial sweep to catch any created while Obsidian was closed.
         // Must wait for metadataCache to be fully populated: hasCalendarIdentity()
         // calls getFileCache(), which returns null before 'resolved' fires.
         // If it returns false early, a meeting note that happens to have a
         // conflict-style name would bypass the guard and be incorrectly archived.
+        const startupSweepGeneration = ++this.startupSweepGeneration;
         let startupSweepDone = false;
         const runStartupSweep = () => {
-            if (startupSweepDone) return;
+            if (startupSweepDone || startupSweepGeneration !== this.startupSweepGeneration) return;
             startupSweepDone = true;
+            this.clearStartupSweepTimer();
             logger.flow("SyncConflictWatcher", "startup-sweep:scheduled");
             void this.sweepVaultForConflicts();
         };
-        this.events.push(
-            this.app.metadataCache.on("resolved", runStartupSweep),
-        );
+        const resolvedRef = this.app.metadataCache.on("resolved", runStartupSweep);
+        this.eventDisposers.push(() => this.app.metadataCache.offref(resolvedRef));
         // Fallback: if the vault was already fully resolved before we registered
         // the event (common on subsequent loads), fire after a generous delay.
-        setTimeout(runStartupSweep, 8000);
+        this.startupSweepTimerId = window.setTimeout(runStartupSweep, 8000);
     }
 
     public stop() {
-        this.events.forEach(e => this.app.vault.offref(e));
-        const removedListeners = this.events.length;
-        this.events = [];
+        this.startupSweepGeneration++;
+        this.clearStartupSweepTimer();
+        const removedListeners = this.eventDisposers.length;
+        for (const dispose of this.eventDisposers) dispose();
+        this.eventDisposers = [];
         logger.flow("SyncConflictWatcher", "stop", { removedListeners });
+    }
+
+    private clearStartupSweepTimer(): void {
+        if (this.startupSweepTimerId === null) return;
+        window.clearTimeout(this.startupSweepTimerId);
+        this.startupSweepTimerId = null;
     }
 
     /**

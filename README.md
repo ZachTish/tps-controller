@@ -1,5 +1,17 @@
 # TPS Controller
 
+## 0.3.9
+
+- Sync-conflict startup work now belongs to the watcher lifecycle: stopping Controller clears the pending eight-second fallback, invalidates captured startup callbacks, and removes each listener through the Vault or Metadata Cache emitter that created it.
+- Metadata resolution still triggers the startup sweep immediately, and the delayed fallback remains available when Controller starts after resolution. Whichever route wins cancels the remaining timer and schedules exactly one sweep.
+- A sweep that has already started is allowed to finish safely. Create/rename monitoring, conflict-name matching, calendar-identity protection, canonical-note validation, duplicate-folder routing, collision suffixes, notices, logs, settings, commands, and stored data are unchanged.
+- The compiled actual-class lifecycle regression covers both startup routes, emitter ownership, timer cleanup, stop/start generations, 20,000-file stale-callback rejection, and a stop during a blocked physical rename.
+- In the stopped 20,000-file fixture, exact public `0.3.8` still enumerated the vault once, read 2,322 metadata records, renamed 874 conflicts, retained one Metadata Cache listener, and attempted one wrong-emitter removal. `0.3.9` performs none of that invalid post-stop work and leaves no listener or timer behind.
+- Across 31 alternating stopped-workload rounds, median callback time fell from 19.080 to 0.005 ms and p95 from 24.454 to 0.006 ms. The operation counts, rather than sub-millisecond timing, are the acceptance gate.
+- No fallback feature was removed: the fallback was retained but made cancellable and generation-safe. No monkeypatch, retry, setting, command, persistent state, migration, unsupported Obsidian API, or production-vault dependency was added.
+- This is a backward-compatible reliability and performance patch. Minimum supported Obsidian remains 1.12.0 and no settings or data migration is required.
+- Final validation passed all 144 active checks declared by the release commit plus two preserved local containment checks, with the same three intentionally skipped historical notification comparisons. The separate 4/4 calendar-root audit, separate notification audit's two active checks, TypeScript, and mandatory standalone production build also passed. The versioned artifact deployed only to the isolated test runtime; Obsidian 1.12.7 reloaded in passive `TPS: User` mode with `All caught up!` and all six Controller commands registered. No command or automation ran, source/runtime artifacts were byte-identical, `data.json` remained SHA-256 `6cac531dcd6d0b6971dc4c14ccc7dbc0b940c72b3f87f4a2dff8663129fa75d0`, `.hotreload` remained unchanged, and production was not accessed.
+
 ## 0.3.8
 
 - Two-stage archive now reuses the source and destination roots already normalized by the rule resolver, builds each boundary prefix once, and normalizes each vault file path once before both source and nested-destination checks.
