@@ -141,6 +141,9 @@ export interface OverdueItem {
     taskTitle?: string;
     taskRawLine?: string;
     taskLine?: number;
+    taskPropertyKeys?: string[];
+    reminderTags?: string[];
+    suppressInheritedDailyNoteSchedule?: boolean;
     reminderProperty?: string;
     reminderPropertySource?: "task" | "note" | "external-event";
     noteTitle?: string;

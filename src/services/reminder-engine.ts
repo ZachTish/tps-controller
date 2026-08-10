@@ -294,6 +294,7 @@ export class ReminderEngine {
                 settings.globalIgnoreTags,
                 settings.globalIgnoreStatuses,
                 settings.globalIgnoreCheckboxStates,
+                target.reminderTags,
             )) {
                 this.countSkip(params.stats, "ignored");
                 continue;

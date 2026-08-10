@@ -12,6 +12,7 @@ import {
     buildReminderTargetsForFile,
     buildEffectiveReminderContextForTarget,
     buildReminderDisplayName,
+    getReminderTagsForTarget,
 } from "./reminder-target-service";
 import { getReminderCandidateFiles } from "./reminder-candidate-service";
 import {
@@ -95,7 +96,7 @@ export class OverdueService {
                     const effectiveFm = ctx.frontmatter;
                     const propertyValue = ctx.propertyValue;
 
-                    if (shouldIgnoreForReminder(file, cache, effectiveFm, reminder, ignorePaths, ignoreTags, ignoreStatuses, ignoreCheckboxStates)) continue;
+                    if (shouldIgnoreForReminder(file, cache, effectiveFm, reminder, ignorePaths, ignoreTags, ignoreStatuses, ignoreCheckboxStates, getReminderTagsForTarget(target))) continue;
                     if (!hasRequiredStatus(effectiveFm, reminder)) continue;
                     if (!hasRequiredCheckboxState(effectiveFm, reminder)) continue;
 
@@ -175,6 +176,9 @@ export class OverdueService {
                         taskTitle: target.taskTitle,
                         taskRawLine: target.taskRawLine,
                         taskLine: target.taskLine,
+                        taskPropertyKeys: target.taskPropertyKeys,
+                        reminderTags: target.reminderTags,
+                        suppressInheritedDailyNoteSchedule: target.suppressInheritedDailyNoteSchedule,
                         reminderProperty: reminder.property,
                         reminderPropertySource: this.getReminderPropertySource(target, reminder.property),
                         noteTitle: target.noteTitle,
@@ -239,6 +243,9 @@ export class OverdueService {
                 taskTitle: item.taskTitle,
                 taskRawLine: item.taskRawLine,
                 taskLine: item.taskLine,
+                taskPropertyKeys: item.taskPropertyKeys,
+                reminderTags: item.reminderTags,
+                suppressInheritedDailyNoteSchedule: item.suppressInheritedDailyNoteSchedule,
                 noteTitle: item.noteTitle,
                 taskFrontmatter: item.targetKind === "task" ? {
                     ...fm,
@@ -255,7 +262,7 @@ export class OverdueService {
                 const reminder = currentReminder;
                 const ctx = buildEffectiveReminderContextForTarget(target, fm, reminder.property, settings);
                 if (ctx && 
-                    !shouldIgnoreForReminder(item.file, cache, ctx.frontmatter, reminder, ignorePaths, ignoreTags, ignoreStatuses, ignoreCheckboxStates) &&
+                    !shouldIgnoreForReminder(item.file, cache, ctx.frontmatter, reminder, ignorePaths, ignoreTags, ignoreStatuses, ignoreCheckboxStates, getReminderTagsForTarget(target)) &&
                     hasRequiredStatus(ctx.frontmatter, reminder) &&
                     hasRequiredCheckboxState(ctx.frontmatter, reminder) &&
                     !reminder.stopConditions.some((cond) => checkStopCondition(ctx.frontmatter, cond))) {
@@ -365,7 +372,7 @@ export class OverdueService {
                     if (reminder.id === currentReminderId) continue;
                     const ctx = buildEffectiveReminderContextForTarget(target, fm, reminder.property, settings);
                     if (!ctx) continue;
-                    if (shouldIgnoreForReminder(item.file, cache, ctx.frontmatter, reminder, ignorePaths, ignoreTags, ignoreStatuses, ignoreCheckboxStates)) continue;
+                    if (shouldIgnoreForReminder(item.file, cache, ctx.frontmatter, reminder, ignorePaths, ignoreTags, ignoreStatuses, ignoreCheckboxStates, getReminderTagsForTarget(target))) continue;
                     if (!hasRequiredStatus(ctx.frontmatter, reminder)) continue;
                     if (!hasRequiredCheckboxState(ctx.frontmatter, reminder)) continue;
                     if (reminder.stopConditions.some((cond) => checkStopCondition(ctx.frontmatter, cond))) continue;

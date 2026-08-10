@@ -46,13 +46,24 @@ export interface GcmApi {
   events?: GcmEventsApi;
   tasks?: GcmTasksApi;
   dailyNotes?: {
+    version?: number;
     ensureForIsoDate?: (isoDate: string) => Promise<TFile | null>;
+    getTaskSchedulePolicy?: (file: Pick<TFile, 'path' | 'basename'>) => {
+      isDailyNote: boolean;
+      inheritUnscheduled: boolean;
+    };
   };
   identity?: {
     buildCalendarExternalId?: (event: ExternalCalendarEvent) => string;
     ensureInternalIdInFrontmatter?: (frontmatter: Record<string, unknown>) => string;
     getExternalId?: (frontmatter: Record<string, unknown> | null | undefined) => string | null;
   };
+}
+
+export interface GcmDailyNoteTaskSchedulePolicy {
+  available: boolean;
+  isDailyNote: boolean;
+  inheritUnscheduled: boolean;
 }
 
 export interface GcmDailyNoteEnsureAttempt {
@@ -90,6 +101,23 @@ export async function ensureDailyNoteForIsoDateViaGcm(
   }
   const file = await ensureForIsoDate(String(isoDate || '').trim());
   return { available: true, file: file ?? null };
+}
+
+export function getDailyNoteTaskSchedulePolicyViaGcm(
+  app: App,
+  file: Pick<TFile, 'path' | 'basename'>,
+): GcmDailyNoteTaskSchedulePolicy {
+  const dailyNotes = getGcmApi(app)?.dailyNotes;
+  const version = Number(dailyNotes?.version);
+  if (!Number.isFinite(version) || version < 2 || typeof dailyNotes?.getTaskSchedulePolicy !== 'function') {
+    return { available: false, isDailyNote: false, inheritUnscheduled: true };
+  }
+  const policy = dailyNotes.getTaskSchedulePolicy(file);
+  return {
+    available: true,
+    isDailyNote: policy?.isDailyNote === true,
+    inheritUnscheduled: policy?.inheritUnscheduled !== false,
+  };
 }
 
 /**

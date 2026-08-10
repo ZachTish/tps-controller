@@ -18,14 +18,34 @@ const notificationSignatureSource = readFileSync(new URL('../src/views/notificat
 const overdueModalSource = readFileSync(new URL('../src/modals/overdue-modal.ts', import.meta.url), 'utf8');
 const settingsTabSource = readFileSync(new URL('../src/settings-tab.ts', import.meta.url), 'utf8');
 const typesSource = readFileSync(new URL('../src/types.ts', import.meta.url), 'utf8');
+const gcmApiSource = readFileSync(new URL('../src/tps-gcm-api.ts', import.meta.url), 'utf8');
 
-function loadReminderTargetModule() {
+function loadTpsGcmApiModule() {
+  const compiled = ts.transpileModule(gcmApiSource, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2018 },
+  });
+  const module = { exports: {} };
+  const requireStub = (id) => {
+    if (id === './tps-contracts') return { TPS_EVENTS: {}, TPS_LEGACY_EVENTS: {} };
+    throw new Error(`Unexpected require: ${id}`);
+  };
+  const load = new Function('module', 'exports', 'require', compiled.outputText);
+  load(module, module.exports, requireStub);
+  return module.exports;
+}
+
+function loadReminderTargetModule(taskSchedulePolicy = { available: false, isDailyNote: false, inheritUnscheduled: true }) {
   const compiled = ts.transpileModule(reminderTargetSource, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2018 },
   });
   const module = { exports: {} };
   const requireStub = (id) => {
-    if (id === '../tps-gcm-api') return { buildCalendarExternalId: () => 'calendar:test' };
+    if (id === '../tps-gcm-api') {
+      return {
+        buildCalendarExternalId: () => 'calendar:test',
+        getDailyNoteTaskSchedulePolicyViaGcm: () => taskSchedulePolicy,
+      };
+    }
     if (id === 'obsidian') return {};
     throw new Error(`Unexpected require: ${id}`);
   };
@@ -573,6 +593,102 @@ test('task-level reminder targets preserve task title and containing note', () =
   assert.match(notificationViewSource, /item\.targetKind === 'task' && item\.taskTitle/);
   assert.match(notificationViewSource, /getItemNoteSubtitle/);
   assert.match(notificationViewSource, /tps-notification-note-title/);
+});
+
+test('Daily Note task inheritance follows GCM while ignore tags stay scoped to each reminder target', async () => {
+  const policy = { available: true, isDailyNote: true, inheritUnscheduled: false };
+  const {
+    buildEffectiveReminderContextForTarget,
+    buildReminderTargetsForFile,
+    getReminderTagsForTarget,
+  } = loadReminderTargetModule(policy);
+  const { shouldIgnoreForReminder } = loadTimeCalculationModule();
+  const file = { path: 'System/Dailynotes/2026-08-10.md', basename: '2026-08-10', extension: 'md' };
+  const frontmatter = { scheduled: '2026-08-10', tags: ['dailynote'] };
+  const app = {
+    vault: {
+      async cachedRead() {
+        return [
+          'Daily context #journal',
+          '- [ ] Inherited task',
+          '- [ ] Explicit task #dailynote #taskonly [scheduled:: 2026-08-10 10:00]',
+        ].join('\n');
+      },
+    },
+  };
+
+  const targets = await buildReminderTargetsForFile(app, file, frontmatter, {});
+  const note = targets.find((target) => target.targetKind === 'note');
+  const inherited = targets.find((target) => target.taskTitle === 'Inherited task');
+  const explicit = targets.find((target) => target.taskTitle === 'Explicit task');
+  assert.ok(note);
+  assert.ok(inherited);
+  assert.ok(explicit);
+
+  assert.equal(buildEffectiveReminderContextForTarget(inherited, frontmatter, 'scheduled', {}), null);
+  assert.equal(
+    buildEffectiveReminderContextForTarget(explicit, frontmatter, 'scheduled', {}).propertyValue,
+    '2026-08-10 10:00',
+  );
+  assert.equal(
+    buildEffectiveReminderContextForTarget(note, frontmatter, 'scheduled', {}).propertyValue,
+    '2026-08-10',
+  );
+
+  const reminder = { ignoreTags: ['dailynote'] };
+  assert.equal(shouldIgnoreForReminder(file, null, frontmatter, reminder, [], [], [], [], getReminderTagsForTarget(note)), true);
+  assert.equal(shouldIgnoreForReminder(file, null, inherited.taskFrontmatter, reminder, [], [], [], [], getReminderTagsForTarget(inherited)), false);
+  assert.equal(shouldIgnoreForReminder(file, null, explicit.taskFrontmatter, reminder, [], [], [], [], getReminderTagsForTarget(explicit)), true);
+  assert.deepEqual(getReminderTagsForTarget(note).sort(), ['#dailynote', '#journal']);
+  assert.deepEqual(getReminderTagsForTarget(explicit).sort(), ['#dailynote', '#taskonly']);
+});
+
+test('Controller consumes only the versioned GCM Daily Note task policy and falls back compatibly', () => {
+  const { getDailyNoteTaskSchedulePolicyViaGcm } = loadTpsGcmApiModule();
+  const file = { path: 'System/Dailynotes/2026-08-10.md', basename: '2026-08-10' };
+  const app = {
+    plugins: {
+      getPlugin() {
+        return {
+          api: {
+            dailyNotes: {
+              version: 2,
+              getTaskSchedulePolicy(received) {
+                assert.equal(received, file);
+                return { isDailyNote: true, inheritUnscheduled: false };
+              },
+            },
+          },
+        };
+      },
+    },
+  };
+
+  assert.deepEqual(getDailyNoteTaskSchedulePolicyViaGcm(app, file), {
+    available: true,
+    isDailyNote: true,
+    inheritUnscheduled: false,
+  });
+  app.plugins.getPlugin = () => ({ api: { dailyNotes: { version: 1 } } });
+  assert.deepEqual(getDailyNoteTaskSchedulePolicyViaGcm(app, file), {
+    available: false,
+    isDailyNote: false,
+    inheritUnscheduled: true,
+  });
+});
+
+test('Controller preserves historical task date inheritance when the GCM policy API is unavailable', async () => {
+  const { buildEffectiveReminderContextForTarget, buildReminderTargetsForFile } = loadReminderTargetModule();
+  const file = { path: 'Notes/Project.md', basename: 'Project', extension: 'md' };
+  const frontmatter = { scheduled: '2026-08-10' };
+  const app = { vault: { cachedRead: async () => '- [ ] Inherited task' } };
+  const targets = await buildReminderTargetsForFile(app, file, frontmatter, {});
+  const task = targets.find((target) => target.targetKind === 'task');
+
+  assert.equal(
+    buildEffectiveReminderContextForTarget(task, frontmatter, 'scheduled', {}).propertyValue,
+    '2026-08-10',
+  );
 });
 
 test('notification sidebar uses task icons for task reminder rows', () => {

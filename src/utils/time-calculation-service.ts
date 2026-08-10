@@ -332,7 +332,8 @@ export function shouldIgnoreForReminder(
     globalIgnorePaths: string[],
     globalIgnoreTags: string[],
     globalIgnoreStatuses: string[],
-    globalIgnoreCheckboxStates: string[] = []
+    globalIgnoreCheckboxStates: string[] = [],
+    targetTags?: string[],
 ): boolean {
     // Always merge global paths with per-reminder paths so global protections
     // (vault root, _ folders, etc.) apply even when a reminder overrides the list.
@@ -383,7 +384,9 @@ export function shouldIgnoreForReminder(
         return true;
     }
 
-    const tags = (cache ? getAllTags(cache) : []) || [];
+    const tags = targetTags !== undefined
+        ? targetTags
+        : ((cache ? getAllTags(cache) : []) || []);
     const hasIgnoredTag = tags.some(tag => {
         const pureTag = tag.replace('#', '').toLowerCase();
         return ignoreTags.some(ignored => {

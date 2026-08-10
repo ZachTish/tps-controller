@@ -1,6 +1,6 @@
 import { TFile } from "obsidian";
 import type { ExternalCalendarEvent, TPSControllerSettings } from "../types";
-import { buildCalendarExternalId } from "../tps-gcm-api";
+import { buildCalendarExternalId, getDailyNoteTaskSchedulePolicyViaGcm } from "../tps-gcm-api";
 
 export type ReminderTargetType = "file" | "external-event";
 
@@ -12,6 +12,8 @@ export interface ReminderEvaluationTarget {
     taskRawLine?: string;
     taskLine?: number;
     taskPropertyKeys?: string[];
+    reminderTags?: string[];
+    suppressInheritedDailyNoteSchedule?: boolean;
     noteTitle?: string;
     taskFrontmatter?: Record<string, unknown>;
     externalEvent?: ExternalCalendarEvent;
@@ -36,12 +38,13 @@ export async function buildReminderTargetsForFile(
     frontmatter: Record<string, unknown>,
     _settings: TPSControllerSettings,
 ): Promise<ReminderEvaluationTarget[]> {
-    const targets: ReminderEvaluationTarget[] = [{
+    const noteTarget: ReminderEvaluationTarget = {
         sourceKey: file.path,
         sourceType: "file",
         targetKind: "note",
         noteTitle: buildNoteDisplayName(file),
-    }];
+    };
+    const targets: ReminderEvaluationTarget[] = [noteTarget];
 
     const vault = (app as any)?.vault;
     if (!vault || typeof vault.cachedRead !== "function" || file.extension?.toLowerCase() !== "md") return targets;
@@ -54,6 +57,12 @@ export async function buildReminderTargetsForFile(
     }
 
     const lines = content.split(/\r?\n/);
+    const noteTags = new Set(getFrontmatterReminderTags(frontmatter));
+    noteTarget.reminderTags = [...noteTags];
+    const dailyNotePolicy = getDailyNoteTaskSchedulePolicyViaGcm(app as any, file);
+    const suppressInheritedDailyNoteSchedule = dailyNotePolicy.available
+        && dailyNotePolicy.isDailyNote
+        && !dailyNotePolicy.inheritUnscheduled;
     let inFencedCodeBlock = false;
     let migratedTaskIndent: number | null = null;
     for (let index = 0; index < lines.length; index++) {
@@ -69,7 +78,11 @@ export async function buildReminderTargetsForFile(
             migratedTaskIndent = null;
         }
         const parsed = parseTaskReminderLine(line);
-        if (!parsed) continue;
+        if (!parsed) {
+            for (const tag of getLineReminderTags(line)) noteTags.add(tag);
+            noteTarget.reminderTags = [...noteTags];
+            continue;
+        }
         if (parsed.properties.status === "migrated") {
             migratedTaskIndent = indent;
             continue;
@@ -83,6 +96,8 @@ export async function buildReminderTargetsForFile(
             taskRawLine: lines[index],
             taskLine: index,
             taskPropertyKeys: Object.keys(parsed.properties),
+            reminderTags: getLineReminderTags(line),
+            suppressInheritedDailyNoteSchedule,
             noteTitle: buildNoteDisplayName(file),
             taskFrontmatter: {
                 ...frontmatter,
@@ -134,6 +149,17 @@ export function buildEffectiveReminderContextForTarget(
     }
 
     if (target.targetKind === "task" && target.taskFrontmatter) {
+        const normalizedProperty = String(reminderProperty || "").trim().toLowerCase();
+        const taskPropertyKeys = new Set(
+            (target.taskPropertyKeys || []).map((key) => String(key || "").trim().toLowerCase()),
+        );
+        if (
+            target.suppressInheritedDailyNoteSchedule
+            && ["scheduled", "start", "date"].includes(normalizedProperty)
+            && !taskPropertyKeys.has(normalizedProperty)
+        ) {
+            return null;
+        }
         return {
             frontmatter: target.taskFrontmatter,
             propertyValue: target.taskFrontmatter[reminderProperty],
@@ -144,6 +170,36 @@ export function buildEffectiveReminderContextForTarget(
         frontmatter: baseFrontmatter,
         propertyValue: baseFrontmatter[reminderProperty],
     };
+}
+
+function getFrontmatterReminderTags(frontmatter: Record<string, unknown>): string[] {
+    const tags: string[] = [];
+    for (const key of Object.keys(frontmatter || {})) {
+        if (key.trim().toLowerCase() !== "tag" && key.trim().toLowerCase() !== "tags") continue;
+        const value = frontmatter[key];
+        const values = Array.isArray(value) ? value : String(value ?? "").split(/[\s,]+/);
+        for (const entry of values) {
+            const normalized = String(entry ?? "").trim().replace(/^#/, "");
+            if (normalized) tags.push(`#${normalized}`);
+        }
+    }
+    return [...new Set(tags)];
+}
+
+function getLineReminderTags(line: string): string[] {
+    const tags: string[] = [];
+    const pattern = /(^|[\s(])#([\p{L}\p{N}_/-]+)/gu;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(String(line || ""))) !== null) {
+        tags.push(`#${match[2]}`);
+    }
+    return [...new Set(tags)];
+}
+
+export function getReminderTagsForTarget(target: ReminderEvaluationTarget): string[] | undefined {
+    if (target.reminderTags !== undefined) return target.reminderTags;
+    if (target.targetKind === "task") return getLineReminderTags(target.taskRawLine || "");
+    return undefined;
 }
 
 export function buildReminderDisplayName(file: Pick<TFile, "basename">, target: ReminderEvaluationTarget): string {

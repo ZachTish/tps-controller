@@ -1,5 +1,11 @@
 # TPS Controller
 
+## 0.3.11
+
+- Reminder tasks in Daily Notes now honor GCM's **Inherit Daily Note date for unscheduled tasks** setting. When inheritance is off, an unscheduled task no longer receives a Controller reminder from the Daily Note's `scheduled`, `start`, or `date` value; an explicit inline task date remains eligible.
+- Reminder ignore tags are scoped to the entity being evaluated. A note-level `#dailynote` tag can suppress the Daily Note's own scheduled reminder without suppressing its untagged tasks, while a task line containing `#dailynote` is still ignored by that rule.
+- Controller consumes GCM Daily Notes API v2 when available and preserves the historical inheritance behavior with older/unavailable GCM APIs. This backward-compatible patch adds no settings or data migration, requires TPS Global Context Menu 1.25.2 for the corrected cross-plugin policy, and keeps minimum Obsidian compatibility at 1.12.0.
+
 ## 0.3.10
 
 - Reminder task moves now delegate to TPS Global Context Menu Task API v2 instead of maintaining a second Controller-owned move implementation. Controller sends the exact source path, zero-based line number, original raw line, and title with strict exact-or-identity resolution.
