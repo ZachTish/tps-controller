@@ -171,6 +171,60 @@ test('GCM daily-note adapter propagates creation failures instead of authorizing
   );
 });
 
+test('GCM task adapter requires v2 and forwards strict migration requests without fallback', async () => {
+  const calls = [];
+  const expectedResult = {
+    ok: true,
+    changed: true,
+    task: { path: 'Projects/Target.md', line: 4, lineNumber: 3, rawLine: '- [ ] Task', title: 'Task' },
+  };
+  const createApp = (tasks) => ({
+    plugins: {
+      getPlugin(id) {
+        return id === 'tps-global-context-menu' ? { api: { tasks } } : null;
+      },
+    },
+  });
+  const ref = {
+    path: 'Daily/2026-08-10.md',
+    lineNumber: 12,
+    rawLine: '- [ ] Task [scheduled:: 2026-08-10 09:00]',
+    title: 'Task',
+  };
+  const target = {
+    targetPath: 'Projects/Target.md',
+    sourcePolicy: 'migrate-if-daily-note',
+    resolution: 'exact-or-identity',
+  };
+  const v2App = createApp({
+    version: 2,
+    async move(actualRef, actualTarget) {
+      calls.push({ ref: actualRef, target: actualTarget });
+      return expectedResult;
+    },
+  });
+
+  assert.deepEqual(await gcmApi.moveTaskViaGcm(v2App, ref, target), {
+    available: true,
+    result: expectedResult,
+  });
+  assert.deepEqual(calls, [{ ref, target }]);
+
+  for (const tasks of [undefined, { move: async () => expectedResult }, { version: 1, move: async () => expectedResult }]) {
+    assert.deepEqual(await gcmApi.moveTaskViaGcm(createApp(tasks), ref, target), {
+      available: false,
+      result: null,
+    });
+  }
+  assert.equal(calls.length, 1);
+
+  const rejected = { ok: false, changed: true, task: null, error: 'partial copy remains' };
+  assert.deepEqual(
+    await gcmApi.moveTaskViaGcm(createApp({ version: 2, move: async () => rejected }), ref, target),
+    { available: true, result: rejected },
+  );
+});
+
 test('standalone daily-note templates expand core variables and preserve Templater expressions', () => {
   const template = [
     '---',

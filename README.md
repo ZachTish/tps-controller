@@ -1,5 +1,13 @@
 # TPS Controller
 
+## 0.3.10
+
+- Reminder task moves now delegate to TPS Global Context Menu Task API v2 instead of maintaining a second Controller-owned move implementation. Controller sends the exact source path, zero-based line number, original raw line, and title with strict exact-or-identity resolution.
+- Moving an inherited Daily Note task preserves the source as a migrated scratchpad record (`[>]` with `[migratedTo:: [[Target]]]`) while the original authoritative block moves to the selected destination. Migrated roots and their nested task content are excluded from future reminder discovery.
+- The destination picker excludes the source note. Missing or older GCM Task APIs, stale/ambiguous tasks, rejected writes, and partial results fail closed without a Controller fallback or optimistic row removal.
+- This backward-compatible patch adds no settings or data migration. It requires TPS Global Context Menu 1.25.0 for reminder moves and keeps the minimum supported Obsidian version at 1.12.0.
+- Executable reminder-service coverage passed every GCM v2 success, rejection, partial, thrown, unavailable, picker-cancel, and source-exclusion case; focused integration passed 72 checks with three historical skips. The complete declared suite and separate production-mode build passed, Obsidian 1.13.6 reloaded in passive `TPS: User` mode, and the shared live GCM migration transaction was verified without enabling outbound automation. Runtime state was unchanged and production was not accessed.
+
 ## 0.3.9
 
 - Sync-conflict startup work now belongs to the watcher lifecycle: stopping Controller clears the pending eight-second fallback, invalidates captured startup callbacks, and removes each listener through the Vault or Metadata Cache emitter that created it.
@@ -257,9 +265,9 @@ Device role, reminder alert reset, calendar quarantine review, historical backfi
 - Completing a note-level reminder now routes through GCM's guarded status setter when available, so notes with open checklist items trigger the incomplete-checklist modal before `status: complete` is written.
 - Open checklist/task lines are reminder targets even when they inherit the note-level reminder date. If task rows match a reminder rule, both the reminder delivery engine and notification view show the actionable task rows and suppress the parent note row for that same reminder.
 - Task-mode reminder rows do not show the note status pill. They show a schedule-resolution action instead: explicit inline schedule values are cleared from the task line, note-level schedules are cleared from frontmatter, and inherited note/daily-note task schedules prompt for a target note and move the task block there. Clear scheduled actions require a confirmation modal before mutating reminder metadata.
-- Task-mode reminder rows carry the original raw Markdown task line. Move/update actions only trust the saved line number when it still resolves to that same task; otherwise they fall back to the raw line and then the cleaned task title so daily-note edits do not move the wrong checkbox line.
-- When an inherited Daily Note task is moved from the reminder UI, Controller inserts the original task block into the selected target file unchanged, then keeps the Daily Note block in place with the root checkbox marked and `[completedDate:: null]`. This preserves Daily Notes as scratchpad/inbox records while still making the actionable task live in the destination note.
-- Notification sidebar move/clear actions now report whether they actually changed a task before removing the row. Failures show an Obsidian notice, and Controller debug logging includes source path, target path, line number, and title breadcrumbs for move-note troubleshooting.
+- Task-mode reminder rows carry the original raw Markdown task line. Move actions send GCM Task API v2 the exact source path, zero-based line number, raw line, and title with `resolution: exact-or-identity`; GCM refuses stale or ambiguous records rather than falling back to a fuzzy title match.
+- When an inherited Daily Note task is moved from the reminder UI, GCM copies the authoritative current task block to the selected destination and preserves the Daily Note source as `[>]` with `[migratedTo:: [[Target]]]`. Controller excludes that migrated root and all of its nested scratchpad task content from reminder discovery.
+- The move picker excludes the source note. Controller requires GCM Task API v2, never falls back after a move attempt, and removes the reminder row only for a committed success. Missing/older APIs and failed or partial results keep the row visible and show an Obsidian notice; debug logging includes source path, target path, line number, and title breadcrumbs.
 - Clearing note-level notification status or reminder snooze metadata deletes only the configured property instead of retaining an empty-string placeholder. Task-line clears continue to remove only their matching inline property.
 - Notification sidebar titles render Obsidian markdown links inline when the linked note exists, so task text like `[[Note|Label]]` is clickable only for resolvable vault files. Unresolved wikilinks render as plain text to avoid offering links that create or open missing notes.
 - Notification sidebar task rows use a task icon rather than inheriting the containing note/file icon. Note rows still use their configured note icon/color with a `file-text` fallback.
@@ -296,7 +304,7 @@ Device role, reminder alert reset, calendar quarantine review, historical backfi
 - Legacy TPS event aliases remain exported for migration compatibility.
 - Controller exposes a plugin API with `isController`, `getRole`, `getSettings`, `getCalendarSettingsSnapshot`, `getReminders`, `getOverdueItems`, and `snoozeFile`.
 - Calendar integration uses TPS Calendar Base settings as a fallback source for external calendar definitions and respects Calendar Base hidden-external-event state when building unmatched external reminder candidates.
-- Global Context Menu integration is used for shared external identity helpers, file-updated event emission, guarded status writes, and parent/child maintenance when the GCM API is available.
+- Global Context Menu integration is used for shared external identity helpers, file-updated event emission, guarded status writes, parent/child maintenance, and reminder task moves. Reminder moves require Task API v2 and fail closed when that capability is unavailable; other integrations keep their existing optional/fallback behavior.
 - Messager/Notifier integration remains optional: desktop Controller delivery always includes a local Obsidian notice, while opted-in User instances use a separate local-only route that bypasses the integration entirely.
 - Controller intentionally does not intercept Notebook Navigator file selections. Notebook Navigator and Obsidian determine whether selections reuse the current leaf, open a note, extend a multi-selection, or begin a drag; Controller does not patch global leaf-opening APIs to override that behavior.
 

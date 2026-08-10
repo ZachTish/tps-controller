@@ -98,6 +98,202 @@ function loadNotificationSignatureModule() {
   return module.exports;
 }
 
+function loadTimeCalculationModule() {
+  const compiled = ts.transpileModule(timeCalculationSource, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2018 },
+  });
+  const module = { exports: {} };
+  const requireStub = (id) => {
+    if (id === 'obsidian') {
+      return {
+        moment: () => ({ isValid: () => false }),
+        getAllTags: () => [],
+      };
+    }
+    if (id === '../utils') {
+      return {
+        matchesExclusionPattern: () => false,
+        matchesRequiredPath: () => true,
+        normalizeComparablePath: (value) => String(value || '').toLowerCase(),
+      };
+    }
+    throw new Error(`Unexpected require: ${id}`);
+  };
+  const load = new Function('module', 'exports', 'require', compiled.outputText);
+  load(module, module.exports, requireStub);
+  return module.exports;
+}
+
+function loadCompiledOverdueServiceHarness() {
+  const notices = [];
+  const logs = [];
+  const openedModals = [];
+  const moveCalls = [];
+  let moveImplementation = async () => ({ available: false, result: null });
+
+  class TestTFile {
+    constructor(path) {
+      this.path = path;
+      this.name = path.split('/').pop() || path;
+      this.extension = this.name.includes('.') ? this.name.split('.').pop() : '';
+      this.basename = this.name.replace(/\.[^.]+$/u, '');
+    }
+  }
+
+  class TestFuzzySuggestModal {
+    constructor(app) {
+      this.app = app;
+    }
+
+    setPlaceholder(value) {
+      this.placeholder = value;
+    }
+
+    open() {
+      openedModals.push(this);
+      return this;
+    }
+
+    onClose() {}
+  }
+
+  class TestNotice {
+    constructor(message) {
+      notices.push(String(message));
+    }
+  }
+
+  const logger = {};
+  for (const level of ['log', 'warn', 'error', 'flow', 'flowWarn', 'flowError']) {
+    logger[level] = (...args) => logs.push({ level, args });
+  }
+
+  const compiled = ts.transpileModule(overdueSource, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2018 },
+  });
+  const module = { exports: {} };
+  const requireStub = (id) => {
+    if (id === 'obsidian') {
+      return {
+        App: class {},
+        FuzzySuggestModal: TestFuzzySuggestModal,
+        MarkdownView: class {},
+        Notice: TestNotice,
+        TFile: TestTFile,
+        WorkspaceLeaf: class {},
+        moment: () => ({ isValid: () => false, format: () => '' }),
+      };
+    }
+    if (id === '../views/notification-view') return { NOTIFICATION_VIEW_TYPE: 'tps-notifications' };
+    if (id === '../logger') return logger;
+    if (id === '../utils/time-calculation-service') {
+      return {
+        parseDate: () => null,
+        parseTimeRange: () => ({ start: null, end: null }),
+        parseDuration: () => 0,
+        getEffectiveEndTime: () => null,
+        formatTemplate: () => '',
+        checkStopCondition: () => false,
+        hasRequiredStatus: () => true,
+        hasRequiredCheckboxState: () => true,
+        shouldIgnoreForReminder: () => false,
+        isAllDayEvent: () => false,
+        hasExplicitTimeInValue: () => false,
+        getReminderTriggerBase: () => null,
+      };
+    }
+    if (id === './reminder-target-service') {
+      return {
+        buildReminderTargetsForFile: async () => [],
+        buildEffectiveReminderContextForTarget: () => null,
+        buildReminderDisplayName: () => '',
+      };
+    }
+    if (id === './reminder-candidate-service') {
+      return { getReminderCandidateFiles: async () => ({ files: [], stats: {} }) };
+    }
+    if (id === './reminder-delivery-window') {
+      return {
+        getFileReminderLiveWindowMs: () => 60_000,
+        shouldSkipStaleOneShotReminder: () => false,
+      };
+    }
+    if (id === '../tps-contracts') {
+      return {
+        TPS_EVENTS: { FILES_UPDATED: 'tps:files-updated' },
+        TPS_LEGACY_EVENTS: { GCM_FILES_UPDATED: 'tps-gcm-files-updated' },
+      };
+    }
+    if (id === '../tps-gcm-api') {
+      return {
+        emitFilesUpdated: () => {},
+        async moveTaskViaGcm(...args) {
+          moveCalls.push(args);
+          return moveImplementation(...args);
+        },
+      };
+    }
+    throw new Error(`Unexpected require: ${id}`);
+  };
+  const load = new Function('module', 'exports', 'require', compiled.outputText);
+  load(module, module.exports, requireStub);
+
+  return {
+    OverdueService: module.exports.OverdueService,
+    TFile: TestTFile,
+    notices,
+    logs,
+    openedModals,
+    moveCalls,
+    setMoveImplementation(implementation) {
+      moveImplementation = implementation;
+    },
+    reset() {
+      notices.length = 0;
+      logs.length = 0;
+      openedModals.length = 0;
+      moveCalls.length = 0;
+    },
+  };
+}
+
+function beginCompiledReminderMove(harness) {
+  const sourceFile = new harness.TFile('Daily/2026-08-10.md');
+  const targetFile = new harness.TFile('Projects/Alpha.md');
+  const laterTargetFile = new harness.TFile('Projects/Zulu.md');
+  const app = {
+    vault: {
+      getMarkdownFiles: () => [laterTargetFile, sourceFile, targetFile],
+    },
+  };
+  const service = new harness.OverdueService(app, () => ({
+    startProperty: 'scheduled',
+    statusKey: 'status',
+  }));
+  const item = {
+    file: sourceFile,
+    targetKind: 'task',
+    taskLine: 12.8,
+    taskRawLine: '- [ ] Move me [scheduled:: 2026-08-10 09:00] [tpsId:: task_move]',
+    taskTitle: 'Move me',
+    noteTitle: sourceFile.basename,
+    reminderProperty: 'scheduled',
+    reminderPropertySource: 'note',
+    reminder: { property: 'scheduled' },
+  };
+  const pending = service.resolveTaskReminder(item);
+  assert.equal(harness.openedModals.length, 1, 'target picker should open synchronously');
+  return {
+    app,
+    item,
+    pending,
+    sourceFile,
+    targetFile,
+    laterTargetFile,
+    modal: harness.openedModals[0],
+  };
+}
+
 test('all-day task reminders can repeat until their stop condition', () => {
   assert.match(source, /reminder\.repeatUntilComplete\s*&&\s*\(!reminder\.mode \|\| reminder\.mode === "task"\)/);
   assert.doesNotMatch(source, /reminder\.repeatUntilComplete\s*&&[\s\S]{0,160}!isAllDaySafe/);
@@ -336,9 +532,9 @@ test('reminder task parsing ignores task examples inside fenced code blocks', ()
   assert.match(reminderCandidateSource, /let inFencedCodeBlock = false/);
   assert.match(reminderTargetSource, /let inFencedCodeBlock = false/);
   assert.match(reminderCandidateSource, /if \(FENCED_CODE_BLOCK_PATTERN\.test\(line\)\) \{/);
-  assert.match(reminderTargetSource, /if \(FENCED_CODE_BLOCK_PATTERN\.test\(lines\[index\]\)\) \{/);
+  assert.match(reminderTargetSource, /if \(FENCED_CODE_BLOCK_PATTERN\.test\(line\)\) \{/);
   assert.match(reminderCandidateSource, /if \(inFencedCodeBlock\) continue;\s+if \(!TASK_LINE_PATTERN\.test\(line\)\) continue;/);
-  assert.match(reminderTargetSource, /if \(inFencedCodeBlock\) continue;\s+const parsed = parseTaskReminderLine\(lines\[index\]\)/);
+  assert.match(reminderTargetSource, /if \(inFencedCodeBlock\) continue;[\s\S]{0,500}const parsed = parseTaskReminderLine\(line\)/);
 });
 
 test('reminder target builder does not create task targets from fenced markdown examples', async () => {
@@ -508,6 +704,43 @@ test('reminder rules evaluate checkbox states separately from statuses', () => {
   assert.match(reminderSettingsSource, /if \(!Array\.isArray\(reminder\.requiredCheckboxStates\)\) reminder\.requiredCheckboxStates = \[\]/);
 });
 
+test('migrated task records are never re-enqueued as reminders', () => {
+  const { normalizeCheckboxState, shouldIgnoreForReminder } = loadTimeCalculationModule();
+  const file = { path: 'Daily/2026-08-10.md', basename: '2026-08-10' };
+  const reminder = {};
+
+  assert.equal(normalizeCheckboxState('migrated'), '>');
+  assert.equal(shouldIgnoreForReminder(file, null, { status: 'migrated' }, reminder, [], [], [], []), true);
+  assert.equal(shouldIgnoreForReminder(file, null, { checkboxState: '>' }, reminder, [], [], [], []), true);
+  assert.match(reminderTargetSource, /if \(marker === ">"\) return "migrated"/);
+  assert.match(timeCalculationSource, /if \(statuses\.has\("migrated"\) \|\| checkboxStates\.has\(">"\)\) \{/);
+});
+
+test('migrated task blocks suppress their nested scratchpad tasks from reminder discovery', async () => {
+  const { buildReminderTargetsForFile } = loadReminderTargetModule();
+  const file = { path: 'Daily/2026-08-10.md', basename: '2026-08-10', extension: 'md' };
+  const app = {
+    vault: {
+      async cachedRead() {
+        return [
+          '- [>] Migrated root [migratedTo:: [[Projects/Target]]]',
+          '  - [ ] Nested task [scheduled:: 2026-08-10 09:00]',
+          '    supporting detail',
+          '',
+          '- [ ] Active task [scheduled:: 2026-08-10 10:00]',
+        ].join('\n');
+      },
+    },
+  };
+
+  const targets = await buildReminderTargetsForFile(app, file, {}, {});
+  assert.deepEqual(targets.filter((target) => target.targetKind === 'task').map((target) => target.taskTitle), [
+    'Active task',
+  ]);
+  assert.match(reminderTargetSource, /let migratedTaskIndent: number \| null = null/);
+  assert.match(reminderTargetSource, /if \(parsed\.properties\.status === "migrated"\)/);
+});
+
 test('open checklist reminders surface task rows instead of parent note rows', () => {
   assert.doesNotMatch(
     reminderTargetSource,
@@ -549,7 +782,7 @@ test('task reminder rows resolve schedule instead of showing a status pill', () 
   assert.match(mainSource, /resolveOverdueTaskReminder\(item: OverdueItem\): Promise<boolean>/);
 });
 
-test('notification task moves resolve stale daily-note line numbers safely', () => {
+test('notification task moves use GCM v2 strict migration semantics', () => {
   assert.match(overdueSource, /private findCurrentTaskLineIndex\(lines: string\[\], item: OverdueItem\): number/);
   assert.match(overdueSource, /this\.isSameTaskLine\(lines\[preferredIndex\] \|\| "", item\)/);
   assert.match(overdueSource, /const rawLine = String\(item\.taskRawLine \|\| ""\)/);
@@ -559,17 +792,197 @@ test('notification task moves resolve stale daily-note line numbers safely', () 
   assert.match(overdueSource, /const resolvedIndex = this\.findCurrentTaskLineIndex\(lines, item\)/);
   assert.match(overdueSource, /item\.taskLine = resolvedIndex/);
   assert.match(overdueSource, /item\.taskRawLine = lines\[resolvedIndex\]/);
-  assert.match(overdueSource, /logger\.flowWarn\("OverdueAction", "move-task:source-not-found"/);
-  assert.match(overdueSource, /return removed;/);
-  assert.match(overdueSource, /this\.isDailyNoteSourceFile\(sourceFile\)/);
-  assert.match(overdueSource, /this\.buildDailyNoteScratchpadMovedTaskBlock\(block\)/);
-  assert.match(overdueSource, /kept a checked scratchpad copy/);
-  assert.match(overdueSource, /completedDate: "null"/);
+  assert.match(overdueSource, /const attempt = await moveTaskViaGcm\(/);
+  assert.match(overdueSource, /lineNumber: Math\.max\(0, Math\.floor\(item\.taskLine\)\)/);
+  assert.match(overdueSource, /rawLine: item\.taskRawLine/);
+  assert.match(overdueSource, /title: item\.taskTitle/);
+  assert.match(overdueSource, /sourcePolicy: "migrate-if-daily-note"/);
+  assert.match(overdueSource, /resolution: "exact-or-identity"/);
+  assert.match(overdueSource, /requiredTaskApiVersion: 2/);
+  assert.match(overdueSource, /move-task:gcm-rejected/);
+  assert.match(overdueSource, /route: "gcm-task-api-v2"/);
+  assert.match(overdueSource, /new TargetFileSuggestModal\(this\.app, sourcePath, resolve\)/);
+  assert.match(overdueSource, /\.filter\(\(file\) => file\.path !== this\.excludedPath\)/);
+  assert.doesNotMatch(overdueSource, /buildDailyNoteScratchpadMovedTaskBlock/);
+  assert.doesNotMatch(overdueSource, /completedDate: "null"/);
   assert.match(overdueSource, /private didSettle = false/);
   assert.match(overdueSource, /window\.setTimeout\(\(\) => \{/);
   assert.match(overdueSource, /if \(!this\.didChoose\) this\.settle\(null\)/);
   assert.match(overdueSource, /private settle\(file: TFile \| null\): void/);
   assert.doesNotMatch(overdueSource, /preferredIndex >= 0 && this\.isTaskLine\(lines\[preferredIndex\] \|\| ""\)\) return preferredIndex/);
+});
+
+test('compiled reminder move picker excludes the source note and canceling does not call GCM', async () => {
+  const harness = loadCompiledOverdueServiceHarness();
+  harness.setMoveImplementation(async () => {
+    throw new Error('GCM should not be called when the picker is canceled');
+  });
+  const fixture = beginCompiledReminderMove(harness);
+
+  assert.equal(fixture.modal.placeholder, 'Move task to note...');
+  assert.deepEqual(
+    fixture.modal.getItems().map((file) => file.path),
+    ['Projects/Alpha.md', 'Projects/Zulu.md'],
+  );
+
+  const previousWindow = globalThis.window;
+  globalThis.window = {
+    setTimeout(callback) {
+      callback();
+      return 1;
+    },
+  };
+  try {
+    fixture.modal.onClose();
+    fixture.modal.onClose();
+    assert.equal(await fixture.pending, false);
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+
+  assert.equal(harness.moveCalls.length, 0);
+  assert.deepEqual(harness.notices, []);
+  assert.equal(
+    harness.logs.filter(({ args }) => args[1] === 'resolve-reminder:canceled').length,
+    1,
+  );
+});
+
+test('compiled reminder moves honor every GCM v2 outcome without corrupting source coordinates', async (t) => {
+  const cases = [
+    {
+      name: 'unavailable API',
+      response: { available: false, result: null },
+      expected: false,
+      notice: 'Update TPS Global Context Menu before moving reminder tasks.',
+      logEvent: 'move-task:gcm-unavailable',
+    },
+    {
+      name: 'rejected mutation',
+      response: {
+        available: true,
+        result: { ok: false, changed: false, task: null, error: 'source is stale' },
+      },
+      expected: false,
+      notice: 'Could not move task: source is stale',
+      logEvent: 'move-task:gcm-rejected',
+    },
+    {
+      name: 'partial mutation report',
+      response: {
+        available: true,
+        result: { ok: false, changed: true, task: null, error: 'target copy may remain' },
+      },
+      expected: false,
+      notice: 'Could not move task: target copy may remain',
+      logEvent: 'move-task:gcm-rejected',
+    },
+    {
+      name: 'committed move with unavailable refreshed task',
+      response: {
+        available: true,
+        result: { ok: true, changed: true, task: null, error: 'refresh unavailable' },
+      },
+      expected: true,
+      notice: 'Moved task to Alpha.',
+      logEvent: 'move-task:done',
+      movedLine: -1,
+    },
+    {
+      name: 'committed move with refreshed target coordinates',
+      response: {
+        available: true,
+        result: {
+          ok: true,
+          changed: true,
+          task: {
+            path: 'Projects/Alpha.md',
+            lineNumber: 6,
+            rawLine: '- [ ] Moved task [tpsId:: task_move]',
+            title: 'Moved task',
+          },
+        },
+      },
+      expected: true,
+      notice: 'Moved task to Alpha.',
+      logEvent: 'move-task:done',
+      movedLine: 6,
+      updatesCoordinates: true,
+    },
+  ];
+
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      const harness = loadCompiledOverdueServiceHarness();
+      harness.setMoveImplementation(async () => scenario.response);
+      const fixture = beginCompiledReminderMove(harness);
+
+      fixture.modal.onChooseItem(fixture.targetFile);
+      assert.equal(await fixture.pending, scenario.expected);
+
+      assert.equal(harness.moveCalls.length, 1);
+      const [app, reference, target] = harness.moveCalls[0];
+      assert.equal(app, fixture.app);
+      assert.deepEqual(reference, {
+        path: 'Daily/2026-08-10.md',
+        lineNumber: 12,
+        rawLine: '- [ ] Move me [scheduled:: 2026-08-10 09:00] [tpsId:: task_move]',
+        title: 'Move me',
+      });
+      assert.deepEqual(target, {
+        targetPath: 'Projects/Alpha.md',
+        sourcePolicy: 'migrate-if-daily-note',
+        resolution: 'exact-or-identity',
+      });
+      assert.deepEqual(harness.notices, [scenario.notice]);
+      assert.ok(harness.logs.some(({ args }) => args[1] === scenario.logEvent));
+
+      if (scenario.updatesCoordinates) {
+        assert.equal(fixture.item.file, fixture.targetFile);
+        assert.equal(fixture.item.taskLine, 6);
+        assert.equal(fixture.item.taskRawLine, '- [ ] Moved task [tpsId:: task_move]');
+        assert.equal(fixture.item.taskTitle, 'Moved task');
+        assert.equal(fixture.item.noteTitle, 'Alpha');
+      } else {
+        assert.equal(fixture.item.file, fixture.sourceFile);
+        assert.equal(fixture.item.taskLine, 12.8);
+        assert.equal(
+          fixture.item.taskRawLine,
+          '- [ ] Move me [scheduled:: 2026-08-10 09:00] [tpsId:: task_move]',
+        );
+        assert.equal(fixture.item.taskTitle, 'Move me');
+        assert.equal(fixture.item.noteTitle, '2026-08-10');
+      }
+
+      if (scenario.expected) {
+        const doneLog = harness.logs.find(({ args }) => args[1] === 'move-task:done');
+        assert.equal(doneLog.args[2].route, 'gcm-task-api-v2');
+        assert.equal(doneLog.args[2].movedPath, 'Projects/Alpha.md');
+        assert.equal(doneLog.args[2].movedLine, scenario.movedLine);
+      }
+    });
+  }
+});
+
+test('compiled reminder move propagates a thrown GCM failure for the notification action boundary', async () => {
+  const harness = loadCompiledOverdueServiceHarness();
+  const failure = new Error('transport failed');
+  harness.setMoveImplementation(async () => {
+    throw failure;
+  });
+  const fixture = beginCompiledReminderMove(harness);
+
+  fixture.modal.onChooseItem(fixture.targetFile);
+  await assert.rejects(fixture.pending, (error) => error === failure);
+
+  assert.equal(harness.moveCalls.length, 1);
+  assert.deepEqual(harness.notices, []);
+  assert.equal(fixture.item.file, fixture.sourceFile);
+  assert.equal(fixture.item.taskLine, 12.8);
+  assert.equal(fixture.item.taskTitle, 'Move me');
+  assert.ok(harness.logs.some(({ args }) => args[1] === 'move-task:start'));
+  assert.equal(harness.logs.some(({ args }) => args[1] === 'move-task:done'), false);
 });
 
 test('notification sort direction can be reversed from settings', () => {

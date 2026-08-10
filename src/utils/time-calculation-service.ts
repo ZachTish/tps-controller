@@ -294,6 +294,7 @@ export function normalizeCheckboxState(value: unknown): string {
     if (raw === "working" || raw === "in-progress" || raw === "inprogress") return "/";
     if (raw === "holding" || raw === "hold" || raw === "waiting") return "?";
     if (raw === "wont-do" || raw === "wontdo" || raw === "cancelled" || raw === "canceled") return "-";
+    if (raw === "migrated") return ">";
     return raw;
 }
 
@@ -366,12 +367,15 @@ export function shouldIgnoreForReminder(
     }
 
     const statuses = new Set<string>(getStatuses(fm));
+    const checkboxStates = new Set<string>(getCheckboxStates(fm));
+    if (statuses.has("migrated") || checkboxStates.has(">")) {
+        return true;
+    }
     const normalizedIgnoreStatuses = ignoreStatuses.map(s => normalizeStatus(s)).filter(Boolean);
     if (normalizedIgnoreStatuses.some(s => statuses.has(s))) {
         return true;
     }
 
-    const checkboxStates = new Set<string>(getCheckboxStates(fm));
     const normalizedIgnoreCheckboxStates = ignoreCheckboxStates
         .map(s => normalizeCheckboxState(s))
         .filter(s => s === " " || !!s);

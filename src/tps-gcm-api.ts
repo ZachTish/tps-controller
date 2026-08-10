@@ -6,8 +6,45 @@ export interface GcmEventsApi {
   emitFilesUpdated?: (paths: string[], options?: { sourcePluginId?: string }) => void;
 }
 
+export interface GcmTaskRef {
+  path: string;
+  line?: number;
+  lineNumber?: number;
+  rawLine?: string;
+  title?: string;
+}
+
+export interface GcmTaskMoveTarget {
+  targetFile?: TFile;
+  targetPath?: string;
+  line?: number;
+  lineNumber?: number;
+  placement?: 'after-frontmatter' | 'line';
+  sourcePolicy?: 'remove' | 'migrate-if-daily-note';
+  resolution?: 'default' | 'exact-or-identity';
+}
+
+export interface GcmTaskMutationResult {
+  ok: boolean;
+  changed: boolean;
+  task: {
+    path: string;
+    line: number;
+    lineNumber: number;
+    rawLine: string;
+    title: string;
+  } | null;
+  error?: string;
+}
+
+export interface GcmTasksApi {
+  version?: number;
+  move?: (ref: GcmTaskRef, target: GcmTaskMoveTarget) => Promise<GcmTaskMutationResult>;
+}
+
 export interface GcmApi {
   events?: GcmEventsApi;
+  tasks?: GcmTasksApi;
   dailyNotes?: {
     ensureForIsoDate?: (isoDate: string) => Promise<TFile | null>;
   };
@@ -21,6 +58,11 @@ export interface GcmApi {
 export interface GcmDailyNoteEnsureAttempt {
   available: boolean;
   file: TFile | null;
+}
+
+export interface GcmTaskMoveAttempt {
+  available: boolean;
+  result: GcmTaskMutationResult | null;
 }
 
 export function getGcmApi(app: App): GcmApi | null {
@@ -48,6 +90,27 @@ export async function ensureDailyNoteForIsoDateViaGcm(
   }
   const file = await ensureForIsoDate(String(isoDate || '').trim());
   return { available: true, file: file ?? null };
+}
+
+/**
+ * Use GCM's v2 task move transaction. Version 2 is the first public contract
+ * that preserves Daily Note sources as migrated records instead of deleting
+ * them. Callers must fail closed when this capability is unavailable.
+ */
+export async function moveTaskViaGcm(
+  app: App,
+  ref: GcmTaskRef,
+  target: GcmTaskMoveTarget,
+): Promise<GcmTaskMoveAttempt> {
+  const tasks = getGcmApi(app)?.tasks;
+  const version = Number(tasks?.version);
+  if (!Number.isFinite(version) || version < 2 || typeof tasks?.move !== 'function') {
+    return { available: false, result: null };
+  }
+  return {
+    available: true,
+    result: await tasks.move(ref, target),
+  };
 }
 
 export function emitFilesUpdated(app: App, paths: string[], sourcePluginId: string): void {

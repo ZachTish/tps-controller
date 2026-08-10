@@ -55,14 +55,25 @@ export async function buildReminderTargetsForFile(
 
     const lines = content.split(/\r?\n/);
     let inFencedCodeBlock = false;
+    let migratedTaskIndent: number | null = null;
     for (let index = 0; index < lines.length; index++) {
-        if (FENCED_CODE_BLOCK_PATTERN.test(lines[index])) {
+        const line = lines[index] || "";
+        if (FENCED_CODE_BLOCK_PATTERN.test(line)) {
             inFencedCodeBlock = !inFencedCodeBlock;
             continue;
         }
         if (inFencedCodeBlock) continue;
-        const parsed = parseTaskReminderLine(lines[index]);
+        const indent = getIndentWidth(line);
+        if (migratedTaskIndent !== null) {
+            if (!line.trim() || indent > migratedTaskIndent) continue;
+            migratedTaskIndent = null;
+        }
+        const parsed = parseTaskReminderLine(line);
         if (!parsed) continue;
+        if (parsed.properties.status === "migrated") {
+            migratedTaskIndent = indent;
+            continue;
+        }
         const noteStatus = getFrontmatterValueCaseInsensitive(frontmatter, "status");
         targets.push({
             sourceKey: `${file.path}::task:${index}`,
@@ -87,6 +98,10 @@ export async function buildReminderTargetsForFile(
     }
 
     return targets;
+}
+
+function getIndentWidth(line: string): number {
+    return String(line || "").match(/^[\t ]*/)?.[0].replace(/\t/g, "    ").length ?? 0;
 }
 
 export function buildEffectiveReminderContextForTarget(
@@ -182,6 +197,7 @@ function normalizeTaskCheckboxState(value: unknown): string {
 }
 
 function getStatusFromTaskMarker(marker: string): string {
+    if (marker === ">") return "migrated";
     if (marker === "x") return "complete";
     if (marker === "-" || marker === "~") return "wont-do";
     if (marker === "/" || marker === "\\") return "working";

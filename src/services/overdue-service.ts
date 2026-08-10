@@ -19,7 +19,7 @@ import {
     shouldSkipStaleOneShotReminder,
 } from "./reminder-delivery-window";
 import { TPS_EVENTS, TPS_LEGACY_EVENTS } from "../tps-contracts";
-import { emitFilesUpdated } from "../tps-gcm-api";
+import { emitFilesUpdated, moveTaskViaGcm } from "../tps-gcm-api";
 
 /**
  * Handles overdue reminder detection, the notification sidebar view,
@@ -621,7 +621,7 @@ export class OverdueService {
             return changed;
         }
 
-        const targetFile = await this.promptTargetFile();
+        const targetFile = await this.promptTargetFile(item.file.path);
         if (!targetFile) {
             logger.flow("OverdueAction", "resolve-reminder:canceled", {
                 path: item.file?.path,
@@ -703,203 +703,88 @@ export class OverdueService {
         return true;
     }
 
-    private promptTargetFile(): Promise<TFile | null> {
+    private promptTargetFile(sourcePath: string): Promise<TFile | null> {
         return new Promise((resolve) => {
-            new TargetFileSuggestModal(this.app, resolve).open();
+            new TargetFileSuggestModal(this.app, sourcePath, resolve).open();
         });
     }
 
     private async moveTaskToFile(item: OverdueItem, targetFile: TFile): Promise<boolean> {
-        logger.flow("OverdueAction", "move-task:start", {
+        const context = {
             sourcePath: item.file.path,
             targetPath: targetFile?.path || "",
             taskLine: item.taskLine,
             taskTitle: item.taskTitle || "",
-        });
+        };
+        logger.flow("OverdueAction", "move-task:start", context);
         if (!(targetFile instanceof TFile) || targetFile.extension?.toLowerCase() !== "md") {
             new Notice("Choose a Markdown file.");
-            logger.flowWarn("OverdueAction", "move-task:invalid-target", { targetPath: targetFile?.path || "" });
+            logger.flowWarn("OverdueAction", "move-task:invalid-target", context);
+            return false;
+        }
+        if (targetFile.path === item.file.path) {
+            new Notice("Choose a different note.");
+            logger.flowWarn("OverdueAction", "move-task:same-target", context);
+            return false;
+        }
+        if (typeof item.taskLine !== "number" || !Number.isFinite(item.taskLine)) {
+            new Notice("Could not resolve the task line to move.");
+            logger.flowWarn("OverdueAction", "move-task:invalid-source", context);
             return false;
         }
 
-        const sourceFile = item.file;
-        const sourceContent = await this.app.vault.cachedRead(sourceFile);
-        const sourceParts = this.splitContent(sourceContent);
-        const sourceIndex = this.findCurrentTaskLineIndex(sourceParts.lines, item);
-        if (sourceIndex < 0) {
-            logger.flowWarn("OverdueAction", "move-task:source-not-found", {
-                sourcePath: sourceFile.path,
+        const attempt = await moveTaskViaGcm(
+            this.app,
+            {
+                path: item.file.path,
+                lineNumber: Math.max(0, Math.floor(item.taskLine)),
+                rawLine: item.taskRawLine,
+                title: item.taskTitle,
+            },
+            {
                 targetPath: targetFile.path,
-                taskLine: item.taskLine,
-                taskTitle: item.taskTitle,
-                taskRawLine: item.taskRawLine,
+                sourcePolicy: "migrate-if-daily-note",
+                resolution: "exact-or-identity",
+            },
+        );
+        if (!attempt.available) {
+            new Notice("Update TPS Global Context Menu before moving reminder tasks.");
+            logger.flowWarn("OverdueAction", "move-task:gcm-unavailable", {
+                ...context,
+                requiredTaskApiVersion: 2,
             });
-            new Notice("Could not find the task line to move.");
             return false;
         }
 
-        const block = this.extractTaskBlock(sourceParts.lines, sourceIndex);
-        if (!block.length) {
-            logger.flowWarn("OverdueAction", "move-task:block-not-found", {
-                sourcePath: sourceFile.path,
-                targetPath: targetFile.path,
-                sourceIndex,
-                taskTitle: item.taskTitle,
+        const result = attempt.result;
+        if (!result?.ok || !result.changed) {
+            const detail = String(result?.error || "").trim();
+            new Notice(detail ? `Could not move task: ${detail}` : "Could not move the task.");
+            logger.flowWarn("OverdueAction", "move-task:gcm-rejected", {
+                ...context,
+                changed: result?.changed === true,
+                error: detail,
             });
-            new Notice("Could not find the task block to move.");
             return false;
         }
 
-        if (targetFile.path === sourceFile.path) {
-            const nextLines = [...sourceParts.lines];
-            nextLines.splice(sourceIndex, block.length);
-            const inserted = this.insertTaskBlockAfterFrontmatter(nextLines, block);
-            await this.app.vault.modify(sourceFile, this.joinContent(inserted.lines, sourceParts.newline, true));
-            this.triggerFilesUpdated([sourceFile.path]);
-            item.taskLine = inserted.lineIndex;
-            item.taskRawLine = block[0];
-            new Notice(`Moved task to the top of ${sourceFile.basename}.`);
-            logger.flow("OverdueAction", "move-task:done", {
-                route: "same-file",
-                sourcePath: sourceFile.path,
-                targetPath: targetFile.path,
-                insertedLine: inserted.lineIndex,
-                removedSource: true,
-            });
-            return true;
+        if (result.task) {
+            item.file = targetFile;
+            item.taskLine = result.task.lineNumber;
+            item.taskRawLine = result.task.rawLine;
+            item.taskTitle = result.task.title;
+            item.noteTitle = targetFile.basename;
         }
-
-        let targetInsertLine = -1;
-        await this.app.vault.process(targetFile, (content) => {
-            const parts = this.splitContent(content);
-            const inserted = this.insertTaskBlockAfterFrontmatter(parts.lines, block);
-            targetInsertLine = inserted.lineIndex;
-            return this.joinContent(inserted.lines, parts.newline, true);
-        });
-
-        if (this.isDailyNoteSourceFile(sourceFile)) {
-            const scratchpadBlock = this.buildDailyNoteScratchpadMovedTaskBlock(block);
-            let preserved = false;
-            await this.app.vault.process(sourceFile, (content) => {
-                const parts = this.splitContent(content);
-                const index = this.findCurrentTaskLineIndex(parts.lines, item);
-                if (index < 0) return content;
-                const currentBlock = this.extractTaskBlock(parts.lines, index);
-                if (!currentBlock.length) return content;
-                const nextLines = [...parts.lines];
-                nextLines.splice(index, currentBlock.length, ...scratchpadBlock);
-                preserved = true;
-                return this.joinContent(nextLines, parts.newline, parts.endsWithNewline);
-            });
-
-            this.triggerFilesUpdated([sourceFile.path, targetFile.path]);
-            new Notice(preserved
-                ? `Copied task to ${targetFile.basename}; kept a checked scratchpad copy in ${sourceFile.basename}.`
-                : `Copied task to ${targetFile.basename}; the original daily-note line changed before it could be marked.`);
-            logger.flow("OverdueAction", "move-task:done", {
-                route: "daily-note-scratchpad-copy",
-                sourcePath: sourceFile.path,
-                targetPath: targetFile.path,
-                insertedLine: targetInsertLine,
-                preservedSource: preserved,
-                taskTitle: item.taskTitle,
-            });
-            return preserved;
-        }
-
-        let removed = false;
-        await this.app.vault.process(sourceFile, (content) => {
-            const parts = this.splitContent(content);
-            const index = this.findCurrentTaskLineIndex(parts.lines, item);
-            if (index < 0) return content;
-            const currentBlock = this.extractTaskBlock(parts.lines, index);
-            if (!currentBlock.length) return content;
-            const nextLines = [...parts.lines];
-            nextLines.splice(index, currentBlock.length);
-            removed = true;
-            return this.joinContent(nextLines, parts.newline, parts.endsWithNewline);
-        });
-
-        item.file = targetFile;
-        item.taskLine = Math.max(0, targetInsertLine);
-        item.taskRawLine = block[0];
-        item.noteTitle = targetFile.basename;
-        this.triggerFilesUpdated([sourceFile.path, targetFile.path]);
-        new Notice(removed
-            ? `Moved task to ${targetFile.basename}.`
-            : `Copied task to ${targetFile.basename}; the original line changed before it could be removed.`);
+        new Notice(`Moved task to ${targetFile.basename}.`);
         logger.flow("OverdueAction", "move-task:done", {
-            route: "move",
-            sourcePath: sourceFile.path,
-            targetPath: targetFile.path,
-            insertedLine: targetInsertLine,
-            removedSource: removed,
-            taskTitle: item.taskTitle,
+            ...context,
+            route: "gcm-task-api-v2",
+            movedPath: result.task?.path || targetFile.path,
+            movedLine: result.task?.lineNumber ?? -1,
         });
-        return removed;
+        return true;
     }
 
-    private isDailyNoteSourceFile(file: TFile): boolean {
-        const folder = this.normalizeDailyNoteFolder(this.getDailyNoteFolder());
-        const expectedPath = folder ? `${folder}/${file.basename}.md` : `${file.basename}.md`;
-        if (file.path !== expectedPath) return false;
-        const format = this.getDailyNoteDateFormat();
-        const parsed = moment(file.basename, format, true);
-        return parsed?.isValid?.() && parsed.isValid();
-    }
-
-    private getDailyNoteFolder(): string {
-        try {
-            const folder = String((this.app as any).internalPlugins?.plugins?.["daily-notes"]?.instance?.options?.folder || "").trim();
-            if (folder) return folder;
-        } catch {
-            // Fall through to historical default.
-        }
-        return "System/Dailynotes";
-    }
-
-    private getDailyNoteDateFormat(): string {
-        try {
-            const format = String((this.app as any).internalPlugins?.plugins?.["daily-notes"]?.instance?.options?.format || "").trim();
-            if (format) return format;
-        } catch {
-            // Fall through to Obsidian default.
-        }
-        return "YYYY-MM-DD";
-    }
-
-    private normalizeDailyNoteFolder(folder: string): string {
-        return String(folder || "")
-            .trim()
-            .replace(/\\/g, "/")
-            .replace(/^\/+|\/+$/g, "");
-    }
-
-    private buildDailyNoteScratchpadMovedTaskBlock(block: string[]): string[] {
-        const cleanBlock = [...block];
-        while (cleanBlock.length && !cleanBlock[0].trim()) cleanBlock.shift();
-        while (cleanBlock.length && !cleanBlock[cleanBlock.length - 1].trim()) cleanBlock.pop();
-        if (!cleanBlock.length) return cleanBlock;
-        return [
-            this.applyInlinePropertyPatch(
-                this.applyTaskCheckboxState(cleanBlock[0], "complete"),
-                { completedDate: "null" },
-            ),
-            ...cleanBlock.slice(1),
-        ];
-    }
-
-    private splitContent(content: string): { lines: string[]; newline: string; endsWithNewline: boolean } {
-        const newline = content.includes("\r\n") ? "\r\n" : "\n";
-        const endsWithNewline = /\r?\n$/.test(content);
-        const lines = content.split(/\r?\n/);
-        if (endsWithNewline) lines.pop();
-        return { lines, newline, endsWithNewline };
-    }
-
-    private joinContent(lines: string[], newline: string, endsWithNewline: boolean): string {
-        return `${lines.join(newline)}${endsWithNewline ? newline : ""}`;
-    }
 
     private findCurrentTaskLineIndex(lines: string[], item: OverdueItem): number {
         const preferredIndex = typeof item.taskLine === "number" && Number.isFinite(item.taskLine)
@@ -926,67 +811,9 @@ export class OverdueService {
         return !!normalizedTitle && this.normalizeTaskText(this.cleanTaskLineTitle(line || "")) === normalizedTitle;
     }
 
-    private extractTaskBlock(lines: string[], startIndex: number): string[] {
-        if (!this.isTaskLine(lines[startIndex] || "")) return [];
-        const sourceIndent = this.getIndentWidth(lines[startIndex] || "");
-        let end = startIndex + 1;
-        while (end < lines.length) {
-            const line = lines[end] || "";
-            if (!line.trim()) {
-                const nextNonBlank = this.findNextNonBlank(lines, end + 1);
-                if (nextNonBlank >= 0 && this.getIndentWidth(lines[nextNonBlank] || "") > sourceIndent) {
-                    end += 1;
-                    continue;
-                }
-                break;
-            }
-            if (this.getIndentWidth(line) > sourceIndent) {
-                end += 1;
-                continue;
-            }
-            break;
-        }
-        return lines.slice(startIndex, end);
-    }
-
-    private insertTaskBlockAfterFrontmatter(lines: string[], block: string[]): { lines: string[]; lineIndex: number } {
-        const cleanBlock = [...block];
-        while (cleanBlock.length && !cleanBlock[0].trim()) cleanBlock.shift();
-        while (cleanBlock.length && !cleanBlock[cleanBlock.length - 1].trim()) cleanBlock.pop();
-        const insertIndex = this.findAfterFrontmatterIndex(lines);
-        const before = lines.slice(0, insertIndex);
-        const after = lines.slice(insertIndex);
-        while (after.length > 0 && after[0].trim() === "") after.shift();
-        const lineIndex = before.length > 0 ? before.length + 1 : 0;
-        return {
-            lines: before.length > 0
-                ? [...before, "", ...cleanBlock, ...(after.length > 0 ? ["", ...after] : [])]
-                : [...cleanBlock, ...(after.length > 0 ? ["", ...after] : [])],
-            lineIndex,
-        };
-    }
-
-    private findAfterFrontmatterIndex(lines: string[]): number {
-        if ((lines[0] || "").trim() !== "---") return 0;
-        for (let i = 1; i < lines.length; i += 1) {
-            if ((lines[i] || "").trim() === "---") return i + 1;
-        }
-        return 0;
-    }
-
-    private findNextNonBlank(lines: string[], startIndex: number): number {
-        for (let i = startIndex; i < lines.length; i += 1) {
-            if ((lines[i] || "").trim()) return i;
-        }
-        return -1;
-    }
 
     private isTaskLine(line: string): boolean {
         return /^\s*(?:[-*+]|\d+[.)])\s+\[[^\]]?]\s+/.test(line);
-    }
-
-    private getIndentWidth(line: string): number {
-        return String(line || "").match(/^[\t ]*/)?.[0].replace(/\t/g, "    ").length ?? 0;
     }
 
     private cleanTaskLineTitle(line: string): string {
@@ -1235,6 +1062,7 @@ class TargetFileSuggestModal extends FuzzySuggestModal<TFile> {
 
     constructor(
         app: App,
+        private readonly excludedPath: string,
         private readonly onChoose: (file: TFile | null) => void,
     ) {
         super(app);
@@ -1242,7 +1070,9 @@ class TargetFileSuggestModal extends FuzzySuggestModal<TFile> {
     }
 
     getItems(): TFile[] {
-        return this.app.vault.getMarkdownFiles().sort((a, b) => a.path.localeCompare(b.path));
+        return this.app.vault.getMarkdownFiles()
+            .filter((file) => file.path !== this.excludedPath)
+            .sort((a, b) => a.path.localeCompare(b.path));
     }
 
     getItemText(item: TFile): string {
