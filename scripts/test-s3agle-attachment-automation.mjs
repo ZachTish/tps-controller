@@ -55,7 +55,8 @@ test("S3 attachment upload automation exposes configurable triggers, settings, a
   assert.match(mainSource, /DisabledS3AttachmentAutomationService/);
   assert.match(mainSource, /Platform\.isMobile/);
   assert.match(mainSource, /await import\("\.\/services\/s3agle-attachment-automation-service"\)/);
-  assert.match(mainSource, /this\.addSettingTab\(new TPSControllerSettingTab\(this\.app, this\)\);\s+this\.startS3agleAttachmentAutomation\(\);/);
+  assert.match(mainSource, /this\.settingsTab = new TPSControllerSettingTab\(this\.app, this\);/);
+  assert.match(mainSource, /this\.addSettingTab\(this\.settingsTab\);[\s\S]*this\.startS3agleAttachmentAutomation\(\);/);
   assert.match(settingsTabSource, /S3 Attachment Upload Automation/);
   assert.match(settingsTabSource, /Run on Note Open/);
   assert.match(settingsTabSource, /Run on Active Note Changes/);

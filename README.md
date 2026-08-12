@@ -1,5 +1,14 @@
 # TPS Controller
 
+## 0.4.0
+
+- Reminder rules now include a dedicated **Delivery** section that distinguishes Controller-owned Obsidian notices from TishOS-owned Apple native notifications and warns that enabling both routes can duplicate an alert.
+- **Open TishOS** hands off directly to TishOS's Native Notifications controls without changing either application's notification state.
+- TishOS 0.4.9 can open this plugin directly on **Reminder rules** through the versioned `obsidian://tps-controller-settings` protocol. The route uses Obsidian's reserved `vault` parameter for native vault selection and a separate `targetVault` assertion so the handler fails closed unless the active vault is an exact match.
+- The handoff is navigation-only. Controller does not read or write Apple notification permission or TishOS settings, and TishOS does not read or write Controller reminder settings. TishOS 0.4.9 and TPS Controller 0.4.0 are required for both directions.
+- This backward-compatible minor release adds no stored settings, migration, reminder-rule changes, or automatic notification enrollment. Minimum supported Obsidian remains 1.12.0.
+- Validation passed all 161 active checks in the declared suite with three preserved historical notification comparisons skipped, followed by a separate production-mode build. The final build reported `[runtime-deploy] target=test ... unchanged`; Obsidian 1.13.7 then reloaded the isolated test vault and the versioned, exact-vault handoff opened **Reminder rules** with an accessible **Open TishOS** button. Runtime `data.json` remained SHA-256 `6cac531dcd6d0b6971dc4c14ccc7dbc0b940c72b3f87f4a2dff8663129fa75d0`, source/runtime `main.js` were byte-identical, no settings were changed, and production was not accessed.
+
 ## 0.3.11
 
 - Reminder tasks in Daily Notes now honor GCM's **Inherit Daily Note date for unscheduled tasks** setting. When inheritance is off, an unscheduled task no longer receives a Controller reminder from the Daily Note's `scheduled`, `start`, or `date` value; an explicit inline task date remains eligible.

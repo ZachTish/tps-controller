@@ -5,7 +5,7 @@ import { normalizeCalendarUrl } from './utils';
 import { renderListWithControls } from './utils/list-renderer';
 
 const createCalendarId = () => `calendar-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
-type ControllerSettingsPage = 'overview' | 'calendar' | 'reminders' | 'automations' | 'advanced';
+export type ControllerSettingsPage = 'overview' | 'calendar' | 'reminders' | 'automations' | 'advanced';
 type ControllerAutomationPage = 'archive' | 'attachments';
 
 const CONTROLLER_SETTINGS_DESTINATIONS: Array<{
@@ -61,6 +61,11 @@ export class TPSControllerSettingTab extends PluginSettingTab {
     constructor(app: App, plugin: TPSControllerPlugin) {
         super(app, plugin);
         this.plugin = plugin;
+    }
+
+    openPage(destination: ControllerSettingsPage): void {
+        this.activePage = destination;
+        this.display();
     }
 
     display(): void {
@@ -1007,6 +1012,32 @@ export class TPSControllerSettingTab extends PluginSettingTab {
         rulesContainer = rulesSection.createDiv({ cls: 'tps-controller-reminder-rules' });
         this.renderReminderRules(rulesContainer);
 
+        const deliverySection = createSettingsSection(
+            container,
+            'Delivery',
+            'Choose where reminders appear. Controller owns reminder rules; TishOS owns Apple notification permission and native actions.'
+        );
+
+        new Setting(deliverySection)
+            .setName('Local Notices on User Devices')
+            .setDesc('Show an Obsidian notice on each active User device. This does not use TPS Messager and cannot notify while Obsidian is closed.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.enableLocalReminderNoticesOnUserDevices === true)
+                .onChange(async (value) => {
+                    this.plugin.settings.enableLocalReminderNoticesOnUserDevices = value;
+                    await this.plugin.saveSettings();
+                    this.plugin.restartReminderLoop();
+                }));
+
+        new Setting(deliverySection)
+            .setName('Apple Native Notifications')
+            .setDesc('Open TishOS at its Native Notifications controls. TishOS schedules from one selected Calendar Base view; enabling both delivery routes can produce two alerts for the same item.')
+            .addButton(button => button
+                .setButtonText('Open TishOS')
+                .onClick(() => {
+                    this.plugin.openTishOSNativeNotificationSettings();
+                }));
+
         const defaultsSection = createSettingsSection(
             container,
             'Reminder defaults',
@@ -1034,17 +1065,6 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                 .onChange(async (value) => {
                     this.plugin.settings.batchNotifications = value;
                     await this.plugin.saveSettings();
-                }));
-
-        new Setting(defaultsSection)
-            .setName('Local Notices on User Devices')
-            .setDesc('Evaluate reminder rules locally and show an Obsidian notice on each active User device. This does not use TPS Messager and cannot notify while Obsidian is closed.')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.enableLocalReminderNoticesOnUserDevices === true)
-                .onChange(async (value) => {
-                    this.plugin.settings.enableLocalReminderNoticesOnUserDevices = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.restartReminderLoop();
                 }));
 
         new Setting(defaultsSection)

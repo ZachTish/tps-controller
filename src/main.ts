@@ -1,4 +1,4 @@
-﻿import { Plugin, Notice, Platform, TFile, moment, normalizePath } from "obsidian";
+﻿import { App, Plugin, Notice, Platform, TFile, moment, normalizePath } from "obsidian";
 import { DeviceRoleManager, DeviceRole } from "./device-role-manager";
 import { TPSControllerSettings, DEFAULT_CONTROLLER_SETTINGS } from "./types";
 import { AutoCreateService } from "./services/auto-create-service";
@@ -7,7 +7,7 @@ import { ReminderEngine, PendingNotification } from "./services/reminder-engine"
 import { SyncRequestService } from "./services/sync-request-service";
 import { executeSyncRequestGeneration, joinSyncRequestFulfillment } from "./services/sync-request-contract";
 import { SyncConflictWatcher } from "./services/sync-conflict-watcher";
-import { TPSControllerSettingTab } from "./settings-tab";
+import { TPSControllerSettingTab, type ControllerSettingsPage } from "./settings-tab";
 import * as logger from "./logger";
 import { getPluginById, isPluginEnabled } from "./core";
 import { NotificationView, NOTIFICATION_VIEW_TYPE } from "./views/notification-view";
@@ -188,6 +188,7 @@ export default class TPSControllerPlugin extends Plugin {
     private persistedSettingsSnapshot: Record<string, unknown> | null = null;
     private readonly uncertainSettingsSaveKeys = new Set<string>();
     private retainedLegacyS3Credentials: RetainedLegacyS3Credentials = {};
+    private settingsTab: TPSControllerSettingTab | null = null;
 
     async onload() {
         logger.flow("Lifecycle", "load", {
@@ -318,7 +319,26 @@ export default class TPSControllerPlugin extends Plugin {
         };
         (window as any).TPS = { controller: (this as any).api };
 
-        this.addSettingTab(new TPSControllerSettingTab(this.app, this));
+        this.settingsTab = new TPSControllerSettingTab(this.app, this);
+        this.addSettingTab(this.settingsTab);
+        this.registerObsidianProtocolHandler('tps-controller-settings', (params) => {
+            if (
+                params.action !== 'tps-controller-settings'
+                || params.v !== '1'
+                || params.section !== 'reminders'
+                || params.targetVault !== this.app.vault.getName()
+            ) {
+                logger.flowWarn('TishOSIntegration', 'settings-handoff:rejected', {
+                    action: params.action,
+                    version: params.v ?? null,
+                    section: params.section ?? null,
+                    vaultMatches: params.targetVault === this.app.vault.getName(),
+                });
+                return;
+            }
+            new Notice('Opening TPS Controller reminder rules…');
+            this.openSettingsPage('reminders');
+        });
         this.startS3agleAttachmentAutomation();
 
         if (this.deviceRoleManager.isController()) {
@@ -357,6 +377,31 @@ export default class TPSControllerPlugin extends Plugin {
             remindersEnabled: this.settings.enableReminders,
             calendarCount: this.settings.externalCalendars?.length || 0,
         });
+    }
+
+    openTishOSNativeNotificationSettings(): void {
+        const target = 'tishos://settings?section=native-notifications';
+        logger.flow('TishOSIntegration', 'native-notification-settings:open');
+        window.open(target);
+    }
+
+    private openSettingsPage(page: ControllerSettingsPage): void {
+        const settingManager = (this.app as App & {
+            setting?: {
+                open?: () => void;
+                openTabById?: (id: string) => void;
+            };
+        }).setting;
+        if (!settingManager?.open || !settingManager.openTabById || !this.settingsTab) {
+            logger.flowWarn('TishOSIntegration', 'controller-settings:unavailable', { page });
+            new Notice('Open Settings → Community plugins → TPS Controller → Reminder rules.');
+            return;
+        }
+        this.settingsTab.openPage(page);
+        settingManager.open();
+        settingManager.openTabById(this.manifest.id);
+        this.settingsTab.openPage(page);
+        logger.flow('TishOSIntegration', 'controller-settings:opened', { page });
     }
 
     private traceCommand(commandId: string, action: () => Promise<void>): void {

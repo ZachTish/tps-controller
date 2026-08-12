@@ -385,10 +385,12 @@ test("local User-device notices are explicit, default-off, and restart their act
     settingsTabSource.indexOf("private renderReminderRules"),
   );
   const localNoticeSetting = reminderPageSource.indexOf(".setName('Local Notices on User Devices')");
+  const deliverySection = reminderPageSource.indexOf("'Delivery'");
   const reminderDefaults = reminderPageSource.indexOf("'Reminder defaults'");
   const sortDirection = reminderPageSource.indexOf(".setName('Notification Sort Direction')");
 
-  assert.ok(localNoticeSetting > reminderDefaults);
+  assert.ok(localNoticeSetting > deliverySection);
+  assert.ok(localNoticeSetting < reminderDefaults);
   assert.ok(localNoticeSetting < sortDirection);
   assert.match(
     reminderPageSource,
@@ -420,6 +422,33 @@ test("local User-device notices are explicit, default-off, and restart their act
   );
   assert.match(settingsTabSource, /optional local reminder notices can run when Obsidian is open/);
   assert.match(settingsTabSource, /await this\.plugin\.resetReminderDeliveryState\(\)/);
+});
+
+test("TishOS notification settings handoff is explicit, scoped, and non-mutating", () => {
+  const reminderPageSource = settingsTabSource.slice(
+    settingsTabSource.indexOf("private renderReminderSettingsPage"),
+    settingsTabSource.indexOf("private renderReminderRules"),
+  );
+
+  assert.match(reminderPageSource, /'Delivery'/);
+  assert.match(reminderPageSource, /\.setName\('Apple Native Notifications'\)/);
+  assert.match(reminderPageSource, /enabling both delivery routes can produce two alerts/);
+  assert.match(reminderPageSource, /this\.plugin\.openTishOSNativeNotificationSettings\(\)/);
+  assert.match(mainSource, /tishos:\/\/settings\?section=native-notifications/);
+  assert.match(mainSource, /registerObsidianProtocolHandler\('tps-controller-settings'/);
+  assert.match(mainSource, /params\.action !== 'tps-controller-settings'/);
+  assert.match(mainSource, /params\.v !== '1'/);
+  assert.match(mainSource, /params\.section !== 'reminders'/);
+  assert.match(mainSource, /params\.targetVault !== this\.app\.vault\.getName\(\)/);
+  assert.match(mainSource, /this\.openSettingsPage\('reminders'\)/);
+  assert.match(mainSource, /settingManager\.openTabById\(this\.manifest\.id\)/);
+  assert.doesNotMatch(
+    mainSource.slice(
+      mainSource.indexOf("registerObsidianProtocolHandler('tps-controller'"),
+      mainSource.indexOf('this.startS3agleAttachmentAutomation()'),
+    ),
+    /saveSettings\(|enableReminders\s*=|enableLocalReminderNoticesOnUserDevices\s*=/,
+  );
 });
 
 test("command palette only exposes controller actions that are user-facing and complete", () => {
