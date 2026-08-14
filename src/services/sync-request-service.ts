@@ -1,4 +1,4 @@
-import { App, TFile, normalizePath } from "obsidian";
+import { App, normalizePath } from "obsidian";
 import * as logger from "../logger";
 import {
     acknowledgeSyncRequest,
@@ -42,29 +42,27 @@ export class SyncRequestService {
         });
         if (!request || !request.scope.length) throw new Error("Sync request requires at least one supported scope.");
 
-        const existing = this.app.vault.getAbstractFileByPath(this.requestPath);
+        const existing = await this.app.vault.adapter.exists(this.requestPath);
         logger.flow("SyncRequest", "write:start", {
             requestPath: this.requestPath,
             requestId: request.requestId,
             scope: request.scope,
             requestedBy: request.requestedBy,
-            route: existing instanceof TFile ? "merge-existing" : "create-new",
+            route: existing ? "merge-existing" : "create-new",
         });
         let mergedScope = request.scope;
         let mergedArchiveRequests = request.s3agleArchiveRequests?.length || 0;
-        if (existing instanceof TFile) {
-            const merged = await this.mergeIntoExistingFile(existing, request);
+        if (existing) {
+            const merged = await this.mergeIntoExistingFile(request);
             mergedScope = merged.scope;
             mergedArchiveRequests = merged.s3agleArchiveRequests?.length || 0;
         } else {
             try {
-                await this.app.vault.create(this.requestPath, serializeSyncRequest(request));
+                await this.app.vault.adapter.write(this.requestPath, serializeSyncRequest(request));
             } catch (e) {
                 if (this.isAlreadyExistsError(e)) {
                     // Race: another process created the file between the check and create.
-                    const nowExisting = this.app.vault.getAbstractFileByPath(this.requestPath);
-                    if (!(nowExisting instanceof TFile)) throw e;
-                    const merged = await this.mergeIntoExistingFile(nowExisting, request);
+                    const merged = await this.mergeIntoExistingFile(request);
                     mergedScope = merged.scope;
                     mergedArchiveRequests = merged.s3agleArchiveRequests?.length || 0;
                     logger.flow("SyncRequest", "write:create-raced", {
@@ -102,11 +100,10 @@ export class SyncRequestService {
 
     /** Read pending request (called by controller). Returns null if none. */
     async readRequest(): Promise<SyncRequest | null> {
-        const file = this.app.vault.getAbstractFileByPath(this.requestPath);
-        if (!(file instanceof TFile)) return null;
+        if (!(await this.app.vault.adapter.exists(this.requestPath))) return null;
 
         try {
-            const content = await this.app.vault.read(file);
+            const content = await this.app.vault.adapter.read(this.requestPath);
             const parsed = parseSyncRequestContent(content);
             if (parsed?.scope.length) {
                 logger.flow("SyncRequest", "read:done", {
@@ -141,8 +138,7 @@ export class SyncRequestService {
 
     /** Atomically acknowledge only the request generation that was fulfilled. */
     async acknowledgeRequest(expected: SyncRequest): Promise<boolean> {
-        const file = this.app.vault.getAbstractFileByPath(this.requestPath);
-        if (!(file instanceof TFile)) {
+        if (!(await this.app.vault.adapter.exists(this.requestPath))) {
             logger.flow("SyncRequest", "ack:none", { requestPath: this.requestPath, requestId: expected.requestId });
             return false;
         }
@@ -154,7 +150,7 @@ export class SyncRequestService {
         let currentRequestId = "";
         let invalidCurrent = false;
         try {
-            await this.app.vault.process(file, (content) => {
+            await this.app.vault.adapter.process(this.requestPath, (content) => {
                 const current = parseSyncRequestContent(content);
                 if (!current) {
                     invalidCurrent = true;
@@ -192,9 +188,9 @@ export class SyncRequestService {
         return false;
     }
 
-    private async mergeIntoExistingFile(file: TFile, incoming: SyncRequest): Promise<SyncRequest> {
+    private async mergeIntoExistingFile(incoming: SyncRequest): Promise<SyncRequest> {
         let merged = incoming;
-        await this.app.vault.process(file, (content) => {
+        await this.app.vault.adapter.process(this.requestPath, (content) => {
             merged = mergeSyncRequests(parseSyncRequestContent(content), incoming);
             return serializeSyncRequest(merged);
         });

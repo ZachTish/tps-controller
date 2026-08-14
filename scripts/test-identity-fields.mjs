@@ -171,7 +171,7 @@ test('GCM daily-note adapter propagates creation failures instead of authorizing
   );
 });
 
-test('GCM task adapter requires v2 and forwards strict migration requests without fallback', async () => {
+test('GCM task adapter requires v3 and forwards configured Daily Note moves with user cause', async () => {
   const calls = [];
   const expectedResult = {
     ok: true,
@@ -193,25 +193,35 @@ test('GCM task adapter requires v2 and forwards strict migration requests withou
   };
   const target = {
     targetPath: 'Projects/Target.md',
-    sourcePolicy: 'migrate-if-daily-note',
+    sourcePolicy: 'configured-daily-note',
     resolution: 'exact-or-identity',
   };
-  const v2App = createApp({
-    version: 2,
-    async move(actualRef, actualTarget) {
-      calls.push({ ref: actualRef, target: actualTarget });
+  const cause = {
+    kind: 'user',
+    sourcePluginId: 'tps-controller',
+    surface: 'reminder-modal',
+  };
+  const v3App = createApp({
+    version: 3,
+    async move(actualRef, actualTarget, actualCause) {
+      calls.push({ ref: actualRef, target: actualTarget, cause: actualCause });
       return expectedResult;
     },
   });
 
-  assert.deepEqual(await gcmApi.moveTaskViaGcm(v2App, ref, target), {
+  assert.deepEqual(await gcmApi.moveTaskViaGcm(v3App, ref, target, cause), {
     available: true,
     result: expectedResult,
   });
-  assert.deepEqual(calls, [{ ref, target }]);
+  assert.deepEqual(calls, [{ ref, target, cause }]);
 
-  for (const tasks of [undefined, { move: async () => expectedResult }, { version: 1, move: async () => expectedResult }]) {
-    assert.deepEqual(await gcmApi.moveTaskViaGcm(createApp(tasks), ref, target), {
+  for (const tasks of [
+    undefined,
+    { move: async () => expectedResult },
+    { version: 1, move: async () => expectedResult },
+    { version: 2, move: async () => expectedResult },
+  ]) {
+    assert.deepEqual(await gcmApi.moveTaskViaGcm(createApp(tasks), ref, target, cause), {
       available: false,
       result: null,
     });
@@ -220,7 +230,7 @@ test('GCM task adapter requires v2 and forwards strict migration requests withou
 
   const rejected = { ok: false, changed: true, task: null, error: 'partial copy remains' };
   assert.deepEqual(
-    await gcmApi.moveTaskViaGcm(createApp({ version: 2, move: async () => rejected }), ref, target),
+    await gcmApi.moveTaskViaGcm(createApp({ version: 3, move: async () => rejected }), ref, target, cause),
     { available: true, result: rejected },
   );
 });

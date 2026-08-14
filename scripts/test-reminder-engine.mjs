@@ -1112,7 +1112,7 @@ test('task reminder rows resolve schedule instead of showing a status pill', () 
   assert.match(mainSource, /resolveOverdueTaskReminder\(item: OverdueItem\): Promise<boolean>/);
 });
 
-test('notification task moves use GCM v2 strict migration semantics', () => {
+test('notification task moves use GCM v3 configured Daily Note semantics with user cause', () => {
   assert.match(overdueSource, /private findCurrentTaskLineIndex\(lines: string\[\], item: OverdueItem\): number/);
   assert.match(overdueSource, /this\.isSameTaskLine\(lines\[preferredIndex\] \|\| "", item\)/);
   assert.match(overdueSource, /const rawLine = String\(item\.taskRawLine \|\| ""\)/);
@@ -1126,11 +1126,14 @@ test('notification task moves use GCM v2 strict migration semantics', () => {
   assert.match(overdueSource, /lineNumber: Math\.max\(0, Math\.floor\(item\.taskLine\)\)/);
   assert.match(overdueSource, /rawLine: item\.taskRawLine/);
   assert.match(overdueSource, /title: item\.taskTitle/);
-  assert.match(overdueSource, /sourcePolicy: "migrate-if-daily-note"/);
+  assert.match(overdueSource, /sourcePolicy: "configured-daily-note"/);
   assert.match(overdueSource, /resolution: "exact-or-identity"/);
-  assert.match(overdueSource, /requiredTaskApiVersion: 2/);
+  assert.match(overdueSource, /kind: "user"/);
+  assert.match(overdueSource, /sourcePluginId: "tps-controller"/);
+  assert.match(overdueSource, /surface: "reminder-modal"/);
+  assert.match(overdueSource, /requiredTaskApiVersion: 3/);
   assert.match(overdueSource, /move-task:gcm-rejected/);
-  assert.match(overdueSource, /route: "gcm-task-api-v2"/);
+  assert.match(overdueSource, /route: "gcm-task-api-v3"/);
   assert.match(overdueSource, /new TargetFileSuggestModal\(this\.app, sourcePath, resolve\)/);
   assert.match(overdueSource, /\.filter\(\(file\) => file\.path !== this\.excludedPath\)/);
   assert.doesNotMatch(overdueSource, /buildDailyNoteScratchpadMovedTaskBlock/);
@@ -1179,7 +1182,7 @@ test('compiled reminder move picker excludes the source note and canceling does 
   );
 });
 
-test('compiled reminder moves honor every GCM v2 outcome without corrupting source coordinates', async (t) => {
+test('compiled reminder moves honor every GCM v3 outcome without corrupting source coordinates', async (t) => {
   const cases = [
     {
       name: 'unavailable API',
@@ -1252,7 +1255,7 @@ test('compiled reminder moves honor every GCM v2 outcome without corrupting sour
       assert.equal(await fixture.pending, scenario.expected);
 
       assert.equal(harness.moveCalls.length, 1);
-      const [app, reference, target] = harness.moveCalls[0];
+      const [app, reference, target, cause] = harness.moveCalls[0];
       assert.equal(app, fixture.app);
       assert.deepEqual(reference, {
         path: 'Daily/2026-08-10.md',
@@ -1262,8 +1265,13 @@ test('compiled reminder moves honor every GCM v2 outcome without corrupting sour
       });
       assert.deepEqual(target, {
         targetPath: 'Projects/Alpha.md',
-        sourcePolicy: 'migrate-if-daily-note',
+        sourcePolicy: 'configured-daily-note',
         resolution: 'exact-or-identity',
+      });
+      assert.deepEqual(cause, {
+        kind: 'user',
+        sourcePluginId: 'tps-controller',
+        surface: 'reminder-modal',
       });
       assert.deepEqual(harness.notices, [scenario.notice]);
       assert.ok(harness.logs.some(({ args }) => args[1] === scenario.logEvent));
@@ -1287,7 +1295,7 @@ test('compiled reminder moves honor every GCM v2 outcome without corrupting sour
 
       if (scenario.expected) {
         const doneLog = harness.logs.find(({ args }) => args[1] === 'move-task:done');
-        assert.equal(doneLog.args[2].route, 'gcm-task-api-v2');
+        assert.equal(doneLog.args[2].route, 'gcm-task-api-v3');
         assert.equal(doneLog.args[2].movedPath, 'Projects/Alpha.md');
         assert.equal(doneLog.args[2].movedLine, scenario.movedLine);
       }

@@ -1,7 +1,7 @@
 {
     "id": "tps-controller",
     "name": "TPS Controller",
-    "version": "0.4.1",
+    "version": "0.4.2",
     "minAppVersion": "1.12.0",
     "description": "Centralized controller management for TPS plugins. Defines device roles (Controller/Replica).",
     "author": "Zach Tisherman",

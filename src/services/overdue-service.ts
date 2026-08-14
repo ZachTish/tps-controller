@@ -750,15 +750,20 @@ export class OverdueService {
             },
             {
                 targetPath: targetFile.path,
-                sourcePolicy: "migrate-if-daily-note",
+                sourcePolicy: "configured-daily-note",
                 resolution: "exact-or-identity",
+            },
+            {
+                kind: "user",
+                sourcePluginId: "tps-controller",
+                surface: "reminder-modal",
             },
         );
         if (!attempt.available) {
             new Notice("Update TPS Global Context Menu before moving reminder tasks.");
             logger.flowWarn("OverdueAction", "move-task:gcm-unavailable", {
                 ...context,
-                requiredTaskApiVersion: 2,
+                requiredTaskApiVersion: 3,
             });
             return false;
         }
@@ -785,7 +790,7 @@ export class OverdueService {
         new Notice(`Moved task to ${targetFile.basename}.`);
         logger.flow("OverdueAction", "move-task:done", {
             ...context,
-            route: "gcm-task-api-v2",
+            route: "gcm-task-api-v3",
             movedPath: result.task?.path || targetFile.path,
             movedLine: result.task?.lineNumber ?? -1,
         });

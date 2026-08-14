@@ -346,7 +346,9 @@ export default class TPSControllerPlugin extends Plugin {
         } else {
             this.restartReminderLoop();
             if (!Platform.isMobile) {
-                void this.requestSync(["calendar"]);
+                void this.requestSync(["calendar"]).catch((error) => {
+                    logger.flowError("SyncRequest", "startup-write:failed", error, { scope: ["calendar"] });
+                });
             } else {
                 logger.log("Skipping automatic startup sync request on mobile replica.");
             }

@@ -20,8 +20,15 @@ export interface GcmTaskMoveTarget {
   line?: number;
   lineNumber?: number;
   placement?: 'after-frontmatter' | 'line';
-  sourcePolicy?: 'remove' | 'migrate-if-daily-note';
+  sourcePolicy?: 'remove' | 'migrate-if-daily-note' | 'configured-daily-note';
   resolution?: 'default' | 'exact-or-identity';
+}
+
+export interface GcmTaskMutationCause {
+  kind: 'user';
+  sourcePluginId: string;
+  surface: string;
+  commandId?: string;
 }
 
 export interface GcmTaskMutationResult {
@@ -39,7 +46,11 @@ export interface GcmTaskMutationResult {
 
 export interface GcmTasksApi {
   version?: number;
-  move?: (ref: GcmTaskRef, target: GcmTaskMoveTarget) => Promise<GcmTaskMutationResult>;
+  move?: (
+    ref: GcmTaskRef,
+    target: GcmTaskMoveTarget,
+    cause?: GcmTaskMutationCause,
+  ) => Promise<GcmTaskMutationResult>;
 }
 
 export interface GcmApi {
@@ -121,23 +132,25 @@ export function getDailyNoteTaskSchedulePolicyViaGcm(
 }
 
 /**
- * Use GCM's v2 task move transaction. Version 2 is the first public contract
- * that preserves Daily Note sources as migrated records instead of deleting
- * them. Callers must fail closed when this capability is unavailable.
+ * Use GCM's v3 task move transaction. Version 3 adds the configured Daily Note
+ * source policy and explicit user-action cause. Callers must fail closed when
+ * this capability is unavailable; older APIs treat an unknown source policy as
+ * remove-source behavior.
  */
 export async function moveTaskViaGcm(
   app: App,
   ref: GcmTaskRef,
   target: GcmTaskMoveTarget,
+  cause?: GcmTaskMutationCause,
 ): Promise<GcmTaskMoveAttempt> {
   const tasks = getGcmApi(app)?.tasks;
   const version = Number(tasks?.version);
-  if (!Number.isFinite(version) || version < 2 || typeof tasks?.move !== 'function') {
+  if (!Number.isFinite(version) || version < 3 || typeof tasks?.move !== 'function') {
     return { available: false, result: null };
   }
   return {
     available: true,
-    result: await tasks.move(ref, target),
+    result: await tasks.move(ref, target, cause),
   };
 }
 

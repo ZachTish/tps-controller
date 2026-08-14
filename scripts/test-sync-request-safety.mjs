@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import ts from "typescript";
 
 const contractPath = fileURLToPath(new URL("../src/services/sync-request-contract.ts", import.meta.url));
 const bundle = await build({
@@ -16,6 +18,93 @@ const bundle = await build({
 const contract = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString("base64")}`);
 const mainSource = await readFile(fileURLToPath(new URL("../src/main.ts", import.meta.url)), "utf8");
 const serviceSource = await readFile(fileURLToPath(new URL("../src/services/sync-request-service.ts", import.meta.url)), "utf8");
+
+const normalizePath = (value) => String(value || "")
+  .replace(/\\/g, "/")
+  .replace(/\/{2,}/g, "/")
+  .replace(/^\.\//, "")
+  .replace(/\/$/, "");
+
+function loadSyncRequestService() {
+  const source = readFileSync(
+    new URL("../src/services/sync-request-service.ts", import.meta.url),
+    "utf8",
+  );
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2020,
+    },
+  });
+  const module = { exports: {} };
+  new Function("module", "exports", "require", compiled.outputText)(
+    module,
+    module.exports,
+    (specifier) => {
+      if (specifier === "obsidian") return { normalizePath };
+      if (specifier === "../logger") {
+        return {
+          errorSummary: (error) => String(error?.message || error || ""),
+          flow() {},
+          flowError() {},
+          flowWarn() {},
+        };
+      }
+      if (specifier === "./sync-request-contract") return contract;
+      throw new Error(`Unexpected SyncRequestService test import: ${specifier}`);
+    },
+  );
+  return module.exports.SyncRequestService;
+}
+
+function createHiddenRequestHarness(initialContent = null) {
+  const files = new Map();
+  const requestPath = ".obsidian/plugins/tps-controller/.sync-request.json";
+  if (initialContent !== null) files.set(requestPath, String(initialContent));
+  const operations = {
+    adapterProcesses: 0,
+    adapterReads: 0,
+    adapterWrites: 0,
+    indexedCreates: 0,
+    indexedLookups: 0,
+  };
+  const adapter = {
+    async exists(path) {
+      return files.has(normalizePath(path));
+    },
+    async read(path) {
+      operations.adapterReads += 1;
+      const normalized = normalizePath(path);
+      if (!files.has(normalized)) throw new Error(`File not found: ${normalized}`);
+      return files.get(normalized);
+    },
+    async write(path, content) {
+      operations.adapterWrites += 1;
+      files.set(normalizePath(path), String(content));
+    },
+    async process(path, transform) {
+      operations.adapterProcesses += 1;
+      const normalized = normalizePath(path);
+      if (!files.has(normalized)) throw new Error(`File not found: ${normalized}`);
+      const updated = transform(files.get(normalized));
+      files.set(normalized, updated);
+      return updated;
+    },
+  };
+  const vault = {
+    adapter,
+    getName: () => "Obsidian Plugin Test Vault",
+    getAbstractFileByPath() {
+      operations.indexedLookups += 1;
+      return null;
+    },
+    async create() {
+      operations.indexedCreates += 1;
+      throw new Error(`File already exists: ${requestPath}`);
+    },
+  };
+  return { app: { vault }, files, operations, requestPath };
+}
 
 test("concurrent sync request writes merge scopes and archive payloads into the newest generation", () => {
   const existing = contract.normalizeSyncRequest({
@@ -121,6 +210,51 @@ test("failed fulfillment never acknowledges and remains retryable", async () => 
   assert.equal(acknowledgementCalls, 1);
 });
 
+test("hidden sync-request files survive replica reload without indexed Vault collisions", async () => {
+  const existing = contract.normalizeSyncRequest({
+    requestId: "sync-existing",
+    requestedAt: 100,
+    requestedBy: "replica-a",
+    scope: ["calendar"],
+  });
+  const harness = createHiddenRequestHarness(contract.serializeSyncRequest(existing));
+  const SyncRequestService = loadSyncRequestService();
+
+  const reloadedReplica = new SyncRequestService(harness.app, ".obsidian/plugins/tps-controller");
+  await reloadedReplica.writeRequest(["reminders"]);
+
+  const merged = contract.parseSyncRequestContent(harness.files.get(harness.requestPath));
+  assert.deepEqual(merged.scope, ["calendar", "reminders"]);
+  assert.equal(harness.operations.indexedLookups, 0);
+  assert.equal(harness.operations.indexedCreates, 0);
+  assert.equal(harness.operations.adapterWrites, 0);
+  assert.equal(harness.operations.adapterProcesses, 1);
+
+  const controllerAfterReload = new SyncRequestService(harness.app, ".obsidian/plugins/tps-controller");
+  const pending = await controllerAfterReload.readRequest();
+  assert.deepEqual(pending.scope, ["calendar", "reminders"]);
+  assert.equal(await controllerAfterReload.acknowledgeRequest(pending), true);
+  assert.equal(await controllerAfterReload.readRequest(), null);
+  assert.equal(harness.operations.indexedLookups, 0);
+  assert.equal(harness.operations.indexedCreates, 0);
+});
+
+test("first hidden sync request is created through the adapter", async () => {
+  const harness = createHiddenRequestHarness();
+  const SyncRequestService = loadSyncRequestService();
+  const service = new SyncRequestService(harness.app, ".obsidian/plugins/tps-controller");
+
+  await service.writeRequest(["calendar"]);
+
+  assert.deepEqual(
+    contract.parseSyncRequestContent(harness.files.get(harness.requestPath)).scope,
+    ["calendar"],
+  );
+  assert.equal(harness.operations.adapterWrites, 1);
+  assert.equal(harness.operations.indexedLookups, 0);
+  assert.equal(harness.operations.indexedCreates, 0);
+});
+
 test("Controller retries failed fulfillment and atomically preserves newer requests", () => {
   assert.match(mainSource, /syncRequestFulfillmentPromise: Promise<void> \| null/);
   assert.match(mainSource, /joinSyncRequestFulfillment\(this\.syncRequestFulfillmentPromise/);
@@ -129,11 +263,18 @@ test("Controller retries failed fulfillment and atomically preserves newer reque
   assert.match(mainSource, /"fulfill:failed"/);
   assert.match(mainSource, /executeSyncRequestGeneration\(async \(\) =>/);
   assert.match(mainSource, /\(\) => this\.syncRequestService\.acknowledgeRequest\(request\)/);
-  assert.match(serviceSource, /this\.app\.vault\.process\(file/);
+  assert.match(serviceSource, /this\.app\.vault\.adapter\.process\(this\.requestPath/);
+  assert.match(serviceSource, /this\.app\.vault\.adapter\.exists\(this\.requestPath/);
+  assert.match(serviceSource, /this\.app\.vault\.adapter\.read\(this\.requestPath/);
+  assert.match(serviceSource, /this\.app\.vault\.adapter\.write\(this\.requestPath/);
+  assert.doesNotMatch(serviceSource, /vault\.getAbstractFileByPath\(/);
+  assert.doesNotMatch(serviceSource, /vault\.create\(/);
   assert.match(serviceSource, /mergeSyncRequests\(parseSyncRequestContent\(content\), incoming\)/);
   assert.match(serviceSource, /"ack:stale-generation"/);
   assert.doesNotMatch(serviceSource, /vault\.delete\(/);
   assert.doesNotMatch(serviceSource, /vault\.modify\(/);
+  assert.match(mainSource, /this\.requestSync\(\["calendar"\]\)\.catch\(\(error\) =>/);
+  assert.match(mainSource, /"startup-write:failed"/);
 
   const actions = mainSource.indexOf('if (request.scope.includes("calendar"))');
   const acknowledgement = mainSource.indexOf("() => this.syncRequestService.acknowledgeRequest(request)");
