@@ -114,11 +114,15 @@ export function matchesExclusionPattern(
         return matchesWildcard(normalizedTarget, slashedPath) || matchesWildcard(normalizedTarget, normalizedBasename);
     }
 
+    const matchesPathBoundary = normalizedPath === normalizedTarget
+        || normalizedPath.startsWith(`${normalizedTarget}/`)
+        || normalizedPath.includes(`/${normalizedTarget}/`);
+
     if (hasTrailingSlash) {
-        return normalizedPath === normalizedTarget || normalizedPath.startsWith(`${normalizedTarget}/`);
+        return matchesPathBoundary;
     }
 
-    if (normalizedPath === normalizedTarget || normalizedPath.startsWith(`${normalizedTarget}/`)) {
+    if (matchesPathBoundary) {
         return true;
     }
 

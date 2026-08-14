@@ -1,5 +1,13 @@
 # TPS Controller
 
+## 0.4.1
+
+- Reminder **Ignore Paths** now match literal folder and subpath boundaries anywhere in the vault-relative path. A rule containing `_archive` suppresses both `_archive/Note.md` and `Markdown/_archive/Note.md`, while lookalikes such as `_archive-old` remain eligible. Existing wildcard, regular-expression, `path:`, and `name:` forms are preserved.
+- Global and per-rule ignore paths use the same shared policy for note reminders, inline task reminders, the notification sidebar/overdue list, local notices, and Messager delivery.
+- Editing any global or per-rule ignore filter now invalidates an in-flight reminder evaluation, replaces the reminder loop, and refreshes open notification views immediately. A scan that began under the old policy cannot send after the edit is saved.
+- This backward-compatible patch adds no setting or data migration. Minimum supported Obsidian remains 1.12.0.
+- Validation passed 52 active focused reminder checks with the same three historical comparison cases skipped, all 166 active checks in the complete declared suite, and the mandatory separate production-mode build. Obsidian 1.13.7 hot-reloaded the isolated test runtime; the Reminder rules page saved `_archive`, refreshed the open notification surface, and restored the exact prior `System/` setting and runtime-state hashes. The compiled global/per-rule × note/task matrix verifies that nested archive entries are absent from both delivery candidates and overdue/sidebar rows while a visible control remains. Production was not accessed.
+
 ## 0.4.0
 
 - Reminder rules now include a dedicated **Delivery** section that distinguishes Controller-owned Obsidian notices from TishOS-owned Apple native notifications and warns that enabling both routes can duplicate an alert.
@@ -200,6 +208,7 @@ Device role, reminder alert reset, calendar quarantine review, historical backfi
 - Two-stage archive: disabled by default, configured for `Archive` -> `_archive`, monthly-end cadence, local run time, weekly day for weekly cadence, and check interval.
 - S3 attachment upload automation: disabled by default, can run on active note open, active note modify, paste, or after user-defined command IDs such as a Linter/workflow command. It uploads directly from the active user instance using the configured S3-compatible endpoint, confirms public-read access when enabled, rewrites confirmed links, then requests controller-side archiving for confirmed uploaded source files.
 - Reminder controls: enable reminders, hourly time-tracking reminders, poll interval, batch notifications, default-off local notices on User devices, default all-day base time, global ignore lists, per-rule reminder definitions, and a recommended rule install/reset flow.
+- Literal reminder ignore paths match complete folder/subpath boundaries at any depth. `_archive` matches both a vault-root archive and a content-root path such as `Markdown/_archive`, but does not match `_archive-old`. Global and per-rule filters are combined before both notification-list and delivery evaluation.
 - Settings writes are awaited and coalesced, external-calendar arrays and entries are normalized in place so open controls retain live references, and unload waits only for saves that were already requested. First-run legacy plugin migration fills only keys absent from the raw Controller payload, so explicit `false`, blank, and empty-list choices are preserved.
 - Reminder rule text inputs preserve their live rule object across autosave normalization, so rapid multi-character edits persist the complete value instead of only the first keystroke.
 - Reminder status filters and checkbox-state filters are configured separately. Status filters match note frontmatter status and task semantic status values such as `complete`, `working`, or `wont-do`; checkbox-state filters match raw Markdown task markers such as blank/open, `x`, `-`, `/`, or `?`.
@@ -301,7 +310,7 @@ Device role, reminder alert reset, calendar quarantine review, historical backfi
 - Desktop Controller runs keep their existing behavior: each due batch first shows a clickable local Obsidian notice, then uses TPS Messager/Notifier when its send API is available.
 - **Local Notices on User Devices** is off by default. When enabled, each loaded User instance evaluates the same rules and shows the same clickable Obsidian notice without looking up or calling TPS Messager. This is in-app delivery only: it cannot wake or notify a device while Obsidian is closed or the operating system has suspended it.
 - User-device and Controller/Messager delivery state use separate device-local storage and are never written into synchronized Controller data. One active device therefore cannot suppress another, and locally consuming a reminder cannot suppress Messenger delivery if that device is later promoted to Controller.
-- Local User checks retain normal rule parity, including read-only external-calendar feed fetches when an enabled rule includes unmatched external events. Reminder evaluation is single-flight per active instance, and changing role, the master toggle, the User-device option, poll timing, or repeat timing immediately replaces the effective loop.
+- Local User checks retain normal rule parity, including read-only external-calendar feed fetches when an enabled rule includes unmatched external events. Reminder evaluation is single-flight per active instance, and changing role, the master toggle, the User-device option, poll timing, repeat timing, or an ignore filter immediately replaces the effective loop. Ignore-filter edits also refresh open notification views, and in-flight results from the prior policy are discarded before state or delivery.
 
 ## Cross-device sync request safety
 

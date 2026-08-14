@@ -1106,6 +1106,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                 .onChange(async (value) => {
                     this.plugin.settings.globalIgnorePaths = value.split(',').map(s => s.trim()).filter(Boolean);
                     await this.plugin.saveSettings();
+                    this.plugin.refreshReminderPolicy();
                 }));
 
         new Setting(ignoreContent)
@@ -1117,6 +1118,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                 .onChange(async (value) => {
                     this.plugin.settings.globalIgnoreTags = value.split(',').map(s => s.trim()).filter(Boolean);
                     await this.plugin.saveSettings();
+                    this.plugin.refreshReminderPolicy();
                 }));
 
         new Setting(ignoreContent)
@@ -1128,6 +1130,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                 .onChange(async (value) => {
                     this.plugin.settings.globalIgnoreStatuses = value.split(',').map(s => s.trim()).filter(Boolean);
                     await this.plugin.saveSettings();
+                    this.plugin.refreshReminderPolicy();
                 }));
 
         new Setting(ignoreContent)
@@ -1139,6 +1142,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                 .onChange(async (value) => {
                     this.plugin.settings.globalIgnoreCheckboxStates = value.split(',').map(s => s.trim()).filter(Boolean);
                     await this.plugin.saveSettings();
+                    this.plugin.refreshReminderPolicy();
                 }));
 
         const snoozeSection = createSettingsSection(
@@ -1798,6 +1802,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     .onChange(async (value) => {
                         rem.ignorePaths = value.split(',').map(s => s.trim()).filter(Boolean);
                         await this.plugin.saveSettings();
+                        this.plugin.refreshReminderPolicy();
                     }));
 
             new Setting(filteringGroup)
@@ -1808,6 +1813,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     .onChange(async (value) => {
                         rem.ignoreTags = value.split(',').map(s => s.trim()).filter(Boolean);
                         await this.plugin.saveSettings();
+                        this.plugin.refreshReminderPolicy();
                     }));
 
             new Setting(filteringGroup)
@@ -1818,6 +1824,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     .onChange(async (value) => {
                         rem.ignoreStatuses = value.split(',').map(s => s.trim()).filter(Boolean);
                         await this.plugin.saveSettings();
+                        this.plugin.refreshReminderPolicy();
                     }));
 
             new Setting(filteringGroup)
@@ -1829,6 +1836,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     .onChange(async (value) => {
                         rem.ignoreCheckboxStates = value.split(',').map(s => s.trim()).filter(Boolean);
                         await this.plugin.saveSettings();
+                        this.plugin.refreshReminderPolicy();
                     }));
 
             // ── Actions ──────────────────────────────────────────────────────

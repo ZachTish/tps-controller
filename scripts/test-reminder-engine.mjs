@@ -13,6 +13,7 @@ const reminderSettingsSource = readFileSync(new URL('../src/services/reminder-se
 const reminderDeliveryWindowSource = readFileSync(new URL('../src/services/reminder-delivery-window.ts', import.meta.url), 'utf8');
 const reminderRuntimePolicySource = readFileSync(new URL('../src/services/reminder-runtime-policy.ts', import.meta.url), 'utf8');
 const timeCalculationSource = readFileSync(new URL('../src/utils/time-calculation-service.ts', import.meta.url), 'utf8');
+const utilsSource = readFileSync(new URL('../src/utils.ts', import.meta.url), 'utf8');
 const notificationViewSource = readFileSync(new URL('../src/views/notification-view.ts', import.meta.url), 'utf8');
 const notificationSignatureSource = readFileSync(new URL('../src/views/notification-view-signature.ts', import.meta.url), 'utf8');
 const overdueModalSource = readFileSync(new URL('../src/modals/overdue-modal.ts', import.meta.url), 'utf8');
@@ -131,11 +132,7 @@ function loadTimeCalculationModule() {
       };
     }
     if (id === '../utils') {
-      return {
-        matchesExclusionPattern: () => false,
-        matchesRequiredPath: () => true,
-        normalizeComparablePath: (value) => String(value || '').toLowerCase(),
-      };
+      return loadUtilsModule();
     }
     throw new Error(`Unexpected require: ${id}`);
   };
@@ -144,7 +141,19 @@ function loadTimeCalculationModule() {
   return module.exports;
 }
 
-function loadCompiledOverdueServiceHarness() {
+function loadUtilsModule() {
+  const compiled = ts.transpileModule(utilsSource, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2018 },
+  });
+  const module = { exports: {} };
+  const load = new Function('module', 'exports', 'require', compiled.outputText);
+  load(module, module.exports, () => {
+    throw new Error('Controller utils must not load external modules');
+  });
+  return module.exports;
+}
+
+function loadCompiledOverdueServiceHarness(options = {}) {
   const notices = [];
   const logs = [];
   const openedModals = [];
@@ -208,29 +217,30 @@ function loadCompiledOverdueServiceHarness() {
     if (id === '../logger') return logger;
     if (id === '../utils/time-calculation-service') {
       return {
-        parseDate: () => null,
-        parseTimeRange: () => ({ start: null, end: null }),
+        parseDate: options.parseDate || (() => null),
+        parseTimeRange: options.parseTimeRange || (() => ({ start: null, end: null })),
         parseDuration: () => 0,
         getEffectiveEndTime: () => null,
         formatTemplate: () => '',
         checkStopCondition: () => false,
         hasRequiredStatus: () => true,
         hasRequiredCheckboxState: () => true,
-        shouldIgnoreForReminder: () => false,
+        shouldIgnoreForReminder: options.shouldIgnoreForReminder || (() => false),
         isAllDayEvent: () => false,
         hasExplicitTimeInValue: () => false,
-        getReminderTriggerBase: () => null,
+        getReminderTriggerBase: options.getReminderTriggerBase || (() => null),
       };
     }
     if (id === './reminder-target-service') {
       return {
-        buildReminderTargetsForFile: async () => [],
-        buildEffectiveReminderContextForTarget: () => null,
+        buildReminderTargetsForFile: options.buildReminderTargetsForFile || (async () => []),
+        buildEffectiveReminderContextForTarget: options.buildEffectiveReminderContextForTarget || (() => null),
         buildReminderDisplayName: () => '',
+        getReminderTagsForTarget: (target) => target?.reminderTags,
       };
     }
     if (id === './reminder-candidate-service') {
-      return { getReminderCandidateFiles: async () => ({ files: [], stats: {} }) };
+      return { getReminderCandidateFiles: async () => ({ files: options.candidateFiles || [], stats: {} }) };
     }
     if (id === './reminder-delivery-window') {
       return {
@@ -275,6 +285,86 @@ function loadCompiledOverdueServiceHarness() {
       moveCalls.length = 0;
     },
   };
+}
+
+function loadCompiledReminderEngineHarness(options = {}) {
+  class TestTFile {
+    constructor(path) {
+      this.path = path;
+      this.name = path.split('/').pop() || path;
+      this.extension = this.name.includes('.') ? this.name.split('.').pop() : '';
+      this.basename = this.name.replace(/\.[^.]+$/u, '');
+    }
+  }
+
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2018 },
+  });
+  const module = { exports: {} };
+  const requireStub = (id) => {
+    if (id === 'obsidian') {
+      return {
+        App: class {},
+        TFile: TestTFile,
+        moment: () => ({ format: () => '12:00 PM' }),
+        normalizePath: (value) => String(value || '').replace(/^\/+|\/+$/gu, ''),
+      };
+    }
+    if (id === '../logger') {
+      return {
+        flow: () => {},
+        flowWarn: () => {},
+        flowError: () => {},
+        errorSummary: (error) => String(error),
+      };
+    }
+    if (id === '../utils') {
+      return {
+        normalizeCalendarUrl: (value) => String(value || ''),
+        parseFrontmatterDate: () => null,
+      };
+    }
+    if (id === '../utils/time-calculation-service') {
+      return {
+        parseDate: () => null,
+        parseTimeRange: () => ({ start: Date.now() - 1_000, end: null }),
+        parseDuration: () => 0,
+        getEffectiveEndTime: () => null,
+        formatTemplate: (value) => String(value || ''),
+        formatRemaining: () => 'due',
+        checkStopCondition: () => false,
+        normalizeStatus: (value) => String(value || '').trim().toLowerCase(),
+        getStatuses: () => [],
+        hasRequiredStatus: () => true,
+        hasRequiredCheckboxState: () => true,
+        shouldIgnoreForReminder: options.shouldIgnoreForReminder,
+        isAllDayEvent: () => false,
+        hasExplicitTimeInValue: () => true,
+        getReminderTriggerBase: (start) => start,
+      };
+    }
+    if (id === './reminder-target-service') {
+      return {
+        buildReminderTargetsForFile: options.buildReminderTargetsForFile,
+        buildEffectiveReminderContextForTarget: options.buildEffectiveReminderContextForTarget,
+        buildReminderDisplayName: (file, target) => target.taskTitle || file.basename,
+      };
+    }
+    if (id === './external-calendar-service') return { ExternalCalendarService: class {} };
+    if (id === './reminder-candidate-service') {
+      return { getReminderCandidateFiles: async () => ({ files: options.candidateFiles || [] }) };
+    }
+    if (id === './reminder-delivery-window') {
+      return {
+        getFileReminderLiveWindowMs: () => 60_000,
+        shouldSkipStaleOneShotReminder: () => false,
+      };
+    }
+    throw new Error(`Unexpected require: ${id}`);
+  };
+  const load = new Function('module', 'exports', 'require', compiled.outputText);
+  load(module, module.exports, requireStub);
+  return { ReminderEngine: module.exports.ReminderEngine, TFile: TestTFile };
 }
 
 function beginCompiledReminderMove(harness) {
@@ -322,6 +412,130 @@ test('all-day task reminders can repeat until their stop condition', () => {
 test('reminder scheduler wakes at the shortest active repeat interval', () => {
   assert.match(mainSource, /const activeRepeatMs = \(this\.settings\.reminders \|\| \[\]\)/);
   assert.match(mainSource, /Math\.min\(pollMs, \.\.\.activeRepeatMs\)/);
+});
+
+test('reminder ignore paths match archive folders at any path boundary for notes and tasks', () => {
+  const { matchesExclusionPattern, normalizeComparablePath } = loadUtilsModule();
+  const { shouldIgnoreForReminder } = loadTimeCalculationModule();
+  const rootFile = { path: '_archive/Root note.md', basename: 'Root note' };
+  const prefixedFile = { path: 'Markdown/_archive/Nested task note.md', basename: 'Nested task note' };
+  const lookalikeFile = { path: 'Markdown/_archive-old/Keep.md', basename: 'Keep' };
+  const reminder = { ignorePaths: ['path:_archive'] };
+
+  const matches = (file, pattern) => matchesExclusionPattern(
+    normalizeComparablePath(file.path),
+    normalizeComparablePath(file.basename),
+    pattern,
+  );
+
+  assert.equal(matches(rootFile, '_archive'), true);
+  assert.equal(matches(prefixedFile, '_archive'), true);
+  assert.equal(matches(prefixedFile, '_archive/'), true);
+  assert.equal(matches(prefixedFile, 'path:_archive'), true);
+  assert.equal(matches(lookalikeFile, '_archive'), false);
+
+  assert.equal(shouldIgnoreForReminder(rootFile, null, {}, {}, ['_archive'], [], [], []), true);
+  assert.equal(shouldIgnoreForReminder(prefixedFile, null, {}, {}, ['_archive'], [], [], []), true);
+  assert.equal(shouldIgnoreForReminder(prefixedFile, null, { targetKind: 'task' }, reminder, [], [], [], []), true);
+  assert.equal(shouldIgnoreForReminder(lookalikeFile, null, {}, reminder, [], [], [], []), false);
+});
+
+test('delivery and overdue surfaces both suppress nested archive paths', async (t) => {
+  const { shouldIgnoreForReminder } = loadTimeCalculationModule();
+  const ignoredFile = { path: 'Markdown/_archive/Hidden.md', basename: 'Hidden', extension: 'md' };
+  const visibleFile = { path: 'Markdown/Projects/Visible.md', basename: 'Visible', extension: 'md' };
+  const dueFrontmatter = { scheduled: '2026-08-14 12:00' };
+
+  for (const ignoreScope of ['global', 'per-rule']) {
+    for (const targetKind of ['note', 'task']) {
+      await t.test(`${ignoreScope} ${targetKind}`, async () => {
+        const reminder = {
+          id: 'scheduled-rule',
+          enabled: true,
+          property: 'scheduled',
+          mode: 'task',
+          offsetMinutes: 0,
+          repeatUntilComplete: false,
+          repeatIntervalMinutes: 5,
+          maxRepeats: -1,
+          stopConditions: [],
+          title: 'Reminder',
+          body: 'Due',
+          ignorePaths: ignoreScope === 'per-rule' ? ['_archive'] : [],
+        };
+        const buildTarget = (file) => ({
+          sourceKey: targetKind === 'task' ? `${file.path}::task:0` : file.path,
+          sourceType: 'file',
+          targetKind,
+          taskTitle: targetKind === 'task' ? `Task in ${file.basename}` : undefined,
+          taskFrontmatter: targetKind === 'task' ? { ...dueFrontmatter } : undefined,
+          reminderTags: [],
+        });
+        const buildContext = (target, frontmatter, property) => {
+          const effective = target.taskFrontmatter || frontmatter;
+          return { frontmatter: effective, propertyValue: effective[property] };
+        };
+        const settings = {
+          reminders: [reminder],
+          alertState: {},
+          archiveFolder: 'Unrelated/Calendar Archive',
+          globalIgnorePaths: ignoreScope === 'global' ? ['_archive'] : [],
+          globalIgnoreTags: [],
+          globalIgnoreStatuses: [],
+          globalIgnoreCheckboxStates: [],
+          defaultAllDayBaseTime: '09:00',
+          pollMinutes: 0.5,
+          snoozeProperty: 'reminderSnooze',
+          enableLogging: false,
+          notificationSortDirection: 'asc',
+          statusKey: 'status',
+          externalCalendars: [],
+        };
+        const expectedSourceKey = targetKind === 'task'
+          ? 'Markdown/Projects/Visible.md::task:0'
+          : 'Markdown/Projects/Visible.md';
+
+        const engineHarness = loadCompiledReminderEngineHarness({
+          shouldIgnoreForReminder,
+          candidateFiles: [ignoredFile, visibleFile],
+          buildReminderTargetsForFile: async (_app, file) => [buildTarget(file)],
+          buildEffectiveReminderContextForTarget: buildContext,
+        });
+        const engineApp = {
+          metadataCache: { getFileCache: () => ({ frontmatter: { ...dueFrontmatter } }) },
+          vault: { getMarkdownFiles: () => [], cachedRead: async () => '' },
+        };
+        const engine = new engineHarness.ReminderEngine(engineApp, {});
+        const delivery = await engine.evaluateReminders(structuredClone(settings));
+        assert.deepEqual(delivery.notifications.map((item) => item.sourceKey), [expectedSourceKey]);
+
+        const overdueHarness = loadCompiledOverdueServiceHarness({
+          shouldIgnoreForReminder,
+          candidateFiles: [ignoredFile, visibleFile],
+          buildReminderTargetsForFile: async (_app, file) => [buildTarget(file)],
+          buildEffectiveReminderContextForTarget: buildContext,
+          parseTimeRange: () => ({ start: Date.now() - 1_000, end: null }),
+          getReminderTriggerBase: (start) => start,
+        });
+        const overdueApp = {
+          metadataCache: { getFileCache: () => ({ frontmatter: { ...dueFrontmatter } }) },
+          vault: { getMarkdownFiles: () => [ignoredFile, visibleFile] },
+        };
+        const overdue = new overdueHarness.OverdueService(overdueApp, () => structuredClone(settings));
+        const items = await overdue.getOverdueItems();
+        assert.deepEqual(items.map((item) => item.sourceKey), [expectedSourceKey]);
+        assert.equal(items[0].targetKind, targetKind);
+      });
+    }
+  }
+});
+
+test('ignore-path edits invalidate every reminder run and refresh open notification views', () => {
+  assert.match(mainSource, /refreshReminderPolicy\(\): void \{[\s\S]*this\.restartReminderLoop\(\);[\s\S]*this\.refreshNotificationViews\(\);/);
+  assert.match(mainSource, /runGeneration: number = this\.reminderRunGeneration/);
+  assert.match(mainSource, /if \(runGeneration !== this\.reminderRunGeneration\) \{/);
+  assert.doesNotMatch(mainSource, /runGeneration !== undefined && runGeneration !== this\.reminderRunGeneration/);
+  assert.equal((settingsTabSource.match(/this\.plugin\.refreshReminderPolicy\(\);/g) || []).length, 8);
 });
 
 test('active-instance reminder policy is default-off on User devices and never promotes mobile to Controller delivery', () => {

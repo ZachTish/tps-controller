@@ -1114,6 +1114,12 @@ export default class TPSControllerPlugin extends Plugin {
         this.startReminderLoop();
     }
 
+    refreshReminderPolicy(): void {
+        logger.flow("ReminderPolicy", "settings-changed");
+        this.restartReminderLoop();
+        this.refreshNotificationViews();
+    }
+
     private getReminderDeliveryMode(): ReminderDeliveryMode | null {
         return resolveReminderDeliveryMode({
             enableReminders: this.settings.enableReminders,
@@ -1361,7 +1367,7 @@ export default class TPSControllerPlugin extends Plugin {
 
     private runReminderCheck(
         deliveryMode: ReminderDeliveryMode | null = this.getReminderDeliveryMode(),
-        runGeneration?: number,
+        runGeneration: number = this.reminderRunGeneration,
     ): Promise<void> {
         if (!deliveryMode) {
             logger.flow("ReminderEngine", "check:skip-disabled");
@@ -1400,7 +1406,7 @@ export default class TPSControllerPlugin extends Plugin {
             batchNotifications: this.settings.batchNotifications === true,
         }, () => this.reminderEngine.evaluateReminders(evaluationSettings));
 
-        if (runGeneration !== undefined && runGeneration !== this.reminderRunGeneration) {
+        if (runGeneration !== this.reminderRunGeneration) {
             logger.flow("ReminderEngine", "check:discarded-stopped-run", { deliveryMode });
             return;
         }
