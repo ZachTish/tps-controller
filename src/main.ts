@@ -35,6 +35,14 @@ import {
     resolveReminderDeliveryMode,
     type ReminderDeliveryMode,
 } from "./services/reminder-runtime-policy";
+import {
+    TISHOS_COMMAND_BRIDGE_PAIR_ROUTE,
+    TISHOS_COMMAND_BRIDGE_REVOKE_ROUTE,
+    TISHOS_COMMAND_BRIDGE_RUN_ROUTE,
+    TishOSCommandBridgeService,
+    type TishOSCommandBridgeRefreshResult,
+    type TishOSCommandBridgeStatus,
+} from "./services/tishos-command-bridge-service";
 
 const normalizeTaskTargetPathSetting = (value: string): string => {
     const normalized = normalizePath(String(value || "").trim().replace(/^\[\[|\]\]$/g, "").replace(/^\/+/, ""));
@@ -168,6 +176,7 @@ export default class TPSControllerPlugin extends Plugin {
     private calendarAutomation: CalendarAutomationService;
     private twoStageArchiveService: TwoStageArchiveService;
     private s3agleAttachmentAutomationService: S3AttachmentAutomationAPI;
+    private tishOSCommandBridgeService: TishOSCommandBridgeService;
 
     // Reminder interval
     private reminderIntervalId: number | null = null;
@@ -222,6 +231,7 @@ export default class TPSControllerPlugin extends Plugin {
         );
         this.twoStageArchiveService = new TwoStageArchiveService(this.app, () => this.settings, () => this.saveSettings());
         this.s3agleAttachmentAutomationService = await this.createS3AttachmentAutomationService();
+        this.tishOSCommandBridgeService = new TishOSCommandBridgeService(this.app, this.manifest);
 
         // Commands
         this.addCommand({
@@ -299,6 +309,24 @@ export default class TPSControllerPlugin extends Plugin {
                 new Notice(`S3 bucket archive: moved ${result.archivedCount}, skipped ${result.skippedCount}.${suffix}`);
             }),
         });
+        this.addCommand({
+            id: "refresh-tishos-command-bridge",
+            name: "Refresh TishOS Shortcut Commands",
+            callback: () => this.traceCommand("refresh-tishos-command-bridge", async () => {
+                const result = await this.refreshTishOSCommandBridgeCatalogs();
+                if (result.unavailableReason === "not-paired") {
+                    new Notice("No TishOS command bridge is paired on this device.");
+                    return;
+                }
+                if (result.unavailableReason) {
+                    new Notice("TishOS command catalog is temporarily unavailable; the last valid catalog was preserved.");
+                    return;
+                }
+                new Notice(result.publishedClients > 0
+                    ? `Refreshed ${result.commandCount} TishOS Shortcut commands.`
+                    : `TishOS Shortcut commands are current (${result.commandCount}).`);
+            }),
+        });
 
         // View + Ribbon
         this.registerView(NOTIFICATION_VIEW_TYPE, (leaf) => new NotificationView(leaf, this));
@@ -339,6 +367,16 @@ export default class TPSControllerPlugin extends Plugin {
             new Notice('Opening TPS Controller reminder rules…');
             this.openSettingsPage('reminders');
         });
+        this.registerObsidianProtocolHandler(TISHOS_COMMAND_BRIDGE_PAIR_ROUTE, (params) => {
+            void this.tishOSCommandBridgeService.handlePairRoute(params);
+        });
+        this.registerObsidianProtocolHandler(TISHOS_COMMAND_BRIDGE_RUN_ROUTE, (params) => {
+            void this.tishOSCommandBridgeService.handleRunRoute(params);
+        });
+        this.registerObsidianProtocolHandler(TISHOS_COMMAND_BRIDGE_REVOKE_ROUTE, (params) => {
+            void this.tishOSCommandBridgeService.handleRevokeRoute(params);
+        });
+        this.tishOSCommandBridgeService.start();
         this.startS3agleAttachmentAutomation();
 
         if (this.deviceRoleManager.isController()) {
@@ -387,6 +425,18 @@ export default class TPSControllerPlugin extends Plugin {
         window.open(target);
     }
 
+    getTishOSCommandBridgeStatus(): TishOSCommandBridgeStatus {
+        return this.tishOSCommandBridgeService.getStatus();
+    }
+
+    refreshTishOSCommandBridgeCatalogs(): Promise<TishOSCommandBridgeRefreshResult> {
+        return this.tishOSCommandBridgeService.refreshCatalogs("manual");
+    }
+
+    requestRevokeTishOSCommandBridgeClient(clientID: string): Promise<boolean> {
+        return this.tishOSCommandBridgeService.requestLocalRevoke(clientID);
+    }
+
     private openSettingsPage(page: ControllerSettingsPage): void {
         const settingManager = (this.app as App & {
             setting?: {
@@ -416,8 +466,10 @@ export default class TPSControllerPlugin extends Plugin {
 
     async onunload() {
         logger.flow("Lifecycle", "unload");
+        const commandBridgeStop = this.tishOSCommandBridgeService?.stop();
         this.stopS3agleAttachmentAutomation();
         this.stopAllAutomation();
+        await commandBridgeStop;
         await this.settingsSaveQueue.waitForIdle();
         await this.flushReminderStateNow();
         this.stopReminderStateFlushTimer();

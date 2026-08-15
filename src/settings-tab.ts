@@ -141,6 +141,57 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             'Open automations',
             'automations'
         );
+        const commandBridge = this.plugin.getTishOSCommandBridgeStatus();
+        const commandBridgeSection = createSettingsSection(
+            containerEl,
+            'Obsidian commands in Shortcuts',
+            'TishOS pairs separately on each device, then publishes a signed list of the commands registered by this local Obsidian installation.'
+        );
+        new Setting(commandBridgeSection)
+            .setName('Command catalog')
+            .setDesc(commandBridge.available
+                ? commandBridge.clients.length
+                    ? `${commandBridge.clients.length} paired device${commandBridge.clients.length === 1 ? '' : 's'}. Catalogs refresh after layout readiness and when commands change.`
+                    : 'No TishOS device is paired with this Obsidian installation.'
+                : 'Device-local bridge state is unavailable. Existing authority was not replaced.')
+            .addButton((button) => button
+                .setButtonText('Refresh')
+                .onClick(async () => {
+                    button.setDisabled(true);
+                    try {
+                        const result = await this.plugin.refreshTishOSCommandBridgeCatalogs();
+                        if (result.unavailableReason === 'not-paired') {
+                            new Notice('Pair this device from TishOS first.');
+                        } else if (result.unavailableReason) {
+                            new Notice('The command registry is temporarily unavailable. The last valid catalog was preserved.');
+                        } else {
+                            new Notice(result.publishedClients > 0
+                                ? `Published ${result.commandCount} commands.`
+                                : `${result.commandCount} commands are current.`);
+                        }
+                    } finally {
+                        this.redisplayPreservingScroll();
+                    }
+                }));
+        for (const client of commandBridge.clients) {
+            const updated = client.lastPublishedAt
+                ? ` · ${client.commandCount} commands · updated ${new Date(client.lastPublishedAt).toLocaleString()}`
+                : ' · waiting for its first catalog';
+            new Setting(commandBridgeSection)
+                .setName(client.device)
+                .setDesc(`${client.platform} · ${client.clientID.slice(-8)}${updated}`)
+                .addButton((button) => button
+                    .setWarning()
+                    .setButtonText('Revoke')
+                    .onClick(async () => {
+                        button.setDisabled(true);
+                        try {
+                            await this.plugin.requestRevokeTishOSCommandBridgeClient(client.clientID);
+                        } finally {
+                            this.redisplayPreservingScroll();
+                        }
+                    }));
+        }
         }
 
         // ── External Calendars ─────────────────────────────────────

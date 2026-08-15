@@ -20,6 +20,7 @@ interface AppWithCommands extends App {
     commands?: {
         executeCommandById?: (id: string) => boolean;
         findCommand?: (id: string) => unknown;
+        listCommands?: () => unknown;
     };
 }
 
@@ -95,6 +96,22 @@ export function hasCommand(app: App, commandId: string): boolean {
         return Boolean(withCommands.commands?.findCommand?.(commandId));
     } catch {
         return false;
+    }
+}
+
+/**
+ * Read the current command registry through one feature-detected internal seam.
+ * Returns null when Obsidian does not expose the method, throws, or returns a
+ * malformed top-level value. Individual values remain unfiltered so the bridge
+ * can apply its versioned bounds without silently changing this adapter.
+ */
+export function listCommands(app: App): unknown[] | null {
+    const withCommands = app as AppWithCommands;
+    try {
+        const values = withCommands.commands?.listCommands?.();
+        return Array.isArray(values) ? values : null;
+    } catch {
+        return null;
     }
 }
 
