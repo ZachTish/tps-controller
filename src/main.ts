@@ -189,6 +189,7 @@ export default class TPSControllerPlugin extends Plugin {
     private twoStageArchiveIntervalId: number | null = null;
     private s3BucketArchiveIntervalId: number | null = null;
     private parentChildBootstrapIntervalId: number | null = null;
+    private tishOSNotificationRefreshTimeoutId: number | null = null;
     private parentChildStartupResolvedHandled = false;
     private parentChildMaintenanceActivated = false;
     private metadataIndexResolved = false;
@@ -231,7 +232,9 @@ export default class TPSControllerPlugin extends Plugin {
         );
         this.twoStageArchiveService = new TwoStageArchiveService(this.app, () => this.settings, () => this.saveSettings());
         this.s3agleAttachmentAutomationService = await this.createS3AttachmentAutomationService();
-        this.tishOSCommandBridgeService = new TishOSCommandBridgeService(this.app, this.manifest);
+        this.tishOSCommandBridgeService = new TishOSCommandBridgeService(this.app, this.manifest, {
+            notificationScheduleProvider: () => this.reminderEngine.projectScheduledNotifications(this.settings),
+        });
 
         // Commands
         this.addCommand({
@@ -406,10 +409,22 @@ export default class TPSControllerPlugin extends Plugin {
             })
         );
 
-        this.registerEvent(this.app.vault.on("create", (file) => this.deferCalendarSyncSettlementForFile(file, "file create")));
-        this.registerEvent(this.app.vault.on("modify", (file) => this.deferCalendarSyncSettlementForFile(file, "file modify")));
-        this.registerEvent(this.app.vault.on("delete", (file) => this.deferCalendarSyncSettlementForFile(file, "file delete")));
-        this.registerEvent(this.app.vault.on("rename", (file) => this.deferCalendarSyncSettlementForFile(file, "file rename")));
+        this.registerEvent(this.app.vault.on("create", (file) => {
+            this.deferCalendarSyncSettlementForFile(file, "file create");
+            this.scheduleTishOSNativeNotificationRefresh("file-create");
+        }));
+        this.registerEvent(this.app.vault.on("modify", (file) => {
+            this.deferCalendarSyncSettlementForFile(file, "file modify");
+            this.scheduleTishOSNativeNotificationRefresh("file-modify");
+        }));
+        this.registerEvent(this.app.vault.on("delete", (file) => {
+            this.deferCalendarSyncSettlementForFile(file, "file delete");
+            this.scheduleTishOSNativeNotificationRefresh("file-delete");
+        }));
+        this.registerEvent(this.app.vault.on("rename", (file) => {
+            this.deferCalendarSyncSettlementForFile(file, "file rename");
+            this.scheduleTishOSNativeNotificationRefresh("file-rename");
+        }));
 
         logger.flow("Lifecycle", "loaded", {
             role: this.deviceRoleManager.role,
@@ -466,6 +481,10 @@ export default class TPSControllerPlugin extends Plugin {
 
     async onunload() {
         logger.flow("Lifecycle", "unload");
+        if (this.tishOSNotificationRefreshTimeoutId !== null) {
+            window.clearTimeout(this.tishOSNotificationRefreshTimeoutId);
+            this.tishOSNotificationRefreshTimeoutId = null;
+        }
         const commandBridgeStop = this.tishOSCommandBridgeService?.stop();
         this.stopS3agleAttachmentAutomation();
         this.stopAllAutomation();
@@ -573,6 +592,17 @@ export default class TPSControllerPlugin extends Plugin {
         this.retryRetainedS3CredentialMigration();
         this.persistAlertStateToLocalStorage(this.settings.alertState);
         await this.settingsSaveQueue.requestSave();
+        this.scheduleTishOSNativeNotificationRefresh("settings-save");
+    }
+
+    private scheduleTishOSNativeNotificationRefresh(reason: string): void {
+        if (this.tishOSNotificationRefreshTimeoutId !== null) {
+            window.clearTimeout(this.tishOSNotificationRefreshTimeoutId);
+        }
+        this.tishOSNotificationRefreshTimeoutId = window.setTimeout(() => {
+            this.tishOSNotificationRefreshTimeoutId = null;
+            void this.tishOSCommandBridgeService.refreshCatalogs(`native-notifications:${reason}`);
+        }, 1_000);
     }
 
     private captureSettingsSaveSnapshot(): ControllerSettingsSaveSnapshot {
@@ -1486,6 +1516,7 @@ export default class TPSControllerPlugin extends Plugin {
             notifications: result.notifications.length,
             stateChanged: result.stateChanged,
         });
+        this.scheduleTishOSNativeNotificationRefresh("reminder-check");
         if (!result.notifications.length) return;
 
         const externalNotifications = result.notifications.filter((n) => n.sourceType === "external-event");

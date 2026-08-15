@@ -16,6 +16,16 @@ const contractBuild = await build({
 });
 const contract = await import(`data:text/javascript;base64,${Buffer.from(contractBuild.outputFiles[0].text).toString("base64")}`);
 
+const notificationContractBuild = await build({
+  entryPoints: [fileURLToPath(new URL("src/services/tishos-native-notification-contract.ts", root))],
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  target: "node18",
+  write: false,
+});
+const notificationContract = await import(`data:text/javascript;base64,${Buffer.from(notificationContractBuild.outputFiles[0].text).toString("base64")}`);
+
 const serviceBuild = await build({
   entryPoints: [fileURLToPath(new URL("src/services/tishos-command-bridge-service.ts", root))],
   bundle: true,
@@ -79,6 +89,7 @@ function createHarness({
   sharedSecretValues = null,
   sharedStorage = null,
   vaultName = VAULT,
+  notificationScheduleProvider,
 } = {}) {
   const files = new Map();
   const directories = new Set();
@@ -232,6 +243,7 @@ function createHarness({
       now: () => NOW,
       confirmPairing,
       confirmLocalRevoke,
+      notificationScheduleProvider,
     },
   );
   return {
@@ -490,6 +502,52 @@ test("pairing is exact-vault, explicit, SecretStorage-only, and returns after fi
   const { mac, ...unsigned } = catalog;
   assert.equal(await contract.verifyHmacSHA256Base64URL(SECRET_BYTES, contract.canonicalCommandCatalog(unsigned), mac), true);
   assert.equal([...harness.storage.values.values()].some((value) => value.includes("returnPending")), false);
+});
+
+test("paired clients receive a signed Controller-rule notification schedule that refreshes semantically", async (t) => {
+  let schedule = [{
+    title: "Write proposal",
+    body: "Starts in 15 minutes",
+    fireAt: NOW + 60 * 60 * 1000,
+    sourcePath: "Projects/Alpha + 100%.md",
+  }];
+  const harness = createHarness({
+    notificationScheduleProvider: async () => schedule,
+  });
+  t.after(() => harness.service.stop());
+  await pairAndPublish(harness);
+
+  const path = `${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.json`;
+  const published = JSON.parse(harness.files.get(path));
+  assert.deepEqual(Object.keys(published), [
+    "schemaVersion", "clientID", "vaultName", "generatedAt", "publisher", "items", "mac",
+  ]);
+  assert.equal(published.clientID, CLIENT);
+  assert.equal(published.items.length, 1);
+  assert.equal(published.items[0].sourcePath, "Projects/Alpha + 100%.md");
+  assert.equal(
+    published.items[0].id,
+    await contract.sha256Base64URL(notificationContract.canonicalNotificationItem(published.items[0])),
+  );
+  const { mac, ...unsigned } = published;
+  assert.equal(
+    await contract.verifyHmacSHA256Base64URL(
+      SECRET_BYTES,
+      notificationContract.canonicalNotificationSchedule(unsigned),
+      mac,
+    ),
+    true,
+  );
+
+  const writesBefore = harness.writes.length;
+  await harness.service.refreshCatalogs("unchanged-native-schedule");
+  assert.equal(harness.writes.length, writesBefore, "unchanged schedules must not churn synced files");
+
+  schedule = [{ ...schedule[0], fireAt: NOW + 2 * 60 * 60 * 1000 }];
+  await harness.service.refreshCatalogs("changed-native-schedule");
+  const changed = JSON.parse(harness.files.get(path));
+  assert.equal(changed.items[0].fireAt, new Date(NOW + 2 * 60 * 60 * 1000).toISOString());
+  assert.notEqual(changed.items[0].id, published.items[0].id);
 });
 
 test("pair route rejects cancel, wrong stripped-native vault, uppercase UUID, and malformed secret without storage", async () => {

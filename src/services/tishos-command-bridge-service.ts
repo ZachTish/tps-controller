@@ -17,6 +17,7 @@ import {
     isCanonicalIssuedAt,
     isFreshIssuedAt,
     isValidCommandID,
+    isValidCommandName,
     isValidDeviceName,
     isValidPlatform,
     isValidVaultName,
@@ -30,6 +31,18 @@ import {
     type TishOSCommandRevokeRequest,
     type TishOSCommandRunRequest,
 } from "./tishos-command-bridge-contract";
+import {
+    TISHOS_NATIVE_NOTIFICATION_MAX_FILE_BYTES,
+    TISHOS_NATIVE_NOTIFICATION_MAX_ITEMS,
+    TISHOS_NATIVE_NOTIFICATION_ROOT,
+    canonicalNotificationItem,
+    canonicalNotificationSchedule,
+    isValidNotificationBody,
+    isValidNotificationSourcePath,
+    validateNotificationItems,
+    type TishOSNativeNotificationItem,
+    type TishOSNativeNotificationSchedule,
+} from "./tishos-native-notification-contract";
 
 export const TISHOS_COMMAND_BRIDGE_PAIR_ROUTE = "tps-controller-command-bridge-pair";
 export const TISHOS_COMMAND_BRIDGE_RUN_ROUTE = "tps-controller-run-command";
@@ -134,6 +147,14 @@ interface TishOSCommandBridgeServiceOptions {
     now?: () => number;
     confirmPairing?: (request: PairingRequest) => Promise<boolean>;
     confirmLocalRevoke?: (pairing: StoredPairing, vaultName: string) => Promise<boolean>;
+    notificationScheduleProvider?: () => Promise<readonly NativeNotificationProjectionValue[]>;
+}
+
+interface NativeNotificationProjectionValue {
+    title: string;
+    body: string;
+    fireAt: number;
+    sourcePath?: string;
 }
 
 interface PairingRequest {
@@ -340,6 +361,8 @@ export class TishOSCommandBridgeService {
     private activePairingLane: ActivePairingLane | null = null;
     private lifecycleGeneration = 1;
     private stopPromise: Promise<void> | null = null;
+    private readonly notificationScheduleProvider:
+        (() => Promise<readonly NativeNotificationProjectionValue[]>) | null;
 
     constructor(
         private readonly app: App,
@@ -347,6 +370,7 @@ export class TishOSCommandBridgeService {
         options: TishOSCommandBridgeServiceOptions = {},
     ) {
         this.now = options.now || (() => Date.now());
+        this.notificationScheduleProvider = options.notificationScheduleProvider || null;
         this.confirmPairing = options.confirmPairing || (async (request) => {
             // Obsidian dismisses an open Settings modal while handing off an
             // external protocol URL. Opening our confirmation in that same
@@ -558,6 +582,26 @@ export class TishOSCommandBridgeService {
         }
         if (!this.layoutReady) return this.unavailableRefresh("layout-not-ready", clients.length);
 
+        if (this.notificationScheduleProvider) {
+            try {
+                const notificationItems = await this.buildNativeNotificationItems(
+                    await this.notificationScheduleProvider(),
+                );
+                await this.refreshNativeNotificationSchedules(
+                    state.vaultName,
+                    clients,
+                    notificationItems,
+                    reason,
+                );
+            } catch (error) {
+                logger.flowWarn("TishOSCommandBridge", "native-notification-refresh:failed", {
+                    reason,
+                    pairedClients: clients.length,
+                    errorType: this.errorType(error),
+                });
+            }
+        }
+
         const registryValues = listCommands(this.app);
         if (!registryValues) {
             logger.flowWarn("TishOSCommandBridge", "catalog-refresh:registry-unavailable", { reason, pairedClients: clients.length });
@@ -712,6 +756,117 @@ export class TishOSCommandBridgeService {
             ambiguousCommands: normalized.ambiguousDuplicateCount,
             readyPairings,
         };
+    }
+
+    private async buildNativeNotificationItems(
+        values: readonly NativeNotificationProjectionValue[],
+    ): Promise<TishOSNativeNotificationItem[]> {
+        const now = this.now();
+        const maximumFireAt = now + 60 * 24 * 60 * 60 * 1000;
+        const unique = new Map<string, TishOSNativeNotificationItem>();
+        for (const value of values) {
+            if (!Number.isSafeInteger(value.fireAt) || value.fireAt <= now || value.fireAt > maximumFireAt) continue;
+            const title = this.boundedNotificationText(value.title, 256, "Obsidian reminder");
+            const body = this.boundedNotificationText(value.body, 1_024, "", true);
+            const sourcePath = isValidNotificationSourcePath(value.sourcePath) ? value.sourcePath : undefined;
+            if (!isValidCommandName(title) || !isValidNotificationBody(body)) continue;
+            const unsignedItem: TishOSNativeNotificationItem = {
+                id: "",
+                title,
+                body,
+                fireAt: new Date(value.fireAt).toISOString(),
+                ...(sourcePath ? { sourcePath } : {}),
+            };
+            const id = await sha256Base64URL(canonicalNotificationItem(unsignedItem));
+            if (!unique.has(id)) unique.set(id, { ...unsignedItem, id });
+        }
+        const items = [...unique.values()].sort((left, right) =>
+            left.fireAt.localeCompare(right.fireAt) || left.id.localeCompare(right.id),
+        ).slice(0, TISHOS_NATIVE_NOTIFICATION_MAX_ITEMS);
+        if (validateNotificationItems(items) === null) {
+            throw new Error("Native notification projection failed validation.");
+        }
+        return items;
+    }
+
+    private boundedNotificationText(
+        value: unknown,
+        maximumBytes: number,
+        fallback: string,
+        allowsEmpty = false,
+    ): string {
+        let normalized = String(value ?? "")
+            .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/gu, " ")
+            .replace(/\s+/gu, " ")
+            .trim();
+        if (!normalized && !allowsEmpty) normalized = fallback;
+        while (utf8ByteCount(normalized) > maximumBytes) {
+            normalized = Array.from(normalized).slice(0, -1).join("").trimEnd();
+        }
+        return normalized;
+    }
+
+    private async refreshNativeNotificationSchedules(
+        vaultName: string,
+        clients: readonly StoredPairing[],
+        items: readonly TishOSNativeNotificationItem[],
+        reason: string,
+    ): Promise<void> {
+        let published = 0;
+        let unchanged = 0;
+        let failed = 0;
+        for (const pairing of clients) {
+            try {
+                const secret = this.readPairingSecret(pairing);
+                if (!secret) throw new Error("Pairing secret is unavailable.");
+                const path = this.nativeNotificationPath(pairing.clientID);
+                await this.recoverNativeNotificationArtifacts(path, pairing, items, secret);
+                if (await this.validExistingNativeNotificationGeneratedAt(path, pairing, items, secret)) {
+                    unchanged += 1;
+                    continue;
+                }
+                const generatedAt = new Date(this.now()).toISOString();
+                const unsigned: Omit<TishOSNativeNotificationSchedule, "mac"> = {
+                    schemaVersion: 1,
+                    clientID: pairing.clientID,
+                    vaultName,
+                    generatedAt,
+                    publisher: { id: this.publisher.id, version: this.publisher.version },
+                    items: [...items],
+                };
+                const schedule: TishOSNativeNotificationSchedule = {
+                    ...unsigned,
+                    mac: await hmacSHA256Base64URL(secret, canonicalNotificationSchedule(unsigned)),
+                };
+                const serialized = `${JSON.stringify(schedule)}\n`;
+                if (utf8ByteCount(serialized) > TISHOS_NATIVE_NOTIFICATION_MAX_FILE_BYTES) {
+                    throw new Error("Native notification schedule exceeds its file bound.");
+                }
+                await this.publishNativeNotificationSchedule(
+                    path,
+                    pairing,
+                    items,
+                    secret,
+                    serialized,
+                    generatedAt,
+                );
+                published += 1;
+            } catch (error) {
+                failed += 1;
+                logger.flowWarn("TishOSCommandBridge", "native-notification-refresh:client-failed", {
+                    reason,
+                    errorType: this.errorType(error),
+                });
+            }
+        }
+        logger.flow("TishOSCommandBridge", "native-notification-refresh:done", {
+            reason,
+            pairedClients: clients.length,
+            projectedItems: items.length,
+            publishedClients: published,
+            unchangedClients: unchanged,
+            failedClients: failed,
+        });
     }
 
     private async processPairRequest(
@@ -1165,6 +1320,9 @@ export class TishOSCommandBridgeService {
             this.catalogPath(revocation.clientID),
             this.catalogStagingPath(revocation.clientID),
             this.catalogBackupPath(revocation.clientID),
+            this.nativeNotificationPath(revocation.clientID),
+            this.nativeNotificationStagingPath(revocation.clientID),
+            this.nativeNotificationBackupPath(revocation.clientID),
         ];
         for (const path of artifactPaths) {
             try {
@@ -1176,7 +1334,10 @@ export class TishOSCommandBridgeService {
                     source,
                     errorType: this.errorType(error),
                 });
-                if (path === this.catalogPath(revocation.clientID)) {
+                if (
+                    path === this.catalogPath(revocation.clientID)
+                    || path === this.nativeNotificationPath(revocation.clientID)
+                ) {
                     try {
                         await this.app.vault.adapter.write(path, "{}\n");
                     } catch (invalidateError) {
@@ -1278,6 +1439,18 @@ export class TishOSCommandBridgeService {
         return `${TISHOS_COMMAND_BRIDGE_CATALOG_ROOT}/.${clientID}.backup`;
     }
 
+    private nativeNotificationPath(clientID: string): string {
+        return `${TISHOS_NATIVE_NOTIFICATION_ROOT}/${clientID}.json`;
+    }
+
+    private nativeNotificationStagingPath(clientID: string): string {
+        return `${TISHOS_NATIVE_NOTIFICATION_ROOT}/.${clientID}.pending`;
+    }
+
+    private nativeNotificationBackupPath(clientID: string): string {
+        return `${TISHOS_NATIVE_NOTIFICATION_ROOT}/.${clientID}.backup`;
+    }
+
     private async ensureCatalogDirectory(): Promise<void> {
         for (const path of [".tishos", ".tishos/command-bridge", TISHOS_COMMAND_BRIDGE_CATALOG_ROOT]) {
             if (await this.app.vault.adapter.exists(path)) continue;
@@ -1286,6 +1459,182 @@ export class TishOSCommandBridgeService {
             } catch (error) {
                 if (!await this.app.vault.adapter.exists(path)) throw error;
             }
+        }
+    }
+
+    private async ensureNativeNotificationDirectory(): Promise<void> {
+        for (const path of [".tishos", ".tishos/native-notifications", TISHOS_NATIVE_NOTIFICATION_ROOT]) {
+            if (await this.app.vault.adapter.exists(path)) continue;
+            try {
+                await this.app.vault.adapter.mkdir(path);
+            } catch (error) {
+                if (!await this.app.vault.adapter.exists(path)) throw error;
+            }
+        }
+    }
+
+    private async publishNativeNotificationSchedule(
+        path: string,
+        pairing: StoredPairing,
+        items: readonly TishOSNativeNotificationItem[],
+        secret: Uint8Array,
+        serialized: string,
+        generatedAt: string,
+    ): Promise<void> {
+        await this.ensureNativeNotificationDirectory();
+        const stagingPath = this.nativeNotificationStagingPath(pairing.clientID);
+        const backupPath = this.nativeNotificationBackupPath(pairing.clientID);
+        try {
+            if (await this.app.vault.adapter.exists(stagingPath)) await this.app.vault.adapter.remove(stagingPath);
+            await this.app.vault.adapter.write(stagingPath, serialized);
+            if (await this.validExistingNativeNotificationGeneratedAt(stagingPath, pairing, items, secret) !== generatedAt) {
+                throw new Error("Staged native notification schedule verification failed.");
+            }
+            const previous = await this.readBoundedNativeNotificationFile(path);
+            if (previous !== null) {
+                if (await this.app.vault.adapter.exists(backupPath)) await this.app.vault.adapter.remove(backupPath);
+                await this.app.vault.adapter.copy(path, backupPath);
+                if (await this.readBoundedNativeNotificationFile(backupPath) !== previous) {
+                    throw new Error("Native notification schedule backup verification failed.");
+                }
+            }
+            if (await this.app.vault.adapter.exists(path)) await this.app.vault.adapter.remove(path);
+            try {
+                await this.app.vault.adapter.rename(stagingPath, path);
+            } catch (error) {
+                await this.restoreNativeNotificationBackup(path, backupPath);
+                throw error;
+            }
+            if (await this.validExistingNativeNotificationGeneratedAt(path, pairing, items, secret) !== generatedAt) {
+                await this.restoreNativeNotificationBackup(path, backupPath);
+                throw new Error("Published native notification schedule verification failed.");
+            }
+            if (await this.app.vault.adapter.exists(backupPath)) await this.app.vault.adapter.remove(backupPath);
+        } finally {
+            if (await this.app.vault.adapter.exists(stagingPath)) {
+                try {
+                    await this.app.vault.adapter.remove(stagingPath);
+                } catch (error) {
+                    logger.flowWarn("TishOSCommandBridge", "native-notification-refresh:staging-cleanup-failed", {
+                        errorType: this.errorType(error),
+                    });
+                }
+            }
+        }
+    }
+
+    private async recoverNativeNotificationArtifacts(
+        path: string,
+        pairing: StoredPairing,
+        items: readonly TishOSNativeNotificationItem[],
+        secret: Uint8Array,
+    ): Promise<void> {
+        const stagingPath = this.nativeNotificationStagingPath(pairing.clientID);
+        const backupPath = this.nativeNotificationBackupPath(pairing.clientID);
+        if (await this.app.vault.adapter.exists(stagingPath)) await this.app.vault.adapter.remove(stagingPath);
+        if (!await this.app.vault.adapter.exists(backupPath)) return;
+        if (await this.readBoundedNativeNotificationFile(backupPath) === null) {
+            await this.app.vault.adapter.remove(backupPath);
+            return;
+        }
+        if (!await this.app.vault.adapter.exists(path)) {
+            await this.app.vault.adapter.rename(backupPath, path);
+            return;
+        }
+        if (await this.validExistingNativeNotificationGeneratedAt(path, pairing, items, secret)) {
+            await this.app.vault.adapter.remove(backupPath);
+            return;
+        }
+        if (await this.validExistingNativeNotificationGeneratedAt(backupPath, pairing, items, secret)) {
+            await this.app.vault.adapter.remove(path);
+            await this.app.vault.adapter.rename(backupPath, path);
+            return;
+        }
+        await this.app.vault.adapter.remove(backupPath);
+    }
+
+    private async restoreNativeNotificationBackup(path: string, backupPath: string): Promise<void> {
+        if (!await this.app.vault.adapter.exists(backupPath)) return;
+        if (await this.app.vault.adapter.exists(path)) await this.app.vault.adapter.remove(path);
+        await this.app.vault.adapter.rename(backupPath, path);
+    }
+
+    private async readBoundedNativeNotificationFile(path: string): Promise<string | null> {
+        const stat = await this.app.vault.adapter.stat(path);
+        if (
+            !stat
+            || stat.type !== "file"
+            || !Number.isSafeInteger(stat.size)
+            || stat.size < 0
+            || stat.size > TISHOS_NATIVE_NOTIFICATION_MAX_FILE_BYTES
+        ) return null;
+        const content = await this.app.vault.adapter.read(path);
+        return utf8ByteCount(content) <= TISHOS_NATIVE_NOTIFICATION_MAX_FILE_BYTES ? content : null;
+    }
+
+    private async validExistingNativeNotificationGeneratedAt(
+        path: string,
+        pairing: StoredPairing,
+        expectedItems: readonly TishOSNativeNotificationItem[],
+        secret: Uint8Array,
+    ): Promise<string | null> {
+        try {
+            const content = await this.readBoundedNativeNotificationFile(path);
+            if (content === null) return null;
+            const value = JSON.parse(content);
+            if (!isRecord(value) || !hasExactKeys(value, [
+                "schemaVersion", "clientID", "vaultName", "generatedAt", "publisher", "items", "mac",
+            ])) return null;
+            if (
+                value.schemaVersion !== 1
+                || value.clientID !== pairing.clientID
+                || value.vaultName !== this.app.vault.getName()
+                || !isCanonicalGeneratedAt(value.generatedAt)
+                || !isRecord(value.publisher)
+                || !hasExactKeys(value.publisher, ["id", "version"])
+                || value.publisher.id !== this.publisher.id
+                || value.publisher.version !== this.publisher.version
+                || !Array.isArray(value.items)
+                || value.items.length !== expectedItems.length
+                || !isCanonicalBase64URLSHA256(String(value.mac || ""))
+            ) return null;
+            for (let index = 0; index < expectedItems.length; index += 1) {
+                const actual = value.items[index];
+                const expected = expectedItems[index];
+                if (!isRecord(actual)) return null;
+                const expectedKeys = expected.sourcePath
+                    ? ["id", "title", "body", "fireAt", "sourcePath"]
+                    : ["id", "title", "body", "fireAt"];
+                if (!hasExactKeys(actual, expectedKeys)) return null;
+                if (
+                    actual.id !== expected.id
+                    || actual.title !== expected.title
+                    || actual.body !== expected.body
+                    || actual.fireAt !== expected.fireAt
+                    || actual.sourcePath !== expected.sourcePath
+                    || await sha256Base64URL(canonicalNotificationItem(actual as unknown as TishOSNativeNotificationItem)) !== expected.id
+                ) return null;
+            }
+            const items = value.items as TishOSNativeNotificationItem[];
+            if (validateNotificationItems(items) === null) return null;
+            const unsigned: Omit<TishOSNativeNotificationSchedule, "mac"> = {
+                schemaVersion: 1,
+                clientID: value.clientID as string,
+                vaultName: value.vaultName as string,
+                generatedAt: value.generatedAt as string,
+                publisher: {
+                    id: value.publisher.id as string,
+                    version: value.publisher.version as string,
+                },
+                items,
+            };
+            return await verifyHmacSHA256Base64URL(
+                secret,
+                canonicalNotificationSchedule(unsigned),
+                String(value.mac),
+            ) ? unsigned.generatedAt : null;
+        } catch {
+            return null;
         }
     }
 

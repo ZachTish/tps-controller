@@ -326,8 +326,8 @@ function loadCompiledReminderEngineHarness(options = {}) {
     }
     if (id === '../utils/time-calculation-service') {
       return {
-        parseDate: () => null,
-        parseTimeRange: () => ({ start: Date.now() - 1_000, end: null }),
+        parseDate: options.parseDate || (() => null),
+        parseTimeRange: options.parseTimeRange || (() => ({ start: Date.now() - 1_000, end: null })),
         parseDuration: () => 0,
         getEffectiveEndTime: () => null,
         formatTemplate: (value) => String(value || ''),
@@ -407,6 +407,83 @@ function beginCompiledReminderMove(harness) {
 test('all-day task reminders can repeat until their stop condition', () => {
   assert.match(source, /reminder\.repeatUntilComplete\s*&&\s*\(!reminder\.mode \|\| reminder\.mode === "task"\)/);
   assert.doesNotMatch(source, /reminder\.repeatUntilComplete\s*&&[\s\S]{0,160}!isAllDaySafe/);
+});
+
+test('native schedule projection is Controller-rule-owned, future-only, and read-only', async () => {
+  const now = Date.parse('2026-08-15T15:00:00.000Z');
+  const start = now + 60 * 60 * 1000;
+  const file = { path: 'Projects/Alpha.md', basename: 'Alpha', extension: 'md' };
+  const settings = {
+    enableReminders: true,
+    reminders: [{
+      id: 'rule-15-minutes',
+      enabled: true,
+      property: 'scheduled',
+      mode: 'task',
+      offsetMinutes: -15,
+      repeatUntilComplete: false,
+      repeatIntervalMinutes: 5,
+      maxRepeats: -1,
+      stopConditions: [],
+      title: 'Do {filename}',
+      body: '{time} · {remaining}',
+    }, {
+      id: 'rule-5-minutes',
+      enabled: true,
+      property: 'scheduled',
+      mode: 'task',
+      offsetMinutes: -5,
+      repeatUntilComplete: false,
+      repeatIntervalMinutes: 5,
+      maxRepeats: -1,
+      stopConditions: [],
+      title: 'Soon {filename}',
+      body: '{time}',
+    }],
+    alertState: {},
+    archiveFolder: '_archive',
+    globalIgnorePaths: [],
+    globalIgnoreTags: [],
+    globalIgnoreStatuses: [],
+    globalIgnoreCheckboxStates: [],
+    defaultAllDayBaseTime: '09:00',
+    snoozeProperty: 'reminderSnooze',
+    externalCalendars: [],
+  };
+  const candidateFiles = [];
+  const engineHarness = loadCompiledReminderEngineHarness({
+    candidateFiles,
+    shouldIgnoreForReminder: () => false,
+    parseTimeRange: () => ({ start, end: null }),
+    buildReminderTargetsForFile: async () => [{
+      sourceKey: 'Projects/Alpha.md::task:3',
+      sourceType: 'file',
+      targetKind: 'task',
+      taskTitle: 'Write proposal',
+      taskFrontmatter: { scheduled: '2026-08-15 11:00' },
+    }],
+    buildEffectiveReminderContextForTarget: (target) => ({
+      frontmatter: target.taskFrontmatter,
+      propertyValue: target.taskFrontmatter.scheduled,
+    }),
+  });
+  const TestFile = engineHarness.TFile;
+  const nativeFile = new TestFile(file.path);
+  candidateFiles.push(nativeFile);
+  const app = {
+    metadataCache: { getFileCache: () => ({ frontmatter: { scheduled: '2026-08-15 11:00' } }) },
+    vault: { getMarkdownFiles: () => [nativeFile], cachedRead: async () => '' },
+  };
+  const engine = new engineHarness.ReminderEngine(app, {});
+  const before = structuredClone(settings.alertState);
+  const schedule = await engine.projectScheduledNotifications(settings, now);
+
+  assert.equal(schedule.length, 2, 'every matching Controller rule contributes its own occurrence');
+  assert.equal(schedule[0].fireAt, start - 15 * 60 * 1000);
+  assert.equal(schedule[1].fireAt, start - 5 * 60 * 1000);
+  assert.equal(schedule[0].sourcePath, 'Projects/Alpha.md');
+  assert.equal(schedule[0].sourceKey, 'Projects/Alpha.md::task:3');
+  assert.deepEqual(settings.alertState, before, 'projection must not consume Controller delivery state');
 });
 
 test('reminder scheduler wakes at the shortest active repeat interval', () => {

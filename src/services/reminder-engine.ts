@@ -41,6 +41,15 @@ export interface ReminderRunResult {
     stateChanged: boolean;
 }
 
+export interface ScheduledNativeNotification {
+    title: string;
+    body: string;
+    fireAt: number;
+    sourcePath?: string;
+    reminderId: string;
+    sourceKey: string;
+}
+
 interface ReminderFileLike {
     path: string;
     basename: string;
@@ -192,6 +201,188 @@ export class ReminderEngine {
         }
 
         return { notifications: pendingNotifications, stateChanged };
+    }
+
+    /**
+     * Builds a read-only future schedule from the same Controller reminder
+     * rules used by evaluateReminders(). It never mutates alert state and does
+     * not depend on a Base view. The signed TishOS publisher applies the final
+     * wire bounds and stable identifiers.
+     */
+    async projectScheduledNotifications(
+        settings: TPSControllerSettings,
+        now = Date.now(),
+        horizonMs = 60 * 24 * 60 * 60 * 1000,
+    ): Promise<ScheduledNativeNotification[]> {
+        if (!settings.enableReminders || horizonMs <= 0) return [];
+        const horizonEnd = now + horizonMs;
+        const projected: ScheduledNativeNotification[] = [];
+        const files = await this.getReminderCandidateFiles(settings);
+        const activeFiles = files.filter((file) => !this.isArchivedFile(file, settings.archiveFolder));
+
+        for (const file of activeFiles) {
+            try {
+                const cache = this.app.metadataCache.getFileCache(file);
+                const frontmatter = (cache?.frontmatter || {}) as Record<string, unknown>;
+                const targets = await buildReminderTargetsForFile(this.app, file, frontmatter, settings);
+                for (const target of targets) {
+                    projected.push(...this.projectTarget({
+                        target,
+                        fileRef: file,
+                        cache,
+                        baseFrontmatter: frontmatter,
+                        settings,
+                        now,
+                        horizonEnd,
+                    }));
+                }
+            } catch (error) {
+                logger.flowError("ReminderEngine", "native-projection:file-error", error, { path: file.path });
+            }
+        }
+
+        const needsExternalEvents = settings.reminders.some(
+            (reminder) => reminder.enabled && this.reminderIncludesSource(reminder, "external-event"),
+        );
+        if (needsExternalEvents) {
+            const targets = await this.buildUnmatchedExternalReminderTargets(files, settings);
+            for (const target of targets) {
+                const event = target.externalEvent;
+                if (!event) continue;
+                projected.push(...this.projectTarget({
+                    target,
+                    fileRef: this.buildSyntheticExternalFile(event),
+                    cache: null,
+                    baseFrontmatter: {},
+                    settings,
+                    now,
+                    horizonEnd,
+                    reminderFilter: (reminder) => this.reminderIncludesSource(reminder, "external-event"),
+                }));
+            }
+        }
+
+        const unique = new Map<string, ScheduledNativeNotification>();
+        for (const item of projected) {
+            const key = `${item.sourceKey}\u0000${item.reminderId}\u0000${item.fireAt}`;
+            if (!unique.has(key)) unique.set(key, item);
+        }
+        return [...unique.values()].sort((left, right) =>
+            left.fireAt - right.fireAt
+            || left.sourceKey.localeCompare(right.sourceKey)
+            || left.reminderId.localeCompare(right.reminderId),
+        );
+    }
+
+    private projectTarget(params: {
+        target: ReminderEvaluationTarget;
+        fileRef: ReminderFileLike;
+        cache: unknown;
+        baseFrontmatter: Record<string, unknown>;
+        settings: TPSControllerSettings;
+        now: number;
+        horizonEnd: number;
+        reminderFilter?: (reminder: PropertyReminder) => boolean;
+    }): ScheduledNativeNotification[] {
+        const { target, fileRef, cache, baseFrontmatter, settings, now, horizonEnd, reminderFilter } = params;
+        const items: ScheduledNativeNotification[] = [];
+        const sourceState = settings.alertState[target.sourceKey] || {};
+
+        for (const reminder of settings.reminders) {
+            if (!reminder.enabled) continue;
+            if (reminderFilter && !reminderFilter(reminder)) continue;
+            if (!this.reminderIncludesSource(reminder, target.sourceType)) continue;
+            const ctx = buildEffectiveReminderContextForTarget(target, baseFrontmatter, reminder.property, settings);
+            if (!ctx) continue;
+            const effectiveFm = ctx.frontmatter;
+            const propValue = ctx.propertyValue;
+            if (shouldIgnoreForReminder(
+                fileRef,
+                cache,
+                effectiveFm,
+                reminder,
+                settings.globalIgnorePaths,
+                settings.globalIgnoreTags,
+                settings.globalIgnoreStatuses,
+                settings.globalIgnoreCheckboxStates,
+                target.reminderTags,
+            )) continue;
+            const { start: propTime, end: rangeEndTime } = parseTimeRange(propValue);
+            if (!propTime || !hasRequiredStatus(effectiveFm, reminder) || !hasRequiredCheckboxState(effectiveFm, reminder)) {
+                continue;
+            }
+            const normalizedPropValue = this.normalizeReminderPropertyValue(propValue);
+            const hasExplicitTime = hasExplicitTimeInValue(propValue);
+            const isAllDaySafe = isAllDayEvent(propValue, effectiveFm)
+                && (!hasExplicitTime || String(effectiveFm?.allDay ?? "").toLowerCase() === "true");
+            const effectiveEndTime = getEffectiveEndTime(propTime, rangeEndTime, effectiveFm);
+            if (reminder.mode === "timeblock" && !reminder.triggerAtEnd && effectiveEndTime && now > effectiveEndTime) {
+                continue;
+            }
+            const finalTriggerBase = getReminderTriggerBase(
+                propTime,
+                effectiveEndTime,
+                isAllDaySafe,
+                reminder.triggerAtEnd,
+                reminder.allDayBaseTime || settings.defaultAllDayBaseTime,
+            );
+            if (!finalTriggerBase) continue;
+
+            let offsetMs = reminder.offsetMinutes * 60 * 1000;
+            if (reminder.useSmartOffset && reminder.smartOffsetProperty) {
+                const durationMins = parseDuration(effectiveFm[reminder.smartOffsetProperty]);
+                if (durationMins > 0) {
+                    const smartMs = durationMins * 60 * 1000;
+                    offsetMs = reminder.smartOffsetOperator === "subtract" ? -smartMs : smartMs;
+                }
+            }
+            const triggerTime = finalTriggerBase + offsetMs;
+            const baseTriggerKey = this.buildTriggerKey(triggerTime, isAllDaySafe, hasExplicitTime, normalizedPropValue);
+            const state = sourceState[reminder.id];
+            if (state?.lastTriggerKey && state.lastTriggerKey !== baseTriggerKey && state.triggered) {
+                // The property changed after the stored delivery. Treat the new
+                // trigger as unsent without mutating Controller state.
+            }
+            if (reminder.allDayFilter === "true" && !isAllDaySafe) continue;
+            if (reminder.allDayFilter === "false" && isAllDaySafe) continue;
+            if (effectiveEndTime) {
+                const isWorking = getStatuses(effectiveFm).includes("working");
+                const requiresWorking = reminder.requiredStatuses?.some((status) => normalizeStatus(status) === "working");
+                if (isWorking && now < effectiveEndTime && !requiresWorking) continue;
+            }
+            if (reminder.stopConditions.some((condition) => checkStopCondition(effectiveFm, condition))) continue;
+
+            let fireAt = triggerTime;
+            const snoozeValue = effectiveFm[settings.snoozeProperty || "reminderSnooze"];
+            const snoozeTime = snoozeValue ? parseDate(snoozeValue) : null;
+            if (snoozeTime && snoozeTime > now) fireAt = snoozeTime;
+            else if (fireAt <= now) {
+                const effectiveTriggerKey = snoozeTime
+                    ? `${baseTriggerKey}|snooze:${snoozeTime}`
+                    : baseTriggerKey;
+                const sameTrigger = state?.lastTriggerKey === effectiveTriggerKey;
+                if (!reminder.repeatUntilComplete || !state?.triggered || !sameTrigger || !state.lastSent) continue;
+                if (reminder.maxRepeats !== -1 && state.repeatCount >= reminder.maxRepeats) continue;
+                const repeatMs = Math.max(1, reminder.repeatIntervalMinutes) * 60 * 1000;
+                fireAt = state.lastSent + repeatMs;
+                while (fireAt <= now) fireAt += repeatMs;
+            }
+            if (fireAt <= now || fireAt > horizonEnd) continue;
+            if (reminder.repeatEndAt === "trigger-base" && fireAt > finalTriggerBase) continue;
+
+            const remaining = formatRemaining(propTime - fireAt);
+            const time = moment(propTime).format("h:mm A");
+            const displayName = buildReminderDisplayName(fileRef, target);
+            items.push({
+                title: formatTemplate(reminder.title, { filename: displayName, time, remaining }),
+                body: formatTemplate(reminder.body, { filename: displayName, time, remaining }),
+                fireAt,
+                sourcePath: fileRef instanceof TFile ? fileRef.path : undefined,
+                reminderId: reminder.id,
+                sourceKey: target.sourceKey,
+            });
+        }
+        return items;
     }
 
     private suppressNoteNotificationsBackedByTaskNotifications(
