@@ -3,6 +3,10 @@ import type TPSControllerPlugin from './main';
 import type { PropertyReminder, ExternalCalendarConfig } from './types';
 import { normalizeCalendarUrl } from './utils';
 import { renderListWithControls } from './utils/list-renderer';
+import {
+    isNotificationDeliveryProvider,
+    NOTIFICATION_DELIVERY_PROVIDERS,
+} from './services/notification-delivery-provider';
 
 const createCalendarId = () => `calendar-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
 export type ControllerSettingsPage = 'overview' | 'calendar' | 'reminders' | 'automations' | 'advanced';
@@ -98,7 +102,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     ${isCtrl ? '🟢 Controller (Background Automation)' : '⚪ User (Normal Use)'}
                 </span>
                 <br><small class="tps-role-hint">
-                    ${isCtrl ? 'This device runs automation (calendar sync, reminders, and maintenance) while keeping the normal Obsidian UI available.' : 'This device is in normal user mode — Controller automation stays off, while optional local reminder notices can run when Obsidian is open.'}
+                    ${isCtrl ? 'This device runs automation (calendar sync, reminders, and maintenance) while keeping the normal Obsidian UI available.' : 'This device is in normal user mode — Controller automation stays off while paired TishOS schedule publication remains role-agnostic.'}
                 </small>
             `;
         };
@@ -128,7 +132,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
         this.renderOverviewCard(
             overviewCards,
             'Reminder rules',
-            `${this.plugin.settings.enableReminders ? 'Enabled' : 'Disabled'} · ${this.plugin.settings.reminders?.length || 0} rule${this.plugin.settings.reminders?.length === 1 ? '' : 's'}`,
+            `${this.plugin.settings.enableReminders ? 'Enabled' : 'Disabled'} · ${this.plugin.settings.notificationDeliveryProvider === 'ntfy' ? 'ntfy' : 'TishOS'} · ${this.plugin.settings.reminders?.length || 0} rule${this.plugin.settings.reminders?.length === 1 ? '' : 's'}`,
             'Open reminder rules',
             'reminders'
         );
@@ -999,17 +1003,6 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     });
             });
 
-        new Setting(rulesSection)
-            .setName('Hourly Time Tracking Reminders')
-            .setDesc('When this device is the Controller, send a TPS Notifier reminder on the hour for each active time tracking session.')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.enableTimeTrackingHourlyReminders !== false)
-                .onChange(async (value) => {
-                    this.plugin.settings.enableTimeTrackingHourlyReminders = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.restartTimeTrackingReminderLoop();
-                }));
-
         let rulesContainer: HTMLElement | null = null;
         let presetSummary: HTMLElement | null = null;
         if (!(this.plugin.settings.enableReminders ?? true)) {
@@ -1066,28 +1059,52 @@ export class TPSControllerSettingTab extends PluginSettingTab {
         const deliverySection = createSettingsSection(
             container,
             'Delivery',
-            'Choose where reminders appear. Controller owns reminder rules; TishOS owns Apple notification permission and native actions.'
+            'Choose one notification service. Controller owns the rules and sends each reminder through only the selected provider.'
         );
 
-        new Setting(deliverySection)
-            .setName('Local Notices on User Devices')
-            .setDesc('Show an Obsidian notice on each active User device. This does not use TPS Messager and cannot notify while Obsidian is closed.')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.enableLocalReminderNoticesOnUserDevices === true)
-                .onChange(async (value) => {
-                    this.plugin.settings.enableLocalReminderNoticesOnUserDevices = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.restartReminderLoop();
-                }));
+        const selectedProvider = NOTIFICATION_DELIVERY_PROVIDERS.find(
+            (provider) => provider.id === this.plugin.settings.notificationDeliveryProvider,
+        ) || NOTIFICATION_DELIVERY_PROVIDERS[0];
+        const providerSetting = new Setting(deliverySection)
+            .setName('Notification Service')
+            .setDesc(selectedProvider.description)
+            .addDropdown(dropdown => {
+                for (const provider of NOTIFICATION_DELIVERY_PROVIDERS) {
+                    dropdown.addOption(provider.id, provider.label);
+                }
+                return dropdown
+                    .setValue(selectedProvider.id)
+                    .onChange(async (value) => {
+                        if (!isNotificationDeliveryProvider(value)) return;
+                        this.plugin.settings.notificationDeliveryProvider = value;
+                        await this.plugin.saveSettings();
+                        await this.plugin.refreshTishOSCommandBridgeCatalogs();
+                        this.plugin.restartReminderLoop();
+                        this.plugin.restartTimeTrackingReminderLoop();
+                        this.redisplayPreservingScroll();
+                    });
+            });
 
-        new Setting(deliverySection)
-            .setName('Apple Native Notifications')
-            .setDesc('Open TishOS at its Native Notifications controls. TishOS schedules from one selected Calendar Base view; enabling both delivery routes can produce two alerts for the same item.')
-            .addButton(button => button
+        if (selectedProvider.id === 'tishos') {
+            providerSetting.addButton(button => button
                 .setButtonText('Open TishOS')
-                .onClick(() => {
-                    this.plugin.openTishOSNativeNotificationSettings();
-                }));
+                .onClick(() => this.plugin.openTishOSNativeNotificationSettings()));
+        } else if (selectedProvider.id === 'ntfy') {
+            providerSetting.addButton(button => button
+                .setButtonText('Open ntfy Settings')
+                .onClick(() => this.plugin.openNtfyNotificationSettings()));
+
+            new Setting(deliverySection)
+                .setName('Hourly Time Tracking Reminders')
+                .setDesc('Send an ntfy reminder on the hour for each active time tracking session.')
+                .addToggle(toggle => toggle
+                    .setValue(this.plugin.settings.enableTimeTrackingHourlyReminders !== false)
+                    .onChange(async (value) => {
+                        this.plugin.settings.enableTimeTrackingHourlyReminders = value;
+                        await this.plugin.saveSettings();
+                        this.plugin.restartTimeTrackingReminderLoop();
+                    }));
+        }
 
         const defaultsSection = createSettingsSection(
             container,

@@ -379,30 +379,22 @@ test("Controller settings use one routed page with an explicit five-destination 
   assert.match(settingsStylesSource, /@media \(max-width: 520px\)[\s\S]*\.tps-settings-destination-description \{[\s\S]*display: none/);
 });
 
-test("local User-device notices are explicit, default-off, and restart their active-instance loop", () => {
+test("notification delivery uses one provider selector and restarts the affected routes", () => {
   const reminderPageSource = settingsTabSource.slice(
     settingsTabSource.indexOf("private renderReminderSettingsPage"),
     settingsTabSource.indexOf("private renderReminderRules"),
   );
-  const localNoticeSetting = reminderPageSource.indexOf(".setName('Local Notices on User Devices')");
+  const providerSetting = reminderPageSource.indexOf(".setName('Notification Service')");
   const deliverySection = reminderPageSource.indexOf("'Delivery'");
   const reminderDefaults = reminderPageSource.indexOf("'Reminder defaults'");
   const sortDirection = reminderPageSource.indexOf(".setName('Notification Sort Direction')");
 
-  assert.ok(localNoticeSetting > deliverySection);
-  assert.ok(localNoticeSetting < reminderDefaults);
-  assert.ok(localNoticeSetting < sortDirection);
+  assert.ok(providerSetting > deliverySection);
+  assert.ok(providerSetting < reminderDefaults);
+  assert.ok(providerSetting < sortDirection);
   assert.match(
     reminderPageSource,
-    /This does not use TPS Messager and cannot notify while Obsidian is closed\./,
-  );
-  assert.match(
-    reminderPageSource,
-    /setValue\(this\.plugin\.settings\.enableLocalReminderNoticesOnUserDevices === true\)/,
-  );
-  assert.match(
-    reminderPageSource,
-    /this\.plugin\.settings\.enableLocalReminderNoticesOnUserDevices = value;[\s\S]*await this\.plugin\.saveSettings\(\);[\s\S]*this\.plugin\.restartReminderLoop\(\)/,
+    /this\.plugin\.settings\.notificationDeliveryProvider = value;[\s\S]*await this\.plugin\.saveSettings\(\);[\s\S]*refreshTishOSCommandBridgeCatalogs\(\);[\s\S]*restartReminderLoop\(\);[\s\S]*restartTimeTrackingReminderLoop\(\)/,
   );
   assert.match(
     reminderPageSource,
@@ -420,8 +412,9 @@ test("local User-device notices are explicit, default-off, and restart their act
     settingsTabSource,
     /rem\.repeatIntervalMinutes = num;[\s\S]*await this\.plugin\.saveSettings\(\);[\s\S]*this\.plugin\.restartReminderLoop\(\)/,
   );
-  assert.match(settingsTabSource, /optional local reminder notices can run when Obsidian is open/);
+  assert.match(settingsTabSource, /paired TishOS schedule publication remains role-agnostic/);
   assert.match(settingsTabSource, /await this\.plugin\.resetReminderDeliveryState\(\)/);
+  assert.doesNotMatch(reminderPageSource, /Local Notices on User Devices/);
 });
 
 test("TishOS notification settings handoff is explicit, scoped, and non-mutating", () => {
@@ -431,9 +424,11 @@ test("TishOS notification settings handoff is explicit, scoped, and non-mutating
   );
 
   assert.match(reminderPageSource, /'Delivery'/);
-  assert.match(reminderPageSource, /\.setName\('Apple Native Notifications'\)/);
-  assert.match(reminderPageSource, /enabling both delivery routes can produce two alerts/);
+  assert.match(reminderPageSource, /\.setName\('Notification Service'\)/);
+  assert.match(reminderPageSource, /selectedProvider\.id === 'tishos'/);
   assert.match(reminderPageSource, /this\.plugin\.openTishOSNativeNotificationSettings\(\)/);
+  assert.match(reminderPageSource, /selectedProvider\.id === 'ntfy'/);
+  assert.match(reminderPageSource, /this\.plugin\.openNtfyNotificationSettings\(\)/);
   assert.match(mainSource, /tishos:\/\/settings\?section=native-notifications/);
   assert.match(mainSource, /registerObsidianProtocolHandler\('tps-controller-settings'/);
   assert.match(mainSource, /params\.action !== 'tps-controller-settings'/);
@@ -447,7 +442,7 @@ test("TishOS notification settings handoff is explicit, scoped, and non-mutating
       mainSource.indexOf("registerObsidianProtocolHandler('tps-controller'"),
       mainSource.indexOf('this.startS3agleAttachmentAutomation()'),
     ),
-    /saveSettings\(|enableReminders\s*=|enableLocalReminderNoticesOnUserDevices\s*=/,
+    /saveSettings\(|enableReminders\s*=|notificationDeliveryProvider\s*=/,
   );
 });
 

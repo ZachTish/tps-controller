@@ -615,66 +615,40 @@ test('ignore-path edits invalidate every reminder run and refresh open notificat
   assert.equal((settingsTabSource.match(/this\.plugin\.refreshReminderPolicy\(\);/g) || []).length, 8);
 });
 
-test('active-instance reminder policy is default-off on User devices and never promotes mobile to Controller delivery', () => {
+test('direct reminder delivery runs only for ntfy on the desktop Controller', () => {
   const { resolveReminderDeliveryMode } = loadReminderRuntimePolicyModule();
   const resolve = (overrides = {}) => resolveReminderDeliveryMode({
     enableReminders: true,
-    enableLocalReminderNoticesOnUserDevices: false,
-    isController: false,
+    notificationDeliveryProvider: 'ntfy',
+    isController: true,
     isMobile: false,
     ...overrides,
   });
 
-  assert.equal(resolve(), null);
-  assert.equal(resolve({ enableLocalReminderNoticesOnUserDevices: true }), 'local-only');
-  assert.equal(resolve({
-    enableLocalReminderNoticesOnUserDevices: true,
-    isMobile: true,
-  }), 'local-only');
-  assert.equal(resolve({ isController: true }), 'controller');
-  assert.equal(resolve({
-    enableLocalReminderNoticesOnUserDevices: true,
-    isController: true,
-  }), 'controller');
-  assert.equal(resolve({
-    isController: true,
-    isMobile: true,
-  }), null);
-  assert.equal(resolve({
-    enableLocalReminderNoticesOnUserDevices: true,
-    isController: true,
-    isMobile: true,
-  }), 'local-only');
+  assert.equal(resolve(), 'ntfy');
+  assert.equal(resolve({ notificationDeliveryProvider: 'tishos' }), null);
+  assert.equal(resolve({ isController: false }), null);
+  assert.equal(resolve({ isMobile: true }), null);
   assert.equal(resolve({
     enableReminders: false,
-    enableLocalReminderNoticesOnUserDevices: true,
-    isController: true,
   }), null);
   assert.equal(resolve({
     enableReminders: 'true',
-    enableLocalReminderNoticesOnUserDevices: true,
   }), null);
 });
 
-test('User-device reminder checks keep separate local state and return before Messager lookup', () => {
-  assert.match(typesSource, /enableLocalReminderNoticesOnUserDevices: boolean/);
-  assert.match(typesSource, /enableLocalReminderNoticesOnUserDevices: false/);
-  assert.match(mainSource, /tps-controller-local-user-alert-state-/);
-  assert.match(mainSource, /const evaluationAlertState = this\.cloneAlertState\(activeAlertState\)/);
+test('ntfy checks use one Controller-owned alert state before Messager lookup', () => {
+  assert.match(typesSource, /notificationDeliveryProvider: NotificationDeliveryProvider/);
+  assert.match(mainSource, /const evaluationAlertState = this\.cloneAlertState\(this\.settings\.alertState\)/);
   assert.match(mainSource, /const evaluationSettings: TPSControllerSettings = \{[\s\S]*alertState: evaluationAlertState/);
-  assert.match(mainSource, /this\.localUserAlertState = evaluationAlertState;[\s\S]*this\.persistLocalUserAlertStateToLocalStorage\(\)/);
-
-  const localOnlyReturn = mainSource.indexOf('if (isLocalOnly) {', mainSource.indexOf('this.showLocalReminderNotices(batches);'));
-  const notifierLookup = mainSource.indexOf('const notifier = this.getNotifierPlugin();', localOnlyReturn);
-  assert.ok(localOnlyReturn > 0, 'local-only delivery must have an explicit exit');
-  assert.ok(notifierLookup > localOnlyReturn, 'Messager lookup must occur only after the local-only exit');
-  assert.match(mainSource.slice(localOnlyReturn, notifierLookup), /return;/);
+  assert.match(mainSource, /this\.settings\.alertState = evaluationAlertState;[\s\S]*this\.scheduleReminderStateSave\(\)/);
+  assert.doesNotMatch(mainSource, /localUserAlertState/);
   assert.match(mainSource, /delivery:messager-skipped-role-change/);
   assert.match(mainSource, /check:join-active/);
   assert.match(mainSource, /check:discarded-stopped-run/);
 });
 
-test('active User reminder loops start and stop with lifecycle, role, and captured delivery mode', () => {
+test('provider-selected reminder loops start and stop with lifecycle, role, and captured delivery mode', () => {
   assert.match(mainSource, /if \(this\.deviceRoleManager\.isController\(\)\) \{[\s\S]*this\.enterControllerMode\(\);[\s\S]*\} else \{[\s\S]*this\.restartReminderLoop\(\)/);
   assert.match(mainSource, /if \(Platform\.isMobile\) \{[\s\S]*this\.stopAllAutomation\(\);[\s\S]*this\.restartReminderLoop\(\)/);
   assert.match(mainSource, /private exitControllerMode\(\) \{[\s\S]*this\.stopAllAutomation\(\);[\s\S]*this\.restartReminderLoop\(\)/);

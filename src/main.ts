@@ -35,6 +35,7 @@ import {
     resolveReminderDeliveryMode,
     type ReminderDeliveryMode,
 } from "./services/reminder-runtime-policy";
+import { resolveNotificationDeliveryProvider } from "./services/notification-delivery-provider";
 import {
     TISHOS_COMMAND_BRIDGE_PAIR_ROUTE,
     TISHOS_COMMAND_BRIDGE_REVOKE_ROUTE,
@@ -160,7 +161,6 @@ export default class TPSControllerPlugin extends Plugin {
     private reminderStateNextSaveAt = 0;
     private reminderStateFlushTimer: number | null = null;
     private reminderStateSaveDirty = false;
-    private localUserAlertState: AlertState = {};
     private reminderCheckPromise: Promise<void> | null = null;
     private reminderRunGeneration = 0;
 
@@ -233,7 +233,9 @@ export default class TPSControllerPlugin extends Plugin {
         this.twoStageArchiveService = new TwoStageArchiveService(this.app, () => this.settings, () => this.saveSettings());
         this.s3agleAttachmentAutomationService = await this.createS3AttachmentAutomationService();
         this.tishOSCommandBridgeService = new TishOSCommandBridgeService(this.app, this.manifest, {
-            notificationScheduleProvider: () => this.reminderEngine.projectScheduledNotifications(this.settings),
+            notificationScheduleProvider: () => this.settings.notificationDeliveryProvider === "tishos"
+                ? this.reminderEngine.projectScheduledNotifications(this.settings)
+                : Promise.resolve([]),
         });
 
         // Commands
@@ -440,6 +442,21 @@ export default class TPSControllerPlugin extends Plugin {
         window.open(target);
     }
 
+    openNtfyNotificationSettings(): void {
+        const notifier = getPluginById(this.app, "tps-messager")
+            || getPluginById(this.app, "tps-notifier");
+        const pluginID = String((notifier as { manifest?: { id?: string } } | null)?.manifest?.id || "tps-messager");
+        const settingManager = (this.app as App & {
+            setting?: {
+                open?: () => void;
+                openTabById?: (id: string) => void;
+            };
+        }).setting;
+        logger.flow("NotificationDelivery", "provider-settings:open", { provider: "ntfy", pluginAvailable: !!notifier });
+        settingManager?.open?.();
+        settingManager?.openTabById?.(pluginID);
+    }
+
     getTishOSCommandBridgeStatus(): TishOSCommandBridgeStatus {
         return this.tishOSCommandBridgeService.getStatus();
     }
@@ -514,6 +531,22 @@ export default class TPSControllerPlugin extends Plugin {
         // Establish local intent before any migration mutates settings. Migration
         // saves can then merge only their changed fields into the latest data.
         this.persistedSettingsSnapshot = this.snapshotSettingsForDiff();
+        const resolvedNotificationProvider = resolveNotificationDeliveryProvider(
+            data.notificationDeliveryProvider,
+            Object.keys(data).length > 0,
+        );
+        const notificationProviderMigrationChanged =
+            data.notificationDeliveryProvider !== resolvedNotificationProvider
+            || Object.prototype.hasOwnProperty.call(data, "enableLocalReminderNoticesOnUserDevices");
+        if (notificationProviderMigrationChanged) {
+            this.persistedSettingsSnapshot.notificationDeliveryProvider = data.notificationDeliveryProvider;
+            if (Object.prototype.hasOwnProperty.call(data, "enableLocalReminderNoticesOnUserDevices")) {
+                this.persistedSettingsSnapshot.enableLocalReminderNoticesOnUserDevices =
+                    data.enableLocalReminderNoticesOnUserDevices;
+            }
+        }
+        this.settings.notificationDeliveryProvider = resolvedNotificationProvider;
+        delete (this.settings as unknown as Record<string, unknown>).enableLocalReminderNoticesOnUserDevices;
         const importedS3agleSettings = await this.migrateS3agleSettingsIfNeeded(data || {});
         const s3CredentialMigration = this.migrateS3CredentialsFromSettings();
         if (!this.settings._migratedFromPlugins) {
@@ -528,21 +561,26 @@ export default class TPSControllerPlugin extends Plugin {
         } else {
             this.settings.alertState = {};
         }
-        this.localUserAlertState = this.loadLocalUserAlertStateFromLocalStorage();
         this.sanitizeFrontmatterKeySettings();
         this.sanitizeTwoStageArchiveSettings();
         this.sanitizeS3agleAttachmentAutomationSettings();
         logger.setLoggingEnabled(this.settings.enableLogging);
         let finalMigrationSaveSucceeded = true;
-        if (importedS3agleSettings || s3CredentialMigration.changed) {
+        if (importedS3agleSettings || s3CredentialMigration.changed || notificationProviderMigrationChanged) {
             try {
                 await this.saveSettings();
             } catch (error) {
                 finalMigrationSaveSucceeded = false;
-                logger.flowError("S3AttachmentAutomation", "credentials:migration-save-failed", error, {
-                    retainedLegacyFields: Object.keys(this.retainedLegacyS3Credentials).length,
-                });
-                new Notice("TPS Controller could not finish saving the S3 credential migration. Legacy values were retained and the migration will retry.", 12000);
+                if (importedS3agleSettings || s3CredentialMigration.changed) {
+                    logger.flowError("S3AttachmentAutomation", "credentials:migration-save-failed", error, {
+                        retainedLegacyFields: Object.keys(this.retainedLegacyS3Credentials).length,
+                    });
+                    new Notice("TPS Controller could not finish saving the S3 credential migration. Legacy values were retained and the migration will retry.", 12000);
+                }
+                if (notificationProviderMigrationChanged) {
+                    logger.flowError("NotificationDelivery", "provider:migration-save-failed", error);
+                    new Notice("TPS Controller could not save the notification service migration. Existing settings were left available for retry.", 12000);
+                }
             }
         }
         if (finalMigrationSaveSucceeded) {
@@ -569,6 +607,7 @@ export default class TPSControllerPlugin extends Plugin {
             "companionStartupScanEnabled",
             "companionStartupDelayMs",
             "companionUpstreamPropagation",
+            "enableLocalReminderNoticesOnUserDevices",
         ];
         for (const key of legacyTopLevelKeys) {
             delete (this.settings as any)[key];
@@ -677,8 +716,7 @@ export default class TPSControllerPlugin extends Plugin {
             role: this.deviceRoleManager?.role || "unknown",
             enableLogging: this.settings.enableLogging === true,
             enableReminders: this.settings.enableReminders === true,
-            enableLocalReminderNoticesOnUserDevices:
-                this.settings.enableLocalReminderNoticesOnUserDevices === true,
+            notificationDeliveryProvider: this.settings.notificationDeliveryProvider,
             externalCalendars: this.settings.externalCalendars?.length || 0,
             enabledExternalCalendars: (this.settings.externalCalendars || []).filter((calendar) => calendar.enabled !== false).length,
             noLossSyncMode: this.settings.noLossSyncMode !== false,
@@ -1207,8 +1245,7 @@ export default class TPSControllerPlugin extends Plugin {
     private getReminderDeliveryMode(): ReminderDeliveryMode | null {
         return resolveReminderDeliveryMode({
             enableReminders: this.settings.enableReminders,
-            enableLocalReminderNoticesOnUserDevices:
-                this.settings.enableLocalReminderNoticesOnUserDevices,
+            notificationDeliveryProvider: this.settings.notificationDeliveryProvider,
             isController: this.deviceRoleManager?.isController?.() === true,
             isMobile: Platform.isMobile,
         });
@@ -1221,8 +1258,7 @@ export default class TPSControllerPlugin extends Plugin {
             logger.flow("ReminderLoop", "start:not-enabled", {
                 role: this.deviceRoleManager?.role || "unknown",
                 remindersEnabled: this.settings.enableReminders === true,
-                localUserNoticesEnabled:
-                    this.settings.enableLocalReminderNoticesOnUserDevices === true,
+                notificationDeliveryProvider: this.settings.notificationDeliveryProvider,
                 isMobile: Platform.isMobile,
             });
             return;
@@ -1264,6 +1300,12 @@ export default class TPSControllerPlugin extends Plugin {
 
     private startTimeTrackingReminderLoop(): void {
         this.stopTimeTrackingReminderLoop();
+        if (this.settings.notificationDeliveryProvider !== "ntfy") {
+            logger.flow("TimeTrackingReminder", "loop:provider-not-selected", {
+                notificationDeliveryProvider: this.settings.notificationDeliveryProvider,
+            });
+            return;
+        }
         if (this.settings.enableTimeTrackingHourlyReminders === false) {
             logger.flow("TimeTrackingReminder", "loop:not-enabled");
             return;
@@ -1297,6 +1339,12 @@ export default class TPSControllerPlugin extends Plugin {
         }
         if (this.settings.enableTimeTrackingHourlyReminders === false) {
             logger.flow("TimeTrackingReminder", "check:skip-disabled");
+            return;
+        }
+        if (this.settings.notificationDeliveryProvider !== "ntfy") {
+            logger.flow("TimeTrackingReminder", "check:skip-provider", {
+                notificationDeliveryProvider: this.settings.notificationDeliveryProvider,
+            });
             return;
         }
 
@@ -1454,6 +1502,15 @@ export default class TPSControllerPlugin extends Plugin {
         runGeneration: number = this.reminderRunGeneration,
     ): Promise<void> {
         if (!deliveryMode) {
+            if (
+                this.settings.enableReminders === true
+                && this.settings.notificationDeliveryProvider === "tishos"
+            ) {
+                logger.flow("ReminderEngine", "check:tishos-schedule-refresh");
+                return this.tishOSCommandBridgeService
+                    .refreshCatalogs("manual-reminder-check")
+                    .then(() => undefined);
+            }
             logger.flow("ReminderEngine", "check:skip-disabled");
             return Promise.resolve();
         }
@@ -1474,12 +1531,8 @@ export default class TPSControllerPlugin extends Plugin {
         deliveryMode: ReminderDeliveryMode,
         runGeneration?: number,
     ): Promise<void> {
-        const isLocalOnly = deliveryMode === "local-only";
-        const activeAlertState = isLocalOnly
-            ? this.localUserAlertState
-            : this.settings.alertState;
-        const alertStateBeforeRun = this.cloneAlertState(activeAlertState);
-        const evaluationAlertState = this.cloneAlertState(activeAlertState);
+        const alertStateBeforeRun = this.cloneAlertState(this.settings.alertState);
+        const evaluationAlertState = this.cloneAlertState(this.settings.alertState);
         const evaluationSettings: TPSControllerSettings = {
             ...this.settings,
             alertState: evaluationAlertState,
@@ -1496,13 +1549,8 @@ export default class TPSControllerPlugin extends Plugin {
         }
 
         if (result.stateChanged) {
-            if (isLocalOnly) {
-                this.localUserAlertState = evaluationAlertState;
-                this.persistLocalUserAlertStateToLocalStorage();
-            } else {
-                this.settings.alertState = evaluationAlertState;
-                this.scheduleReminderStateSave();
-            }
+            this.settings.alertState = evaluationAlertState;
+            this.scheduleReminderStateSave();
         }
         this.app.workspace.trigger(TPS_EVENTS.REMINDERS_UPDATED as any, {
             sourcePluginId: this.manifest.id,
@@ -1533,14 +1581,6 @@ export default class TPSControllerPlugin extends Plugin {
         });
 
         this.showLocalReminderNotices(batches);
-
-        if (isLocalOnly) {
-            logger.flow("ReminderEngine", "delivery:done", {
-                batches: batches.length,
-                route: "local-obsidian",
-            });
-            return;
-        }
 
         if (!this.deviceRoleManager.isController() || Platform.isMobile) {
             logger.flowWarn("ReminderEngine", "delivery:messager-skipped-role-change", {
@@ -1753,10 +1793,6 @@ export default class TPSControllerPlugin extends Plugin {
         return `tps-controller-alert-state-${this.app.vault.getName()}`;
     }
 
-    private getLocalUserAlertStateStorageKey(): string {
-        return `tps-controller-local-user-alert-state-${this.app.vault.getName()}`;
-    }
-
     private hasAlertStateEntries(state: AlertState | null | undefined): boolean {
         return !!state && Object.keys(state).length > 0;
     }
@@ -1765,13 +1801,6 @@ export default class TPSControllerPlugin extends Plugin {
         return this.loadAlertStateStorage(
             this.getAlertStateStorageKey(),
             "Controller reminder alert state",
-        );
-    }
-
-    private loadLocalUserAlertStateFromLocalStorage(): AlertState {
-        return this.loadAlertStateStorage(
-            this.getLocalUserAlertStateStorageKey(),
-            "local user reminder alert state",
         );
     }
 
@@ -1796,14 +1825,6 @@ export default class TPSControllerPlugin extends Plugin {
         );
     }
 
-    private persistLocalUserAlertStateToLocalStorage(): void {
-        this.persistAlertStateStorage(
-            this.getLocalUserAlertStateStorageKey(),
-            this.localUserAlertState,
-            "local user reminder alert state",
-        );
-    }
-
     private persistAlertStateStorage(
         storageKey: string,
         state: AlertState,
@@ -1819,10 +1840,8 @@ export default class TPSControllerPlugin extends Plugin {
     async resetReminderDeliveryState(): Promise<void> {
         this.restartReminderLoop();
         this.settings.alertState = {};
-        this.localUserAlertState = {};
         this.reminderStateSaveDirty = false;
         this.persistAlertStateToLocalStorage(this.settings.alertState);
-        this.persistLocalUserAlertStateToLocalStorage();
         await this.saveSettings();
     }
 

@@ -1,4 +1,5 @@
 import { TFile } from "obsidian";
+import type { NotificationDeliveryProvider } from "./services/notification-delivery-provider";
 
 // ============================================================================
 // Device Role (Existing)
@@ -193,7 +194,7 @@ export interface TPSControllerSettings {
     reminders: PropertyReminder[];
     alertState: AlertState;
     batchNotifications: boolean;
-    enableLocalReminderNoticesOnUserDevices: boolean;
+    notificationDeliveryProvider: NotificationDeliveryProvider;
     globalIgnorePaths: string[];
     globalIgnoreTags: string[];
     globalIgnoreStatuses: string[];
@@ -275,7 +276,7 @@ export const DEFAULT_CONTROLLER_SETTINGS: TPSControllerSettings = {
     reminders: [],
     alertState: {},
     batchNotifications: true,
-    enableLocalReminderNoticesOnUserDevices: false,
+    notificationDeliveryProvider: "tishos",
     globalIgnorePaths: ["System/"],
     globalIgnoreTags: ["archive", "template"],
     globalIgnoreStatuses: ["complete", "wont-do"],
