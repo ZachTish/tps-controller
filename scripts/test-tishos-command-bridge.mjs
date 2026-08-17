@@ -548,6 +548,19 @@ test("paired clients receive a signed Controller-rule notification schedule that
   const changed = JSON.parse(harness.files.get(path));
   assert.equal(changed.items[0].fireAt, new Date(NOW + 2 * 60 * 60 * 1000).toISOString());
   assert.notEqual(changed.items[0].id, published.items[0].id);
+
+  schedule = [{
+    ...schedule[0],
+    fireAt: NOW - 4 * 60 * 1000,
+  }, {
+    ...schedule[0],
+    title: 'Too old',
+    fireAt: NOW - 5 * 60 * 1000 - 1,
+  }];
+  await harness.service.refreshCatalogs("modal-visible-native-schedule");
+  const modalVisible = JSON.parse(harness.files.get(path));
+  assert.equal(modalVisible.items.length, 1, 'only the bounded late-delivery window is published');
+  assert.equal(modalVisible.items[0].fireAt, new Date(NOW - 4 * 60 * 1000).toISOString());
 });
 
 test("pair route rejects cancel, wrong stripped-native vault, uppercase UUID, and malformed secret without storage", async () => {

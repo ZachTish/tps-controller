@@ -1,5 +1,12 @@
 # TPS Controller
 
+## 0.8.1
+
+- TishOS schedule publication now includes the same just-due file-reminder occurrence that Controller still exposes during its bounded polling window. The original logical fire time remains unchanged, so every paired Apple device receives one stable occurrence digest instead of a new identity on each refresh.
+- If a repeat-until-complete reminder is older than that bounded live window and Controller has no local delivery state for the paired device, publication advances deterministically to the next configured repeat occurrence. Repeat limits and trigger-base end policy remain authoritative.
+- External-calendar catch-up remains future-only. The native schedule is still read-only, Controller-rule-owned, size bounded, separately signed per paired device, and independent of any Base view or TishOS lead-time calculation.
+- This patch adds no setting or note-data migration and keeps minimum Obsidian compatibility at 1.12.0. TishOS 0.8.1 adds the matching bounded late-occurrence acceptance and once-only delivery ledger. Final suite/build/reload evidence is recorded in `release-notes/0.8.1.md`; production is not promoted by this release.
+
 ## 0.8.0
 
 - Advanced → Troubleshooting now offers **Reload Controller every 15 minutes**, a device-local option for an always-on desktop Controller to pick up plugin settings that have already synced to its vault. It is off by default, never propagates through Controller's synced `data.json`, and never runs on mobile or a User-role device.
@@ -25,7 +32,7 @@
 - Publication is role-agnostic and refreshes after relevant vault changes, reminder state changes, settings saves, layout readiness, and the existing 60-second bridge poll. Unchanged schedules are not rewritten. Registry, projection, cryptographic, size, or filesystem failures preserve the prior verified schedule; revocation removes its target, pending, and backup artifacts with the command catalog.
 - The projection is read-only: publishing Apple-notification work does not consume Controller delivery state, mark an alert sent, mutate a task, or alter a reminder rule. Controller's Obsidian/Messager delivery routes remain separately configurable, so users should disable duplicate routes when Apple notification delivery is intended to be exclusive.
 - A paired always-on Mac can publish this schedule for TishOS relay even when the target iPhone has not materialized the source Markdown file. Apple background delivery and CloudKit remain best-effort; this plugin is not an APNs provider and cannot guarantee instantaneous last-minute remote alerts.
-- The schedule is limited to 128 items over a 60-day horizon and 256 KiB per client. Source paths are relative safe Markdown paths; invalid, ambiguous, terminal, past, or unbounded candidates are excluded. Minimum supported Obsidian remains 1.12.0, and existing Controller settings and note data require no migration.
+- The schedule is limited to 128 items over a 60-day horizon and 256 KiB per client. Source paths are relative safe Markdown paths; invalid, ambiguous, terminal, stale beyond Controller's bounded due/repeat policy, or unbounded candidates are excluded. Minimum supported Obsidian remains 1.12.0, and existing Controller settings and note data require no migration.
 - Final validation passed all 207 active checks in the 210-test declared suite with the three preserved historical notification comparisons skipped, followed by the mandatory separate production-mode build. The build reported `[runtime-deploy] target=test ... unchanged`; source and isolated test-runtime artifacts are byte-identical (`main.js` SHA-256 `6ddd4883c432ed4899b9256542b8d7dc873838b482f485edd36728b257592961`, `manifest.json` `5db836fa14fdf375edc85bd10082c6a2acd3296a304bfadd75fe67f4c865ba76`, and `styles.css` `2da24f2a872483deb0ccc2944fb3b05c1b8a4e6b9f90b3290a3fabb86ec06999`). Obsidian 1.13.7 reloaded the isolated **Obsidian Plugin Test Vault** and rendered TPS Controller's **Reminder rules** page with the rule controls intact. Runtime-owned `data.json` remained SHA-256 `6cac531dcd6d0b6971dc4c14ccc7dbc0b940c72b3f87f4a2dff8663129fa75d0`; production was not accessed or promoted.
 
 ## 0.5.0

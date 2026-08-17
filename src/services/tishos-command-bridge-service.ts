@@ -34,6 +34,7 @@ import {
 import {
     TISHOS_NATIVE_NOTIFICATION_MAX_FILE_BYTES,
     TISHOS_NATIVE_NOTIFICATION_MAX_ITEMS,
+    TISHOS_NATIVE_NOTIFICATION_MAX_LATE_MS,
     TISHOS_NATIVE_NOTIFICATION_ROOT,
     canonicalNotificationItem,
     canonicalNotificationSchedule,
@@ -765,7 +766,11 @@ export class TishOSCommandBridgeService {
         const maximumFireAt = now + 60 * 24 * 60 * 60 * 1000;
         const unique = new Map<string, TishOSNativeNotificationItem>();
         for (const value of values) {
-            if (!Number.isSafeInteger(value.fireAt) || value.fireAt <= now || value.fireAt > maximumFireAt) continue;
+            if (
+                !Number.isSafeInteger(value.fireAt)
+                || value.fireAt < now - TISHOS_NATIVE_NOTIFICATION_MAX_LATE_MS
+                || value.fireAt > maximumFireAt
+            ) continue;
             const title = this.boundedNotificationText(value.title, 256, "Obsidian reminder");
             const body = this.boundedNotificationText(value.body, 1_024, "", true);
             const sourcePath = isValidNotificationSourcePath(value.sourcePath) ? value.sourcePath : undefined;

@@ -361,13 +361,31 @@ export class ReminderEngine {
                     ? `${baseTriggerKey}|snooze:${snoozeTime}`
                     : baseTriggerKey;
                 const sameTrigger = state?.lastTriggerKey === effectiveTriggerKey;
-                if (!reminder.repeatUntilComplete || !state?.triggered || !sameTrigger || !state.lastSent) continue;
-                if (reminder.maxRepeats !== -1 && state.repeatCount >= reminder.maxRepeats) continue;
-                const repeatMs = Math.max(1, reminder.repeatIntervalMinutes) * 60 * 1000;
-                fireAt = state.lastSent + repeatMs;
-                while (fireAt <= now) fireAt += repeatMs;
+                if (reminder.repeatUntilComplete && state?.triggered && sameTrigger && state.lastSent) {
+                    if (reminder.maxRepeats !== -1 && state.repeatCount >= reminder.maxRepeats) continue;
+                    const repeatMs = Math.max(1, reminder.repeatIntervalMinutes) * 60 * 1000;
+                    fireAt = state.lastSent + repeatMs;
+                    while (fireAt <= now) fireAt += repeatMs;
+                } else {
+                    // The Reminder modal deliberately keeps a file reminder
+                    // visible for one bounded polling window after it becomes
+                    // due. Preserve that original logical occurrence in the
+                    // signed schedule so TishOS can deliver it immediately
+                    // with the same stable digest instead of losing it at the
+                    // strict future-time boundary. External-event catch-up has
+                    // a much wider policy and remains future-only here.
+                    const liveWindowMs = getFileReminderLiveWindowMs(settings.pollMinutes);
+                    if (target.sourceType !== "file") continue;
+                    if (now - fireAt > liveWindowMs) {
+                        if (!reminder.repeatUntilComplete) continue;
+                        const repeatMs = Math.max(1, reminder.repeatIntervalMinutes) * 60 * 1000;
+                        const nextRepeatOrdinal = Math.floor((now - fireAt) / repeatMs) + 1;
+                        if (reminder.maxRepeats !== -1 && nextRepeatOrdinal > reminder.maxRepeats) continue;
+                        fireAt += nextRepeatOrdinal * repeatMs;
+                    }
+                }
             }
-            if (fireAt <= now || fireAt > horizonEnd) continue;
+            if (fireAt > horizonEnd) continue;
             if (reminder.repeatEndAt === "trigger-base" && fireAt > finalTriggerBase) continue;
 
             const remaining = formatRemaining(propTime - fireAt);

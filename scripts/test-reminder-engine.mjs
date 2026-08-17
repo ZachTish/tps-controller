@@ -409,7 +409,7 @@ test('all-day task reminders can repeat until their stop condition', () => {
   assert.doesNotMatch(source, /reminder\.repeatUntilComplete\s*&&[\s\S]{0,160}!isAllDaySafe/);
 });
 
-test('native schedule projection is Controller-rule-owned, future-only, and read-only', async () => {
+test('native schedule projection is Controller-rule-owned and read-only', async () => {
   const now = Date.parse('2026-08-15T15:00:00.000Z');
   const start = now + 60 * 60 * 1000;
   const file = { path: 'Projects/Alpha.md', basename: 'Alpha', extension: 'md' };
@@ -484,6 +484,133 @@ test('native schedule projection is Controller-rule-owned, future-only, and read
   assert.equal(schedule[0].sourcePath, 'Projects/Alpha.md');
   assert.equal(schedule[0].sourceKey, 'Projects/Alpha.md::task:3');
   assert.deepEqual(settings.alertState, before, 'projection must not consume Controller delivery state');
+});
+
+test('native schedule retains the modal-visible due occurrence with its stable fire time', async () => {
+  const now = Date.parse('2026-08-15T15:00:00.000Z');
+  const triggerTime = now - 30 * 1000;
+  const settings = {
+    enableReminders: true,
+    pollMinutes: 2,
+    reminders: [{
+      id: 'due-rule',
+      enabled: true,
+      property: 'scheduled',
+      mode: 'task',
+      offsetMinutes: 0,
+      repeatUntilComplete: false,
+      repeatIntervalMinutes: 5,
+      maxRepeats: -1,
+      stopConditions: [],
+      title: 'Due {filename}',
+      body: '{time}',
+    }],
+    alertState: {},
+    archiveFolder: '_archive',
+    globalIgnorePaths: [],
+    globalIgnoreTags: [],
+    globalIgnoreStatuses: [],
+    globalIgnoreCheckboxStates: [],
+    defaultAllDayBaseTime: '09:00',
+    snoozeProperty: 'reminderSnooze',
+    externalCalendars: [],
+  };
+  const candidateFiles = [];
+  const engineHarness = loadCompiledReminderEngineHarness({
+    candidateFiles,
+    shouldIgnoreForReminder: () => false,
+    parseTimeRange: () => ({ start: triggerTime, end: null }),
+    buildReminderTargetsForFile: async () => [{
+      sourceKey: 'Projects/Due.md::task:1',
+      sourceType: 'file',
+      targetKind: 'task',
+      taskTitle: 'Due task',
+      taskFrontmatter: { scheduled: '2026-08-15 09:58' },
+    }],
+    buildEffectiveReminderContextForTarget: (target) => ({
+      frontmatter: target.taskFrontmatter,
+      propertyValue: target.taskFrontmatter.scheduled,
+    }),
+  });
+  const nativeFile = new engineHarness.TFile('Projects/Due.md');
+  candidateFiles.push(nativeFile);
+  const app = {
+    metadataCache: { getFileCache: () => ({ frontmatter: { scheduled: '2026-08-15 09:58' } }) },
+    vault: { getMarkdownFiles: () => [nativeFile], cachedRead: async () => '' },
+  };
+  const engine = new engineHarness.ReminderEngine(app, {});
+
+  const due = await engine.projectScheduledNotifications(settings, now);
+  assert.equal(due.length, 1);
+  assert.equal(due[0].fireAt, triggerTime, 'the logical occurrence time must remain stable');
+  assert.deepEqual(settings.alertState, {}, 'late projection must remain read-only');
+
+  const stale = await engine.projectScheduledNotifications(settings, triggerTime + 60 * 1000 + 1);
+  assert.equal(stale.length, 0, 'the item disappears with the same bounded modal live window');
+});
+
+test('native schedule projects the deterministic next occurrence for an overdue repeating reminder', async () => {
+  const now = Date.parse('2026-08-15T15:22:00.000Z');
+  const triggerTime = Date.parse('2026-08-15T15:00:00.000Z');
+  const settings = {
+    enableReminders: true,
+    pollMinutes: 2,
+    reminders: [{
+      id: 'repeat-rule',
+      enabled: true,
+      property: 'scheduled',
+      mode: 'task',
+      offsetMinutes: 0,
+      repeatUntilComplete: true,
+      repeatIntervalMinutes: 5,
+      maxRepeats: -1,
+      stopConditions: [],
+      title: 'Still due {filename}',
+      body: '{time}',
+    }],
+    alertState: {},
+    archiveFolder: '_archive',
+    globalIgnorePaths: [],
+    globalIgnoreTags: [],
+    globalIgnoreStatuses: [],
+    globalIgnoreCheckboxStates: [],
+    defaultAllDayBaseTime: '09:00',
+    snoozeProperty: 'reminderSnooze',
+    externalCalendars: [],
+  };
+  const candidateFiles = [];
+  const engineHarness = loadCompiledReminderEngineHarness({
+    candidateFiles,
+    shouldIgnoreForReminder: () => false,
+    parseTimeRange: () => ({ start: triggerTime, end: null }),
+    buildReminderTargetsForFile: async () => [{
+      sourceKey: 'Projects/Repeat.md::task:1',
+      sourceType: 'file',
+      targetKind: 'task',
+      taskTitle: 'Persistent task',
+      taskFrontmatter: { scheduled: '2026-08-15 10:00' },
+    }],
+    buildEffectiveReminderContextForTarget: (target) => ({
+      frontmatter: target.taskFrontmatter,
+      propertyValue: target.taskFrontmatter.scheduled,
+    }),
+  });
+  const nativeFile = new engineHarness.TFile('Projects/Repeat.md');
+  candidateFiles.push(nativeFile);
+  const app = {
+    metadataCache: { getFileCache: () => ({ frontmatter: { scheduled: '2026-08-15 10:00' } }) },
+    vault: { getMarkdownFiles: () => [nativeFile], cachedRead: async () => '' },
+  };
+  const engine = new engineHarness.ReminderEngine(app, {});
+
+  const schedule = await engine.projectScheduledNotifications(settings, now);
+  assert.equal(schedule.length, 1);
+  assert.equal(schedule[0].fireAt, Date.parse('2026-08-15T15:25:00.000Z'));
+  assert.deepEqual(settings.alertState, {}, 'projection must not manufacture Controller delivery state');
+
+  settings.reminders[0].maxRepeats = 4;
+  const exhausted = await engine.projectScheduledNotifications(settings, now);
+  assert.equal(exhausted.length, 0, 'the projection honors the Controller repeat limit');
 });
 
 test('reminder scheduler wakes at the shortest active repeat interval', () => {
