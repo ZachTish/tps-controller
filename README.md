@@ -1,5 +1,14 @@
 # TPS Controller
 
+## 0.8.0
+
+- Advanced → Troubleshooting now offers **Reload Controller every 15 minutes**, a device-local option for an always-on desktop Controller to pick up plugin settings that have already synced to its vault. It is off by default, never propagates through Controller's synced `data.json`, and never runs on mobile or a User-role device.
+- Enabling the option starts a fresh 15-minute cycle rather than reloading immediately. Controller displays a one-minute warning, drains only settings saves the user already requested, flushes local reminder state, saves every open text-file view and the workspace layout, then rechecks the local role and preference before requesting Obsidian's built-in app reload.
+- The scheduler is generation-safe and single-flight. Disabling it, changing device role, entering mobile/passive behavior, or unloading Controller cancels pending work; stale callbacks and completed preflights cannot reload a replacement generation. A failed preflight or unavailable/rejected reload command fails closed and waits for a new full cycle.
+- Controller intentionally does not restore the old `window.location.reload()` fallback and does not call `saveSettings()` as part of reload preflight, preventing a stale in-memory Controller settings object from overwriting a newer synchronized payload. The one exact `app:reload` command remains behind the shared typed compatibility adapter because Obsidian does not expose a public whole-app reload API.
+- Reloading can reset undo history, interrupt active automation, and discard other plugins' unsaved in-memory state. This option reloads the Obsidian app window; it does not relaunch a quit/crashed operating-system process, force sync completion, or guarantee that a remote settings file has arrived before the cycle.
+- This backward-compatible minor release adds no synced setting or note-data migration and keeps minimum Obsidian compatibility at 1.12.0. All 219 active checks in the 222-test declared suite passed with three preserved historical comparisons skipped, followed by the mandatory separate build. Obsidian 1.13.7 loaded the exact 0.8.0 artifact only in **Obsidian Plugin Test Vault**; the Advanced control rendered off, toggled on without an immediate reload on the User-role test device, and was restored off. Runtime `data.json` and `.hotreload` retained their exact baseline hashes; the existing User-role startup path refreshed only the hidden sync-request generation. Source/runtime artifacts were byte-identical. Full hashes and BRAT release evidence are recorded in `release-notes/0.8.0.md`; production was not accessed or promoted.
+
 ## 0.7.0
 
 - Reminder delivery now uses one explicit **Notification Service** choice instead of independent delivery toggles. The initial provider registry contains **TishOS** and **ntfy** and is structured so another provider can be added without introducing another competing boolean.
@@ -253,9 +262,9 @@ Device role, reminder alert reset, calendar quarantine review, historical backfi
 - Reminder status filters and checkbox-state filters are configured separately. Status filters match note frontmatter status and task semantic status values such as `complete`, `working`, or `wont-do`; checkbox-state filters match raw Markdown task markers such as blank/open, `x`, `-`, `/`, or `?`.
 - Notification sort direction: choose oldest due items first or newest due items first for the notification sidebar and overdue reminder modal.
 - Snooze: snooze property name plus configurable preset durations.
-- Debug: logging toggle and alert-state reset.
+- Troubleshooting: device-local optional 15-minute Controller reload, logging toggle, and alert-state reset.
 - Controller role runs automation without hiding the normal Obsidian editor, sidebars, or ribbon. A small non-blocking `CONTROLLER` badge indicates the role.
-- Controller automation never schedules an Obsidian application reload. Recovery stays scoped to the individual automation run so open editor state is not discarded by the plugin.
+- Controller never reloads Obsidian unless the device-local **Reload Controller every 15 minutes** option is explicitly enabled on a desktop Controller. The option warns one minute before its fixed cadence, saves public text-file views and workspace layout, and fails closed when preflight or the built-in reload command is unavailable. Individual automation recovery never enables or invokes this host lifecycle option.
 
 ## Calendar sync
 
@@ -397,6 +406,7 @@ Notification and overdue diagnostics log sidebar open routing, overdue scan tota
 
 ## Validation
 
+- 2026-08-17 (0.8.0): Restored an opt-in, device-local 15-minute Controller reload with a one-minute warning, save-first preflight, role/mobile/lifecycle cancellation, and no page-reload fallback. Final focused/full-suite, build, isolated test-vault, state-preservation, and public artifact evidence is recorded in the 0.8.0 release notes.
 - 2026-07-30 (0.3.7): Fixed S3 bucket-archive cadence persistence and made the archive pass single-flight. The hash-pinned exact 0.3.6 source fails the new cadence gate with live timestamp `0` and the overlap gate with two complete manifest/vault/note/save passes; 0.3.7 passes with the run timestamp persisted, zero added work inside the interval, and one physical pass for overlapping callers. Save-failure rollback, joined rejection, cleared-flight retry, disabled/replica/unconfigured guards, full suite, final build, test-vault reload/UI verification, runtime-state preservation, and public artifact results are recorded in the 0.3.7 release notes.
 - 2026-07-30 (0.3.6): Simplified **View Notifications** to one public Obsidian workspace path and one initial reminder scan. Exact 0.3.5 failed the new one-scan lifecycle gate with two scans, 2,000 synthetic item visits, an internal plus explicit reveal, duplicate view state, private tab selection, deferred loading, and an explicit second refresh; 0.3.6 passes with one scan, 1,000 visits, one reveal, focus, and layout save. The pinned comparison retained the same rendered fingerprint while halving 320-open synthetic visits from 12.8 million to 6.4 million. Full suite, final build, test-vault reload/UI verification, state preservation, and public artifact results are recorded in the 0.3.6 release notes.
 - 2026-07-20 (0.1.3): Removed Controller's global Notebook Navigator workspace/leaf patch and added a whole-TypeScript-source regression guard. The focused isolation test passed 1/1 and the scoped release suite passed 78/78; the required separate build left the test runtime current. Obsidian 1.12.7 was reloaded with `Reload app without saving`, and a live Navigator Daily Note open stayed in the native selected tab without Controller forcing another leaf. GCM 1.3.1 supplies the separate Daily Note Home selection-only guard. Final source/runtime artifacts matched byte-for-byte, and no production promotion occurred.

@@ -847,6 +847,17 @@ export class TPSControllerSettingTab extends PluginSettingTab {
         );
 
         new Setting(debugSection)
+            .setName('Reload Controller every 15 minutes')
+            .setDesc('Device-local and off by default. While this desktop is the Controller, Obsidian warns one minute before reloading so settings already synced to this device can take effect. Open text files and the workspace layout are saved first, but a reload can reset undo history, interrupt active automation, or discard other plugins\' unsaved in-memory state.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.isPeriodicControllerReloadEnabled())
+                .onChange((value) => {
+                    if (!this.plugin.setPeriodicControllerReloadEnabled(value)) {
+                        toggle.setValue(this.plugin.isPeriodicControllerReloadEnabled());
+                    }
+                }));
+
+        new Setting(debugSection)
             .setName('Enable Logging')
             .setDesc('Print detailed logs to console.')
             .addToggle(toggle => toggle

@@ -1,4 +1,4 @@
-﻿import { App, Plugin, Notice, Platform, TFile, moment, normalizePath } from "obsidian";
+﻿import { App, Plugin, Notice, Platform, TFile, TextFileView, moment, normalizePath } from "obsidian";
 import { DeviceRoleManager, DeviceRole } from "./device-role-manager";
 import { TPSControllerSettings, DEFAULT_CONTROLLER_SETTINGS } from "./types";
 import { AutoCreateService } from "./services/auto-create-service";
@@ -9,7 +9,7 @@ import { executeSyncRequestGeneration, joinSyncRequestFulfillment } from "./serv
 import { SyncConflictWatcher } from "./services/sync-conflict-watcher";
 import { TPSControllerSettingTab, type ControllerSettingsPage } from "./settings-tab";
 import * as logger from "./logger";
-import { getPluginById, isPluginEnabled } from "./core";
+import { executeCommandById, getPluginById, isPluginEnabled } from "./core";
 import { NotificationView, NOTIFICATION_VIEW_TYPE } from "./views/notification-view";
 import type { AlertState, OverdueItem } from "./types";
 import { OverdueService } from "./services/overdue-service";
@@ -36,6 +36,10 @@ import {
     type ReminderDeliveryMode,
 } from "./services/reminder-runtime-policy";
 import { resolveNotificationDeliveryProvider } from "./services/notification-delivery-provider";
+import {
+    ControllerPeriodicReloadPreference,
+    ControllerPeriodicReloadService,
+} from "./services/controller-periodic-reload-service";
 import {
     TISHOS_COMMAND_BRIDGE_PAIR_ROUTE,
     TISHOS_COMMAND_BRIDGE_REVOKE_ROUTE,
@@ -199,6 +203,8 @@ export default class TPSControllerPlugin extends Plugin {
     private readonly uncertainSettingsSaveKeys = new Set<string>();
     private retainedLegacyS3Credentials: RetainedLegacyS3Credentials = {};
     private settingsTab: TPSControllerSettingTab | null = null;
+    private controllerPeriodicReloadPreference: ControllerPeriodicReloadPreference;
+    private controllerPeriodicReloadService: ControllerPeriodicReloadService;
 
     async onload() {
         logger.flow("Lifecycle", "load", {
@@ -210,6 +216,14 @@ export default class TPSControllerPlugin extends Plugin {
         await this.loadSettings();
         this.statusBarEl = this.addStatusBarItem();
         this.deviceRoleManager = new DeviceRoleManager(this.app, (role) => this.onRoleChanged(role));
+        this.controllerPeriodicReloadPreference = new ControllerPeriodicReloadPreference(this.app.vault.getName());
+        this.controllerPeriodicReloadService = new ControllerPeriodicReloadService({
+            isEligible: () => this.isPeriodicControllerReloadEligible(),
+            preflight: () => this.prepareForPeriodicControllerReload(),
+            executeReload: () => this.executePeriodicControllerReload(),
+            showWarning: () => this.warnBeforePeriodicControllerReload(),
+            onEvent: (event, data) => this.logPeriodicControllerReloadEvent(event, data),
+        });
         this.updateStatusBar(this.deviceRoleManager.role);
 
         // Core services
@@ -498,6 +512,7 @@ export default class TPSControllerPlugin extends Plugin {
 
     async onunload() {
         logger.flow("Lifecycle", "unload");
+        this.controllerPeriodicReloadService?.dispose();
         if (this.tishOSNotificationRefreshTimeoutId !== null) {
             window.clearTimeout(this.tishOSNotificationRefreshTimeoutId);
             this.tishOSNotificationRefreshTimeoutId = null;
@@ -934,6 +949,7 @@ export default class TPSControllerPlugin extends Plugin {
     private enterControllerMode() {
         logger.flow("Automation", "enter-controller-mode", { isMobile: Platform.isMobile });
         if (Platform.isMobile) {
+            this.controllerPeriodicReloadService?.stop();
             this.stopAllAutomation();
             this.restartReminderLoop();
             new Notice("Controller automation is disabled on mobile. This device will behave as a passive user device.", 4000);
@@ -942,13 +958,113 @@ export default class TPSControllerPlugin extends Plugin {
         }
         new Notice("Controller mode activated. Running background automation.", 3000);
         this.startAllAutomation();
+        this.controllerPeriodicReloadService?.start();
     }
 
     private exitControllerMode() {
         logger.flow("Automation", "exit-controller-mode");
+        this.controllerPeriodicReloadService?.stop();
         this.stopAllAutomation();
         this.restartReminderLoop();
         new Notice("User mode activated.", 3000);
+    }
+
+    isPeriodicControllerReloadEnabled(): boolean {
+        return this.controllerPeriodicReloadPreference?.get() === true;
+    }
+
+    setPeriodicControllerReloadEnabled(enabled: boolean): boolean {
+        if (!enabled) this.controllerPeriodicReloadService.stop();
+        const persisted = this.controllerPeriodicReloadPreference.set(enabled);
+        if (!persisted) {
+            this.controllerPeriodicReloadService.stop();
+            logger.flowWarn("ControllerPeriodicReload", "preference:write-failed", { enabled });
+            new Notice("TPS Controller could not save this device-local preference. Periodic reload remains disabled for this session.");
+            return false;
+        }
+        logger.flow("ControllerPeriodicReload", "preference:changed", {
+            enabled,
+            role: this.deviceRoleManager?.role || "unknown",
+            isMobile: Platform.isMobile,
+        });
+        if (enabled && this.isPeriodicControllerReloadEligible()) {
+            this.controllerPeriodicReloadService.start();
+        } else {
+            this.controllerPeriodicReloadService.stop();
+        }
+        return true;
+    }
+
+    private isPeriodicControllerReloadEligible(): boolean {
+        return !Platform.isMobile
+            && this.deviceRoleManager?.isController?.() === true
+            && this.controllerPeriodicReloadPreference?.get() === true;
+    }
+
+    private async prepareForPeriodicControllerReload(): Promise<void> {
+        if (!this.isPeriodicControllerReloadEligible()) {
+            throw new Error("Periodic Controller reload is no longer eligible before save preflight.");
+        }
+
+        logger.flow("ControllerPeriodicReload", "preflight:start");
+        // Drain only writes that the user already requested. Saving the current
+        // in-memory object here could overwrite a newer settings payload that
+        // just synced to disk and is waiting for this reload to load it.
+        await this.settingsSaveQueue.waitForIdle();
+        await this.flushReminderStateNow();
+
+        const openTextViews: TextFileView[] = [];
+        this.app.workspace.iterateAllLeaves((leaf) => {
+            if (leaf.view instanceof TextFileView) openTextViews.push(leaf.view);
+        });
+        for (const view of openTextViews) {
+            await view.save();
+        }
+        await this.app.workspace.requestSaveLayout();
+
+        if (!this.isPeriodicControllerReloadEligible()) {
+            throw new Error("Periodic Controller reload is no longer eligible after save preflight.");
+        }
+        logger.flow("ControllerPeriodicReload", "preflight:done", {
+            savedTextViews: openTextViews.length,
+        });
+    }
+
+    private async executePeriodicControllerReload(): Promise<boolean> {
+        // A settings control or background policy can request another save while
+        // text views/layout are being persisted. Drain that late write here, then
+        // keep the last eligibility check and synchronous command invocation in
+        // one turn so a queued save is never knowingly abandoned by the reload.
+        await this.settingsSaveQueue.waitForIdle();
+        if (!this.isPeriodicControllerReloadEligible()) {
+            logger.flowWarn("ControllerPeriodicReload", "command:blocked-ineligible");
+            return false;
+        }
+        // Obsidian has no public whole-app reload API. Keep this one exact
+        // command behind the shared typed, fail-closed compatibility adapter.
+        const executed = executeCommandById(this.app, "app:reload");
+        if (executed) {
+            logger.flow("ControllerPeriodicReload", "command:accepted");
+        } else {
+            logger.flowWarn("ControllerPeriodicReload", "command:unavailable");
+        }
+        return executed;
+    }
+
+    private warnBeforePeriodicControllerReload(): void {
+        new Notice(
+            "TPS Controller will reload Obsidian in one minute so settings already synced to this device can take effect. Save any non-file plugin work now.",
+            15_000,
+        );
+        logger.flow("ControllerPeriodicReload", "warning:shown", { minutesUntilReload: 1 });
+    }
+
+    private logPeriodicControllerReloadEvent(event: string, data: Record<string, unknown> = {}): void {
+        if (event.includes("failed") || event.includes("blocked") || event.includes("unavailable")) {
+            logger.flowWarn("ControllerPeriodicReload", event, data);
+            return;
+        }
+        logger.flow("ControllerPeriodicReload", event, data);
     }
 
     private updateStatusBar(role: DeviceRole) {

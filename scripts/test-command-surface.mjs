@@ -61,6 +61,14 @@ const settingsStylesSource = await readFile(
   fileURLToPath(new URL("../styles-ui.css", import.meta.url)),
   "utf8",
 );
+const coreTypeGuardsSource = await readFile(
+  fileURLToPath(new URL("../src/core/type-guards.ts", import.meta.url)),
+  "utf8",
+);
+const controllerPeriodicReloadSource = await readFile(
+  fileURLToPath(new URL("../src/services/controller-periodic-reload-service.ts", import.meta.url)),
+  "utf8",
+);
 const settingsPersistenceBundle = await build({
   entryPoints: [fileURLToPath(new URL("../src/services/settings-persistence.ts", import.meta.url))],
   bundle: true,
@@ -484,12 +492,82 @@ test("controller logging keeps command and mutation flows traceable", () => {
   assert.match(mainSource, /two-stage-archive:manual-result/);
 });
 
-test("controller automation never forces a periodic Obsidian reload", () => {
-  assert.match(mainSource, /private enterControllerMode\(\)[\s\S]*?this\.startAllAutomation\(\)/);
-  assert.doesNotMatch(mainSource, /controllerReloadInterval/);
-  assert.doesNotMatch(mainSource, /reloadControllerAppWithoutSaving/);
-  assert.doesNotMatch(mainSource, /executeCommandById\(["']app:reload["']\)/);
-  assert.doesNotMatch(mainSource, /window\.location\.reload\(\)/);
+test("periodic Controller reload stays opt-in, device-local, role-gated, and save-first", () => {
+  const reloadSettingStart = settingsTabSource.indexOf(".setName('Reload Controller every 15 minutes')");
+  const reloadSettingSource = settingsTabSource.slice(
+    reloadSettingStart,
+    settingsTabSource.indexOf(".setName('Enable Logging')", reloadSettingStart),
+  );
+  const preflightStart = mainSource.indexOf("private async prepareForPeriodicControllerReload()");
+  const preflightSource = mainSource.slice(
+    preflightStart,
+    mainSource.indexOf("private async executePeriodicControllerReload()", preflightStart),
+  );
+  const commandStart = mainSource.indexOf("private async executePeriodicControllerReload()");
+  const commandSource = mainSource.slice(
+    commandStart,
+    mainSource.indexOf("private warnBeforePeriodicControllerReload()", commandStart),
+  );
+  const unloadSource = mainSource.slice(
+    mainSource.indexOf("async onunload()"),
+    mainSource.indexOf("// Settings"),
+  );
+  const preferenceSetterStart = mainSource.indexOf("setPeriodicControllerReloadEnabled(enabled: boolean)");
+  const preferenceSetterSource = mainSource.slice(
+    preferenceSetterStart,
+    mainSource.indexOf("private isPeriodicControllerReloadEligible()", preferenceSetterStart),
+  );
+
+  assert.ok(reloadSettingStart >= 0);
+  assert.match(reloadSettingSource, /Device-local and off by default/);
+  assert.match(reloadSettingSource, /settings already synced to this device/);
+  assert.match(reloadSettingSource, /interrupt active automation/);
+  assert.match(reloadSettingSource, /isPeriodicControllerReloadEnabled\(\)/);
+  assert.match(reloadSettingSource, /setPeriodicControllerReloadEnabled\(value\)/);
+  assert.match(reloadSettingSource, /toggle\.setValue\(this\.plugin\.isPeriodicControllerReloadEnabled\(\)\)/);
+  assert.doesNotMatch(reloadSettingSource, /plugin\.settings|saveSettings\(/);
+
+  assert.match(mainSource, /new ControllerPeriodicReloadPreference\(this\.app\.vault\.getName\(\)\)/);
+  assert.match(mainSource, /new ControllerPeriodicReloadService\(\{[\s\S]*?isEligible: \(\) => this\.isPeriodicControllerReloadEligible\(\)/);
+  assert.match(controllerPeriodicReloadSource, /CONTROLLER_PERIODIC_RELOAD_INTERVAL_MS = 15 \* 60 \* 1000/);
+  assert.match(controllerPeriodicReloadSource, /STORAGE_KEY_PREFIX = "tps-controller-periodic-reload-"/);
+  assert.match(controllerPeriodicReloadSource, /getItem\(this\.storageKey\) === "enabled"/);
+  assert.match(controllerPeriodicReloadSource, /get\(\): boolean \{[\s\S]*?catch \{[\s\S]*?return false/);
+  assert.match(preferenceSetterSource, /const persisted = this\.controllerPeriodicReloadPreference\.set\(enabled\)/);
+  assert.match(preferenceSetterSource, /if \(!persisted\) \{[\s\S]*?controllerPeriodicReloadService\.stop\(\)[\s\S]*?remains disabled for this session/);
+  assert.match(mainSource, /private isPeriodicControllerReloadEligible\(\): boolean \{[\s\S]*?!Platform\.isMobile[\s\S]*?isController[\s\S]*?controllerPeriodicReloadPreference\?\.get\(\) === true/);
+  assert.match(mainSource, /private enterControllerMode\(\)[\s\S]*?controllerPeriodicReloadService\?\.start\(\)/);
+  assert.match(mainSource, /private exitControllerMode\(\)[\s\S]*?controllerPeriodicReloadService\?\.stop\(\)/);
+  assert.match(unloadSource, /controllerPeriodicReloadService\?\.dispose\(\)/);
+
+  assert.ok(preflightStart >= 0);
+  assert.match(preflightSource, /settingsSaveQueue\.waitForIdle\(\)/);
+  assert.match(preflightSource, /flushReminderStateNow\(\)/);
+  assert.match(preflightSource, /iterateAllLeaves/);
+  assert.match(preflightSource, /leaf\.view instanceof TextFileView/);
+  assert.match(preflightSource, /await view\.save\(\)/);
+  assert.match(preflightSource, /await this\.app\.workspace\.requestSaveLayout\(\)/);
+  assert.ok((preflightSource.match(/isPeriodicControllerReloadEligible\(\)/g) || []).length >= 2);
+  assert.doesNotMatch(preflightSource, /saveSettings\(/);
+
+  assert.ok(commandStart >= 0);
+  const finalDrainIndex = commandSource.indexOf("await this.settingsSaveQueue.waitForIdle()");
+  const commandInvocationIndex = commandSource.indexOf('executeCommandById(this.app, "app:reload")');
+  assert.ok(finalDrainIndex >= 0 && commandInvocationIndex > finalDrainIndex);
+  assert.doesNotMatch(
+    commandSource.slice(finalDrainIndex + "await this.settingsSaveQueue.waitForIdle()".length, commandInvocationIndex),
+    /\bawait\b/,
+    "no asynchronous gap may reopen the settings-save race before reload dispatch",
+  );
+  assert.match(commandSource, /waitForIdle\(\)[\s\S]*?isPeriodicControllerReloadEligible\(\)[\s\S]*?executeCommandById/);
+  assert.match(commandSource, /executeCommandById\(this\.app, "app:reload"\)/);
+  assert.match(commandSource, /return false/);
+  assert.match(coreTypeGuardsSource, /executeCommandById\?\.\(commandId\) \?\? false/);
+  assert.match(coreTypeGuardsSource, /export function executeCommandById[\s\S]*?catch \{[\s\S]*?return false/);
+  assert.equal((mainSource.match(/["']app:reload["']/g) || []).length, 1);
+  assert.doesNotMatch(mainSource, /window\.location\.reload|location\.reload/);
+  assert.doesNotMatch(controllerPeriodicReloadSource, /window\.location\.reload|location\.reload/);
+  assert.match(mainSource, /will reload Obsidian in one minute/);
 });
 
 test("controller logging records settings causes and concise runtime outcomes", () => {
