@@ -90,6 +90,7 @@ function createHarness({
   sharedStorage = null,
   vaultName = VAULT,
   notificationScheduleProvider,
+  completeNotification = async () => true,
 } = {}) {
   const files = new Map();
   const directories = new Set();
@@ -98,6 +99,7 @@ function createHarness({
   const writes = [];
   const removals = [];
   const executions = [];
+  const completions = [];
   const openedURLs = [];
   const notices = [];
   const statOverrides = new Map();
@@ -244,6 +246,10 @@ function createHarness({
       confirmPairing,
       confirmLocalRevoke,
       notificationScheduleProvider,
+      completeNotification: async (value) => {
+        completions.push(value);
+        return completeNotification(value);
+      },
     },
   );
   return {
@@ -256,6 +262,7 @@ function createHarness({
     writes,
     removals,
     executions,
+    completions,
     openedURLs,
     notices,
     fireLayout() { assert.ok(layoutCallback); layoutCallback(); },
@@ -367,6 +374,38 @@ async function signedRevokeParams(client = CLIENT, requestID = REQUEST, issuedAt
   };
 }
 
+async function signedNotificationActionParams(
+  itemID,
+  client = CLIENT,
+  requestID = REQUEST,
+  issuedAt = String(NOW),
+  secret = SECRET_BYTES,
+) {
+  const unsigned = {
+    vaultName: VAULT,
+    clientID: client,
+    itemID,
+    action: "complete",
+    requestID,
+    issuedAt,
+  };
+  return {
+    action: serviceModule.TISHOS_NOTIFICATION_ACTION_ROUTE,
+    operation: "complete",
+    vault: VAULT,
+    v: "1",
+    "expected-vault": VAULT,
+    client,
+    item: itemID,
+    request: requestID,
+    issuedAt,
+    mac: await contract.hmacSHA256Base64URL(
+      secret,
+      contract.canonicalNotificationActionRequest(unsigned),
+    ),
+  };
+}
+
 async function pairAndPublish(harness, client = CLIENT, secret = SECRET) {
   const result = await harness.service.handlePairRoute(pairParams(client, secret));
   assert.equal(result.accepted, true);
@@ -413,6 +452,20 @@ test("cross-language canonical fixture matches every published digest and MAC", 
       issuedAt: String(NOW),
     })),
     "jTgzywTPnOToIbxUlSNcjRb7Z7v5pZfNZHwVFN9ryK8",
+  );
+  assert.equal(
+    await contract.hmacSHA256Base64URL(
+      SECRET_BYTES,
+      contract.canonicalNotificationActionRequest({
+        vaultName: VAULT,
+        clientID: CLIENT,
+        itemID: "A".repeat(43),
+        action: "complete",
+        requestID: REQUEST,
+        issuedAt: String(NOW),
+      }),
+    ),
+    "KWqZQZS3M6b4xhjXmbVImadmnMLUHOJ1DqfKOGhdgQs",
   );
 });
 
@@ -561,6 +614,83 @@ test("paired clients receive a signed Controller-rule notification schedule that
   const modalVisible = JSON.parse(harness.files.get(path));
   assert.equal(modalVisible.items.length, 1, 'only the bounded late-delivery window is published');
   assert.equal(modalVisible.items[0].fireAt, new Date(NOW - 4 * 60 * 1000).toISOString());
+});
+
+test("signed notification completion re-resolves one current Controller item and consumes replay", async (t) => {
+  const completionTarget = { targetKind: "task", taskLine: 7 };
+  const schedule = [{
+    title: "Write proposal",
+    body: "Starts in 15 minutes",
+    fireAt: NOW + 60 * 60 * 1000,
+    sourcePath: "Projects/Alpha.md",
+    completionTarget,
+  }];
+  const harness = createHarness({
+    notificationScheduleProvider: async () => schedule,
+  });
+  t.after(() => harness.service.stop());
+  await harness.service.handlePairRoute(pairParams());
+  const item = (await harness.service.buildNativeNotificationItemsForTesting?.(schedule))?.[0]
+    ?? {
+      id: await contract.sha256Base64URL(notificationContract.canonicalNotificationItem({
+        id: "",
+        title: schedule[0].title,
+        body: schedule[0].body,
+        fireAt: new Date(schedule[0].fireAt).toISOString(),
+        sourcePath: schedule[0].sourcePath,
+      })),
+    };
+  const params = await signedNotificationActionParams(item.id);
+  const result = await harness.service.handleNotificationActionRoute(params);
+  assert.equal(result.accepted, true);
+  assert.equal(result.executed, true);
+  assert.equal(harness.completions.length, 1);
+  assert.equal(harness.completions[0].completionTarget, completionTarget);
+  assert.equal((await harness.service.handleNotificationActionRoute(params)).reason, "replay");
+  assert.equal(harness.completions.length, 1);
+});
+
+test("notification completion fails closed for stale, ambiguous, unsigned, or external items", async (t) => {
+  const current = {
+    title: "Duplicate",
+    body: "Same occurrence",
+    fireAt: NOW + 60_000,
+    sourcePath: "Projects/Duplicate.md",
+    completionTarget: { targetKind: "task", taskLine: 1 },
+  };
+  let schedule = [current];
+  const harness = createHarness({ notificationScheduleProvider: async () => schedule });
+  t.after(() => harness.service.stop());
+  await harness.service.handlePairRoute(pairParams());
+  const unsignedItem = {
+    id: "",
+    title: current.title,
+    body: current.body,
+    fireAt: new Date(current.fireAt).toISOString(),
+    sourcePath: current.sourcePath,
+  };
+  const itemID = await contract.sha256Base64URL(
+    notificationContract.canonicalNotificationItem(unsignedItem),
+  );
+  const badMac = await signedNotificationActionParams(itemID);
+  badMac.mac = `${badMac.mac.slice(0, -1)}${badMac.mac.endsWith("A") ? "B" : "A"}`;
+  assert.equal((await harness.service.handleNotificationActionRoute(badMac)).reason, "bad-mac");
+
+  schedule = [];
+  assert.equal((await harness.service.handleNotificationActionRoute(
+    await signedNotificationActionParams(itemID, CLIENT, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
+  )).reason, "item-unavailable");
+
+  schedule = [current, { ...current, completionTarget: { targetKind: "task", taskLine: 2 } }];
+  assert.equal((await harness.service.handleNotificationActionRoute(
+    await signedNotificationActionParams(itemID, CLIENT, "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"),
+  )).reason, "item-ambiguous");
+
+  schedule = [{ ...current, completionTarget: undefined }];
+  assert.equal((await harness.service.handleNotificationActionRoute(
+    await signedNotificationActionParams(itemID, CLIENT, "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa"),
+  )).reason, "item-unavailable");
+  assert.equal(harness.completions.length, 0);
 });
 
 test("pair route rejects cancel, wrong stripped-native vault, uppercase UUID, and malformed secret without storage", async () => {

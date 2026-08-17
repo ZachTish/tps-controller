@@ -1,5 +1,13 @@
 # TPS Controller
 
+## 0.9.0 authenticated native-notification completion
+
+- TishOS note/task alerts can send one signed, replay-protected **Complete** request through the existing per-device Controller pairing. The route is exact-vault and accepts only the opaque notification item ID, `complete`, a canonical request UUID/time, and an HMAC; it has no free-form path, status, body, or arguments.
+- Controller rebuilds the current Reminder Rules schedule, requires exactly one matching completion-capable local target, and then uses the existing Overdue mutation path to set note status or the task checkbox/status. External events, removed/stale items, duplicate ambiguous items, unavailable providers, wrong vaults, revoked clients, invalid MACs, and replays fail closed.
+- A successful mutation refreshes the notification view and immediately republishes paired TishOS schedules. The route logs only bounded action/result reasons and never notification text, paths, secrets, or full identifiers.
+- This is a foreground same-device handoff. A notification schedule relayed from another device does not grant remote mutation authority; the Obsidian instance receiving the action must have current source content and Controller rules.
+- Validation passed the 99-check focused bridge/reminder suite with three preserved comparison skips, the complete declared suite, and the required separate production-mode build. The final build reported `[runtime-deploy] target=test ... unchanged`; Obsidian 1.13.7 reloaded only **Obsidian Plugin Test Vault** and rendered the 0.9.0 Controller settings surface with the notification view still healthy. Source and test-runtime artifacts are byte-identical (`main.js` `f2621a0547b85afa2c0192701a921655e0a392b0dd2b2bbcac64cd1404d4d128`, `manifest.json` `7836afbb89367f6206f33e22c76245df8d423fff254f047310b97c5284cc1d0e`, `styles.css` `2da24f2a872483deb0ccc2944fb3b05c1b8a4e6b9f90b3290a3fabb86ec06999`). Production was not accessed or promoted.
+
 ## 0.8.2 repeating native-notification continuity
 
 - Repeat-until-complete rules now project a bounded chronological series of future occurrences into the signed TishOS schedule instead of publishing only the next repeat. Apple can therefore keep delivering a five-minute reminder while Obsidian is suspended; the next Controller publication still removes later occurrences after a configured stop condition, terminal status, checkbox completion, snooze, disable, or provider change.

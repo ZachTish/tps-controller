@@ -5,7 +5,7 @@
  */
 import { App, TFile, moment, normalizePath } from "obsidian";
 import * as logger from "../logger";
-import type { ExternalCalendarEvent, PropertyReminder, TPSControllerSettings } from "../types";
+import type { ExternalCalendarEvent, OverdueItem, PropertyReminder, TPSControllerSettings } from "../types";
 import { normalizeCalendarUrl, parseFrontmatterDate } from "../utils";
 import {
     parseDate, parseTimeRange, parseDuration, getEffectiveEndTime,
@@ -48,6 +48,7 @@ export interface ScheduledNativeNotification {
     sourcePath?: string;
     reminderId: string;
     sourceKey: string;
+    completionTarget?: OverdueItem;
 }
 
 interface ReminderFileLike {
@@ -417,6 +418,24 @@ export class ReminderEngine {
                     sourcePath: fileRef instanceof TFile ? fileRef.path : undefined,
                     reminderId: reminder.id,
                     sourceKey: target.sourceKey,
+                    ...(fileRef instanceof TFile && target.sourceType === "file" ? {
+                        completionTarget: {
+                            file: fileRef,
+                            reminder,
+                            propertyTime: propTime,
+                            diff: "",
+                            id: `${target.sourceKey}::${reminder.id}`,
+                            sourceKey: target.sourceKey,
+                            sourceType: "file" as const,
+                            targetKind: target.targetKind,
+                            taskTitle: target.taskTitle,
+                            taskRawLine: target.taskRawLine,
+                            taskLine: target.taskLine,
+                            taskPropertyKeys: target.taskPropertyKeys,
+                            reminderTags: target.reminderTags,
+                            reminderProperty: reminder.property,
+                        },
+                    } : {}),
                 });
                 projectedOccurrenceCount += 1;
                 if (

@@ -44,6 +44,7 @@ import {
     TISHOS_COMMAND_BRIDGE_PAIR_ROUTE,
     TISHOS_COMMAND_BRIDGE_REVOKE_ROUTE,
     TISHOS_COMMAND_BRIDGE_RUN_ROUTE,
+    TISHOS_NOTIFICATION_ACTION_ROUTE,
     TishOSCommandBridgeService,
     type TishOSCommandBridgeRefreshResult,
     type TishOSCommandBridgeStatus,
@@ -250,6 +251,18 @@ export default class TPSControllerPlugin extends Plugin {
             notificationScheduleProvider: () => this.settings.notificationDeliveryProvider === "tishos"
                 ? this.reminderEngine.projectScheduledNotifications(this.settings)
                 : Promise.resolve([]),
+            completeNotification: async (value) => {
+                const target = value.completionTarget;
+                if (!target) return false;
+                const completed = await this.overdueService.completeItemFromNativeNotification(target);
+                if (completed) {
+                    this.refreshNotificationViews();
+                    void this.tishOSCommandBridgeService.refreshCatalogs(
+                        "notification-complete",
+                    );
+                }
+                return completed;
+            },
         });
 
         // Commands
@@ -394,6 +407,9 @@ export default class TPSControllerPlugin extends Plugin {
         });
         this.registerObsidianProtocolHandler(TISHOS_COMMAND_BRIDGE_REVOKE_ROUTE, (params) => {
             void this.tishOSCommandBridgeService.handleRevokeRoute(params);
+        });
+        this.registerObsidianProtocolHandler(TISHOS_NOTIFICATION_ACTION_ROUTE, (params) => {
+            void this.tishOSCommandBridgeService.handleNotificationActionRoute(params);
         });
         this.tishOSCommandBridgeService.start();
         this.startS3agleAttachmentAutomation();
@@ -1973,7 +1989,7 @@ export default class TPSControllerPlugin extends Plugin {
     async openOverdueItem(item: OverdueItem): Promise<void> { return this.overdueService.openItem(item); }
     async markFileComplete(file: TFile): Promise<void> { return this.overdueService.markFileComplete(file); }
     async markFileWontDo(file: TFile): Promise<void> { return this.overdueService.markFileWontDo(file); }
-    async markOverdueItemComplete(item: OverdueItem): Promise<void> { return this.overdueService.markItemComplete(item); }
+    async markOverdueItemComplete(item: OverdueItem): Promise<void> { await this.overdueService.markItemComplete(item); }
     async markOverdueItemWontDo(item: OverdueItem): Promise<void> { return this.overdueService.markItemWontDo(item); }
     async setOverdueItemStatus(item: OverdueItem, status: string | null): Promise<void> { return this.overdueService.setItemStatus(item, status); }
     async resolveOverdueTaskReminder(item: OverdueItem): Promise<boolean> { return this.overdueService.resolveTaskReminder(item); }

@@ -13,6 +13,7 @@ const ENTRY_PREFIX = "tishos-command-entry-v1\n";
 const CATALOG_PREFIX = "tishos-command-catalog-v1\n";
 const REQUEST_PREFIX = "tishos-command-request-v1\n";
 const REVOKE_PREFIX = "tishos-command-revoke-v1\n";
+const NOTIFICATION_ACTION_PREFIX = "tishos-notification-action-v1\n";
 const FORBIDDEN_DISPLAY_CHARACTER = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const BASE64URL_SHA256 = /^[A-Za-z0-9_-]{43}$/;
@@ -54,6 +55,16 @@ export interface TishOSCommandRunRequest {
 export interface TishOSCommandRevokeRequest {
     vaultName: string;
     clientID: string;
+    requestID: string;
+    issuedAt: string;
+    mac: string;
+}
+
+export interface TishOSNotificationActionRequest {
+    vaultName: string;
+    clientID: string;
+    itemID: string;
+    action: "complete";
     requestID: string;
     issuedAt: string;
     mac: string;
@@ -258,6 +269,19 @@ export function canonicalCommandRevokeRequest(request: Omit<TishOSCommandRevokeR
     let value = REVOKE_PREFIX;
     value += field("vault", request.vaultName);
     value += field("client", request.clientID);
+    value += field("request", request.requestID);
+    value += field("issued", request.issuedAt);
+    return utf8Bytes(value);
+}
+
+export function canonicalNotificationActionRequest(
+    request: Omit<TishOSNotificationActionRequest, "mac">,
+): Uint8Array {
+    let value = NOTIFICATION_ACTION_PREFIX;
+    value += field("vault", request.vaultName);
+    value += field("client", request.clientID);
+    value += field("item", request.itemID);
+    value += field("action", request.action);
     value += field("request", request.requestID);
     value += field("issued", request.issuedAt);
     return utf8Bytes(value);

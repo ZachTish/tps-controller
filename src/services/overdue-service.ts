@@ -591,6 +591,14 @@ export class OverdueService {
         await this.setItemStatus(item, "complete");
     }
 
+    async completeItemFromNativeNotification(item: OverdueItem): Promise<boolean> {
+        if (item.targetKind === "task" && typeof item.taskLine === "number") {
+            return this.updateTaskLineProperties(item, this.buildTaskStatusPatch("complete"), "notification-complete");
+        }
+        await this.setItemStatus(item, "complete");
+        return true;
+    }
+
     async markItemWontDo(item: OverdueItem): Promise<void> {
         await this.setItemStatus(item, "wont-do");
     }

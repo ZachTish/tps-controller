@@ -1,5 +1,6 @@
 import { App, Modal, Notice, type PluginManifest } from "obsidian";
 import { executeCommandById, listCommands } from "../core/type-guards";
+import type { OverdueItem } from "../types";
 import * as logger from "../logger";
 import {
     TISHOS_COMMAND_BRIDGE_CATALOG_ROOT,
@@ -9,6 +10,7 @@ import {
     canonicalCommandCatalog,
     canonicalCommandRevokeRequest,
     canonicalCommandRunRequest,
+    canonicalNotificationActionRequest,
     commandEntryDigest,
     decodeBase64URL,
     hmacSHA256Base64URL,
@@ -30,6 +32,7 @@ import {
     type TishOSCommandCatalogEntry,
     type TishOSCommandRevokeRequest,
     type TishOSCommandRunRequest,
+    type TishOSNotificationActionRequest,
 } from "./tishos-command-bridge-contract";
 import {
     TISHOS_NATIVE_NOTIFICATION_MAX_FILE_BYTES,
@@ -48,6 +51,8 @@ import {
 export const TISHOS_COMMAND_BRIDGE_PAIR_ROUTE = "tps-controller-command-bridge-pair";
 export const TISHOS_COMMAND_BRIDGE_RUN_ROUTE = "tps-controller-run-command";
 export const TISHOS_COMMAND_BRIDGE_REVOKE_ROUTE = "tps-controller-command-bridge-revoke";
+export const TISHOS_NOTIFICATION_ACTION_ROUTE =
+    "tps-controller-native-notification-action";
 
 const POLL_INTERVAL_MS = 60_000;
 const MAX_PAIRED_CLIENTS = 32;
@@ -149,6 +154,7 @@ interface TishOSCommandBridgeServiceOptions {
     confirmPairing?: (request: PairingRequest) => Promise<boolean>;
     confirmLocalRevoke?: (pairing: StoredPairing, vaultName: string) => Promise<boolean>;
     notificationScheduleProvider?: () => Promise<readonly NativeNotificationProjectionValue[]>;
+    completeNotification?: (value: NativeNotificationProjectionValue) => Promise<boolean>;
 }
 
 interface NativeNotificationProjectionValue {
@@ -156,6 +162,7 @@ interface NativeNotificationProjectionValue {
     body: string;
     fireAt: number;
     sourcePath?: string;
+    completionTarget?: OverdueItem;
 }
 
 interface PairingRequest {
@@ -364,6 +371,8 @@ export class TishOSCommandBridgeService {
     private stopPromise: Promise<void> | null = null;
     private readonly notificationScheduleProvider:
         (() => Promise<readonly NativeNotificationProjectionValue[]>) | null;
+    private readonly completeNotification:
+        ((value: NativeNotificationProjectionValue) => Promise<boolean>) | null;
 
     constructor(
         private readonly app: App,
@@ -372,6 +381,7 @@ export class TishOSCommandBridgeService {
     ) {
         this.now = options.now || (() => Date.now());
         this.notificationScheduleProvider = options.notificationScheduleProvider || null;
+        this.completeNotification = options.completeNotification || null;
         this.confirmPairing = options.confirmPairing || (async (request) => {
             // Obsidian dismisses an open Settings modal while handing off an
             // external protocol URL. Opening our confirmation in that same
@@ -475,6 +485,20 @@ export class TishOSCommandBridgeService {
         return this.enqueueCommandRoute(
             () => this.processRunRoute(params, lifecycle),
             () => this.reject("run", "service-stopped"),
+            lifecycle,
+        );
+    }
+
+    handleNotificationActionRoute(
+        params: ProtocolParams,
+    ): Promise<TishOSCommandBridgeRouteResult> {
+        const lifecycle = this.lifecycleGeneration;
+        if (!this.isLifecycleActive(lifecycle)) {
+            return Promise.resolve(this.reject("notification-action", "service-stopped"));
+        }
+        return this.enqueueCommandRoute(
+            () => this.processNotificationActionRoute(params, lifecycle),
+            () => this.reject("notification-action", "service-stopped"),
             lifecycle,
         );
     }
@@ -766,24 +790,8 @@ export class TishOSCommandBridgeService {
         const maximumFireAt = now + 60 * 24 * 60 * 60 * 1000;
         const unique = new Map<string, TishOSNativeNotificationItem>();
         for (const value of values) {
-            if (
-                !Number.isSafeInteger(value.fireAt)
-                || value.fireAt < now - TISHOS_NATIVE_NOTIFICATION_MAX_LATE_MS
-                || value.fireAt > maximumFireAt
-            ) continue;
-            const title = this.boundedNotificationText(value.title, 256, "Obsidian reminder");
-            const body = this.boundedNotificationText(value.body, 1_024, "", true);
-            const sourcePath = isValidNotificationSourcePath(value.sourcePath) ? value.sourcePath : undefined;
-            if (!isValidCommandName(title) || !isValidNotificationBody(body)) continue;
-            const unsignedItem: TishOSNativeNotificationItem = {
-                id: "",
-                title,
-                body,
-                fireAt: new Date(value.fireAt).toISOString(),
-                ...(sourcePath ? { sourcePath } : {}),
-            };
-            const id = await sha256Base64URL(canonicalNotificationItem(unsignedItem));
-            if (!unique.has(id)) unique.set(id, { ...unsignedItem, id });
+            const item = await this.buildNativeNotificationItem(value, now, maximumFireAt);
+            if (item && !unique.has(item.id)) unique.set(item.id, item);
         }
         const items = [...unique.values()].sort((left, right) =>
             left.fireAt.localeCompare(right.fireAt) || left.id.localeCompare(right.id),
@@ -792,6 +800,31 @@ export class TishOSCommandBridgeService {
             throw new Error("Native notification projection failed validation.");
         }
         return items;
+    }
+
+    private async buildNativeNotificationItem(
+        value: NativeNotificationProjectionValue,
+        now = this.now(),
+        maximumFireAt = now + 60 * 24 * 60 * 60 * 1000,
+    ): Promise<TishOSNativeNotificationItem | null> {
+        if (
+            !Number.isSafeInteger(value.fireAt)
+            || value.fireAt < now - TISHOS_NATIVE_NOTIFICATION_MAX_LATE_MS
+            || value.fireAt > maximumFireAt
+        ) return null;
+        const title = this.boundedNotificationText(value.title, 256, "Obsidian reminder");
+        const body = this.boundedNotificationText(value.body, 1_024, "", true);
+        const sourcePath = isValidNotificationSourcePath(value.sourcePath) ? value.sourcePath : undefined;
+        if (!isValidCommandName(title) || !isValidNotificationBody(body)) return null;
+        const unsignedItem: TishOSNativeNotificationItem = {
+            id: "",
+            title,
+            body,
+            fireAt: new Date(value.fireAt).toISOString(),
+            ...(sourcePath ? { sourcePath } : {}),
+        };
+        const id = await sha256Base64URL(canonicalNotificationItem(unsignedItem));
+        return { ...unsignedItem, id };
     }
 
     private boundedNotificationText(
@@ -1087,6 +1120,97 @@ export class TishOSCommandBridgeService {
         }
     }
 
+    private async processNotificationActionRoute(
+        params: ProtocolParams,
+        lifecycle: number,
+    ): Promise<TishOSCommandBridgeRouteResult> {
+        const validation = this.validateNotificationActionRoute(params);
+        if (!validation.request) return this.reject("notification-action", validation.reason);
+        const request = validation.request;
+        if (!this.isLifecycleActive(lifecycle)) {
+            return this.reject("notification-action", "service-stopped", request.clientID);
+        }
+        try {
+            if (this.loadRevocationState().entries.some((entry) => entry.clientID === request.clientID)) {
+                return this.reject("notification-action", "revocation-pending", request.clientID);
+            }
+            const state = this.loadPairingState();
+            const pairing = state.clients.find((candidate) => candidate.clientID === request.clientID);
+            if (!pairing) return this.reject("notification-action", "unknown-client", request.clientID);
+            const secret = this.readPairingSecret(pairing);
+            if (!secret) return this.reject("notification-action", "secret-unavailable", request.clientID);
+            if (!await verifyHmacSHA256Base64URL(
+                secret,
+                canonicalNotificationActionRequest({
+                    vaultName: request.vaultName,
+                    clientID: request.clientID,
+                    itemID: request.itemID,
+                    action: request.action,
+                    requestID: request.requestID,
+                    issuedAt: request.issuedAt,
+                }),
+                request.mac,
+            )) return this.reject("notification-action", "bad-mac", request.clientID);
+            if (!this.isLifecycleActive(lifecycle)) {
+                return this.reject("notification-action", "service-stopped", request.clientID);
+            }
+
+            const replayState = this.loadReplayState();
+            if (replayState.entries.some((entry) =>
+                entry.clientID === request.clientID && entry.requestID === request.requestID
+            )) return this.reject("notification-action", "replay", request.clientID);
+            if (!this.notificationScheduleProvider || !this.completeNotification) {
+                return this.reject("notification-action", "provider-unavailable", request.clientID);
+            }
+            const values = await this.notificationScheduleProvider();
+            const matches: NativeNotificationProjectionValue[] = [];
+            for (const value of values) {
+                const item = await this.buildNativeNotificationItem(value);
+                if (item?.id === request.itemID && value.completionTarget) matches.push(value);
+            }
+            if (!this.isLifecycleActive(lifecycle)) {
+                return this.reject("notification-action", "service-stopped", request.clientID);
+            }
+            if (matches.length !== 1) {
+                return this.reject(
+                    "notification-action",
+                    matches.length === 0 ? "item-unavailable" : "item-ambiguous",
+                    request.clientID,
+                );
+            }
+            if (!this.consumeReplayRequest(replayState, request.clientID, request.requestID)) {
+                return this.reject("notification-action", "replay-capacity", request.clientID);
+            }
+            const executed = await this.completeNotification(matches[0]);
+            logger.flow(
+                "TishOSCommandBridge",
+                executed ? "notification-action:completed" : "notification-action:execution-failed",
+            );
+            if (this.isLifecycleActive(lifecycle)) {
+                new Notice(executed
+                    ? "Completed from TishOS."
+                    : "The reminder changed before it could be completed.");
+            }
+            return {
+                accepted: true,
+                reason: executed ? "completed" : "execution-failed",
+                clientID: request.clientID,
+                executed,
+            };
+        } catch (error) {
+            logger.flowWarn("TishOSCommandBridge", "notification-action:failed", {
+                errorType: this.errorType(error),
+            });
+            if (this.isLifecycleActive(lifecycle)) new Notice("TishOS completion request was rejected.");
+            return {
+                accepted: false,
+                reason: "runtime-failure",
+                clientID: request.clientID,
+                executed: false,
+            };
+        }
+    }
+
     private async processRevokeRoute(params: ProtocolParams, lifecycle: number): Promise<TishOSCommandBridgeRouteResult> {
         const validation = this.validateRevokeRoute(params);
         if (!validation.request) return this.reject("revoke", validation.reason);
@@ -1174,6 +1298,47 @@ export class TishOSCommandBridgeService {
                 clientID,
                 commandID: params.command,
                 entryDigest: params.entry,
+                requestID,
+                issuedAt: params.issuedAt,
+                mac: params.mac,
+            },
+            reason: "valid",
+        };
+    }
+
+    private validateNotificationActionRoute(
+        params: ProtocolParams,
+    ): { request?: TishOSNotificationActionRequest; reason: string } {
+        const allowed = new Set([
+            "action", "operation", "vault", "v", "expected-vault", "client", "item",
+            "request", "issuedAt", "mac",
+        ]);
+        const vaultName = this.app.vault.getName();
+        if (!hasOnlyKeys(params, allowed)) return { reason: "unknown-or-malformed-parameter" };
+        if (
+            params.action !== TISHOS_NOTIFICATION_ACTION_ROUTE
+            || params.operation !== "complete"
+            || params.v !== "1"
+        ) return { reason: "route-or-version" };
+        if (params["expected-vault"] !== vaultName || (params.vault !== undefined && params.vault !== vaultName)) {
+            return { reason: "wrong-vault" };
+        }
+        if (!isValidVaultName(params["expected-vault"])) return { reason: "invalid-vault" };
+        const clientID = normalizeUUID(params.client || "");
+        const requestID = normalizeUUID(params.request || "");
+        if (!clientID || params.client !== clientID) return { reason: "invalid-client" };
+        if (!requestID || params.request !== requestID) return { reason: "invalid-request" };
+        if (!isCanonicalBase64URLSHA256(params.item || "")) return { reason: "invalid-item" };
+        if (!isCanonicalIssuedAt(params.issuedAt) || !isFreshIssuedAt(params.issuedAt, this.now())) {
+            return { reason: "stale-issued-at" };
+        }
+        if (!isCanonicalBase64URLSHA256(params.mac || "")) return { reason: "invalid-mac" };
+        return {
+            request: {
+                vaultName,
+                clientID,
+                itemID: params.item,
+                action: "complete",
                 requestID,
                 issuedAt: params.issuedAt,
                 mac: params.mac,
