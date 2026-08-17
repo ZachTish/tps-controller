@@ -604,13 +604,77 @@ test('native schedule projects the deterministic next occurrence for an overdue 
   const engine = new engineHarness.ReminderEngine(app, {});
 
   const schedule = await engine.projectScheduledNotifications(settings, now);
-  assert.equal(schedule.length, 1);
+  assert.equal(schedule.length, 128, 'the bounded schedule carries later repeats without another Obsidian wake');
   assert.equal(schedule[0].fireAt, Date.parse('2026-08-15T15:25:00.000Z'));
+  assert.equal(schedule[1].fireAt, Date.parse('2026-08-15T15:30:00.000Z'));
+  assert.equal(schedule.at(-1).fireAt, Date.parse('2026-08-16T02:00:00.000Z'));
   assert.deepEqual(settings.alertState, {}, 'projection must not manufacture Controller delivery state');
 
   settings.reminders[0].maxRepeats = 4;
   const exhausted = await engine.projectScheduledNotifications(settings, now);
   assert.equal(exhausted.length, 0, 'the projection honors the Controller repeat limit');
+});
+
+test('native schedule keeps an hours-overdue five-minute rule alive while Obsidian is suspended', async () => {
+  const now = Date.parse('2026-08-17T21:10:00.000Z');
+  const triggerTime = Date.parse('2026-08-17T14:00:00.000Z');
+  const settings = {
+    enableReminders: true,
+    pollMinutes: 1.5,
+    reminders: [{
+      id: 'repeat-until-complete',
+      enabled: true,
+      property: 'scheduled',
+      mode: 'task',
+      offsetMinutes: 0,
+      repeatUntilComplete: true,
+      repeatIntervalMinutes: 5,
+      maxRepeats: -1,
+      repeatEndAt: 'stop-condition',
+      stopConditions: ['status: complete', 'status: wont-do'],
+      title: 'Reminder: {filename}',
+      body: 'At {time} ({remaining})',
+    }],
+    alertState: {},
+    archiveFolder: '_archive',
+    globalIgnorePaths: [],
+    globalIgnoreTags: [],
+    globalIgnoreStatuses: [],
+    globalIgnoreCheckboxStates: [],
+    defaultAllDayBaseTime: '09:00',
+    snoozeProperty: 'reminderSnooze',
+    externalCalendars: [],
+  };
+  const candidateFiles = [];
+  const engineHarness = loadCompiledReminderEngineHarness({
+    candidateFiles,
+    shouldIgnoreForReminder: () => false,
+    parseTimeRange: () => ({ start: triggerTime, end: null }),
+    buildReminderTargetsForFile: async () => [{
+      sourceKey: '2026-08-17.md::task:13',
+      sourceType: 'file',
+      targetKind: 'task',
+      taskTitle: 'Daily Standup for GCP App Support',
+      taskFrontmatter: { scheduled: '2026-08-17 09:00' },
+    }],
+    buildEffectiveReminderContextForTarget: (target) => ({
+      frontmatter: target.taskFrontmatter,
+      propertyValue: target.taskFrontmatter.scheduled,
+    }),
+  });
+  const nativeFile = new engineHarness.TFile('2026-08-17.md');
+  candidateFiles.push(nativeFile);
+  const app = {
+    metadataCache: { getFileCache: () => ({ frontmatter: {} }) },
+    vault: { getMarkdownFiles: () => [nativeFile], cachedRead: async () => '' },
+  };
+  const engine = new engineHarness.ReminderEngine(app, {});
+
+  const schedule = await engine.projectScheduledNotifications(settings, now);
+  assert.equal(schedule.length, 128);
+  assert.equal(schedule[0].fireAt, Date.parse('2026-08-17T21:15:00.000Z'));
+  assert.equal(schedule[1].fireAt, Date.parse('2026-08-17T21:20:00.000Z'));
+  assert.equal(schedule[0].sourceKey, '2026-08-17.md::task:13');
 });
 
 test('reminder scheduler wakes at the shortest active repeat interval', () => {

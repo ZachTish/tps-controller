@@ -267,11 +267,18 @@ export class ReminderEngine {
             const key = `${item.sourceKey}\u0000${item.reminderId}\u0000${item.fireAt}`;
             if (!unique.has(key)) unique.set(key, item);
         }
-        return [...unique.values()].sort((left, right) =>
+        const result = [...unique.values()].sort((left, right) =>
             left.fireAt - right.fireAt
             || left.sourceKey.localeCompare(right.sourceKey)
             || left.reminderId.localeCompare(right.reminderId),
         );
+        if (settings.enableLogging) {
+            logger.flow("ReminderEngine", "native-projection:done", {
+                candidateFiles: activeFiles.length,
+                projectedOccurrences: result.length,
+            });
+        }
+        return result;
     }
 
     private projectTarget(params: {
@@ -353,9 +360,13 @@ export class ReminderEngine {
             if (reminder.stopConditions.some((condition) => checkStopCondition(effectiveFm, condition))) continue;
 
             let fireAt = triggerTime;
+            let repeatOrdinal = 0;
             const snoozeValue = effectiveFm[settings.snoozeProperty || "reminderSnooze"];
             const snoozeTime = snoozeValue ? parseDate(snoozeValue) : null;
-            if (snoozeTime && snoozeTime > now) fireAt = snoozeTime;
+            if (snoozeTime && snoozeTime > now) {
+                fireAt = snoozeTime;
+                repeatOrdinal = state?.repeatCount || 0;
+            }
             else if (fireAt <= now) {
                 const effectiveTriggerKey = snoozeTime
                     ? `${baseTriggerKey}|snooze:${snoozeTime}`
@@ -366,6 +377,7 @@ export class ReminderEngine {
                     const repeatMs = Math.max(1, reminder.repeatIntervalMinutes) * 60 * 1000;
                     fireAt = state.lastSent + repeatMs;
                     while (fireAt <= now) fireAt += repeatMs;
+                    repeatOrdinal = state.repeatCount + 1;
                 } else {
                     // The Reminder modal deliberately keeps a file reminder
                     // visible for one bounded polling window after it becomes
@@ -382,23 +394,40 @@ export class ReminderEngine {
                         const nextRepeatOrdinal = Math.floor((now - fireAt) / repeatMs) + 1;
                         if (reminder.maxRepeats !== -1 && nextRepeatOrdinal > reminder.maxRepeats) continue;
                         fireAt += nextRepeatOrdinal * repeatMs;
+                        repeatOrdinal = nextRepeatOrdinal;
                     }
                 }
             }
             if (fireAt > horizonEnd) continue;
             if (reminder.repeatEndAt === "trigger-base" && fireAt > finalTriggerBase) continue;
 
-            const remaining = formatRemaining(propTime - fireAt);
             const time = moment(propTime).format("h:mm A");
             const displayName = buildReminderDisplayName(fileRef, target);
-            items.push({
-                title: formatTemplate(reminder.title, { filename: displayName, time, remaining }),
-                body: formatTemplate(reminder.body, { filename: displayName, time, remaining }),
-                fireAt,
-                sourcePath: fileRef instanceof TFile ? fileRef.path : undefined,
-                reminderId: reminder.id,
-                sourceKey: target.sourceKey,
-            });
+            const repeatMs = Math.max(1, reminder.repeatIntervalMinutes) * 60 * 1000;
+            const maximumRepeatOrdinal = reminder.maxRepeats === -1
+                ? Number.POSITIVE_INFINITY
+                : reminder.maxRepeats;
+            let projectedOccurrenceCount = 0;
+            do {
+                const remaining = formatRemaining(propTime - fireAt);
+                items.push({
+                    title: formatTemplate(reminder.title, { filename: displayName, time, remaining }),
+                    body: formatTemplate(reminder.body, { filename: displayName, time, remaining }),
+                    fireAt,
+                    sourcePath: fileRef instanceof TFile ? fileRef.path : undefined,
+                    reminderId: reminder.id,
+                    sourceKey: target.sourceKey,
+                });
+                projectedOccurrenceCount += 1;
+                if (
+                    !reminder.repeatUntilComplete
+                    || reminder.repeatEndAt === "trigger-base"
+                    || projectedOccurrenceCount >= 128
+                ) break;
+                repeatOrdinal += 1;
+                if (repeatOrdinal > maximumRepeatOrdinal) break;
+                fireAt += repeatMs;
+            } while (fireAt <= horizonEnd);
         }
         return items;
     }

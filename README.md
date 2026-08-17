@@ -1,5 +1,12 @@
 # TPS Controller
 
+## 0.8.2 repeating native-notification continuity
+
+- Repeat-until-complete rules now project a bounded chronological series of future occurrences into the signed TishOS schedule instead of publishing only the next repeat. Apple can therefore keep delivering a five-minute reminder while Obsidian is suspended; the next Controller publication still removes later occurrences after a configured stop condition, terminal status, checkbox completion, snooze, disable, or provider change.
+- The projection remains read-only and Controller-rule-owned. It preserves the configured interval, maximum-repeat count, repeat-end mode, filters, rendered templates, exact source identity, 60-day horizon, per-rule-and-target 128-occurrence guard, and the existing globally signed 128-item wire limit. TishOS continues to schedule at most its own bounded leading 32 requests.
+- Focused coverage reproduces an hours-overdue `Daily Standup for GCP App Support` task with a five-minute repeat and verifies that the signed projection begins at the next exact interval and carries later occurrences without another Obsidian wake. Structured projection logs expose counts only, never reminder text or credentials.
+- Final validation passed the focused 56-check reminder suite with three preserved comparison skips, the complete declared suite, and the mandatory separate production build. Obsidian 1.13.7 reloaded only **Obsidian Plugin Test Vault**; source and test runtime hashes match exactly (`main.js` `7916ee102eeb777f0e212266017442e767fdde21dce9e718975dba537975312c`, `manifest.json` `430148900cfe2675cbbc3c554536c46c77d304d5e6ad55c0f1945e0976b85327`, `styles.css` `2da24f2a872483deb0ccc2944fb3b05c1b8a4e6b9f90b3290a3fabb86ec06999`). Production was not accessed or promoted.
+
 ## 0.8.1
 
 - TishOS schedule publication now includes the same just-due file-reminder occurrence that Controller still exposes during its bounded polling window. The original logical fire time remains unchanged, so every paired Apple device receives one stable occurrence digest instead of a new identity on each refresh.
