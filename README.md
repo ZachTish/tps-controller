@@ -1,5 +1,13 @@
 # TPS Controller
 
+## 0.9.2 native schedule source isolation
+
+- A failure while discovering optional external-calendar reminder sources no longer discards file and task reminders that Controller already projected successfully. The signed TishOS schedule retains those local occurrences and continues publishing to every paired Apple device.
+- This fixes the observed state where Controller's Notifications view showed an active hours-overdue repeating task while TishOS received no schedule file and reported an empty queue. External feeds remain independent optional sources rather than a global publication gate.
+- The failure path now emits one concise always-on error containing only the retained occurrence count and error type. It does not log calendar URLs, paths, reminder titles, bodies, rules, or pairing credentials.
+- Focused coverage reproduces an active five-minute repeat with a rule that also accepts external events, forces external discovery to fail, and verifies all 128 bounded future file occurrences survive. This backward-compatible patch changes no settings or note data and keeps minimum Obsidian compatibility at 1.12.0.
+- Final validation passed the 60-check focused reminder suite with three preserved historical comparison skips, the complete declared suite, and the mandatory separate production-mode build. The final build reported `[runtime-deploy] target=test ... unchanged`; **Obsidian Plugin Test Vault** alone was reloaded and loaded runtime manifest 0.9.2. Source and test-runtime artifacts are byte-identical (`main.js` `aed05cc034148744d2b5e99160b82681f6ad78e1c411b86d7a70b87ce4c97f0f`, `manifest.json` `64165a25bf2966208885aec503c4efa175637aa0bb87f75371a7cc604abcf8bc`, `styles.css` `2da24f2a872483deb0ccc2944fb3b05c1b8a4e6b9f90b3290a3fabb86ec06999`). Production was read only for bounded diagnosis and was not changed or promoted.
+
 ## 0.9.1 terminal notification invalidation
 
 - Every Controller reminder now publishes one opaque, stable series identity across all of its repeat occurrences. TishOS uses that identity to keep a user-created Snooze only while the freshly verified Controller schedule still contains the underlying reminder.

@@ -677,6 +677,70 @@ test('native schedule keeps an hours-overdue five-minute rule alive while Obsidi
   assert.equal(schedule[0].sourceKey, '2026-08-17.md::task:13');
 });
 
+test('native schedule retains file reminders when optional external discovery fails', async () => {
+  const now = Date.parse('2026-08-18T21:10:00.000Z');
+  const triggerTime = Date.parse('2026-08-18T14:00:00.000Z');
+  const settings = {
+    enableReminders: true,
+    pollMinutes: 1.5,
+    reminders: [{
+      id: 'repeat-until-complete',
+      enabled: true,
+      property: 'scheduled',
+      sourceTypes: ['file', 'external-event'],
+      offsetMinutes: 0,
+      repeatUntilComplete: true,
+      repeatIntervalMinutes: 5,
+      maxRepeats: -1,
+      repeatEndAt: 'stop-condition',
+      stopConditions: ['status: complete', 'status: wont-do'],
+      title: 'Reminder: {filename}',
+      body: 'At {time} ({remaining})',
+    }],
+    alertState: {},
+    archiveFolder: '_archive',
+    globalIgnorePaths: [],
+    globalIgnoreTags: [],
+    globalIgnoreStatuses: [],
+    globalIgnoreCheckboxStates: [],
+    defaultAllDayBaseTime: '09:00',
+    snoozeProperty: 'reminderSnooze',
+    externalCalendars: [{ enabled: true, url: 'https://calendar.invalid/test.ics' }],
+  };
+  const candidateFiles = [];
+  const engineHarness = loadCompiledReminderEngineHarness({
+    candidateFiles,
+    shouldIgnoreForReminder: () => false,
+    parseTimeRange: () => ({ start: triggerTime, end: null }),
+    buildReminderTargetsForFile: async () => [{
+      sourceKey: '2026-08-18.md::task:13',
+      sourceType: 'file',
+      targetKind: 'task',
+      taskTitle: 'Checklist review',
+      taskFrontmatter: { scheduled: '2026-08-18 09:00' },
+    }],
+    buildEffectiveReminderContextForTarget: (target) => ({
+      frontmatter: target.taskFrontmatter,
+      propertyValue: target.taskFrontmatter.scheduled,
+    }),
+  });
+  const nativeFile = new engineHarness.TFile('2026-08-18.md');
+  candidateFiles.push(nativeFile);
+  const app = {
+    metadataCache: { getFileCache: () => ({ frontmatter: {} }) },
+    vault: { getMarkdownFiles: () => [nativeFile], cachedRead: async () => '' },
+  };
+  const engine = new engineHarness.ReminderEngine(app, {});
+  engine.buildUnmatchedExternalReminderTargets = async () => {
+    throw new Error('synthetic external index failure');
+  };
+
+  const schedule = await engine.projectScheduledNotifications(settings, now);
+  assert.equal(schedule.length, 128);
+  assert.equal(schedule[0].fireAt, Date.parse('2026-08-18T21:15:00.000Z'));
+  assert.equal(schedule[0].sourceKey, '2026-08-18.md::task:13');
+});
+
 test('reminder scheduler wakes at the shortest active repeat interval', () => {
   assert.match(mainSource, /const activeRepeatMs = \(this\.settings\.reminders \|\| \[\]\)/);
   assert.match(mainSource, /Math\.min\(pollMs, \.\.\.activeRepeatMs\)/);

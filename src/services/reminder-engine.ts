@@ -246,20 +246,34 @@ export class ReminderEngine {
             (reminder) => reminder.enabled && this.reminderIncludesSource(reminder, "external-event"),
         );
         if (needsExternalEvents) {
-            const targets = await this.buildUnmatchedExternalReminderTargets(files, settings);
-            for (const target of targets) {
-                const event = target.externalEvent;
-                if (!event) continue;
-                projected.push(...this.projectTarget({
-                    target,
-                    fileRef: this.buildSyntheticExternalFile(event),
-                    cache: null,
-                    baseFrontmatter: {},
-                    settings,
-                    now,
-                    horizonEnd,
-                    reminderFilter: (reminder) => this.reminderIncludesSource(reminder, "external-event"),
-                }));
+            try {
+                const targets = await this.buildUnmatchedExternalReminderTargets(files, settings);
+                for (const target of targets) {
+                    const event = target.externalEvent;
+                    if (!event) continue;
+                    projected.push(...this.projectTarget({
+                        target,
+                        fileRef: this.buildSyntheticExternalFile(event),
+                        cache: null,
+                        baseFrontmatter: {},
+                        settings,
+                        now,
+                        horizonEnd,
+                        reminderFilter: (reminder) => this.reminderIncludesSource(reminder, "external-event"),
+                    }));
+                }
+            } catch (error) {
+                // External-calendar discovery is an optional source. A broken
+                // feed/index must not discard already-projected file reminders
+                // or prevent every paired TishOS client from receiving a
+                // schedule. Keep the error visible even when debug logging is
+                // off, without logging URLs, reminder content, or paths.
+                logger.flowError(
+                    "ReminderEngine",
+                    "native-projection:external-source-failed",
+                    error,
+                    { retainedFileOccurrences: projected.length },
+                );
             }
         }
 
