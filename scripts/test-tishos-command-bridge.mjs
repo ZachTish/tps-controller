@@ -563,6 +563,8 @@ test("paired clients receive a signed Controller-rule notification schedule that
     body: "Starts in 15 minutes",
     fireAt: NOW + 60 * 60 * 1000,
     sourcePath: "Projects/Alpha + 100%.md",
+    sourceKey: "Projects/Alpha + 100%.md::task:7",
+    reminderId: "scheduled-task",
   }];
   const harness = createHarness({
     notificationScheduleProvider: async () => schedule,
@@ -578,6 +580,8 @@ test("paired clients receive a signed Controller-rule notification schedule that
   assert.equal(published.clientID, CLIENT);
   assert.equal(published.items.length, 1);
   assert.equal(published.items[0].sourcePath, "Projects/Alpha + 100%.md");
+  assert.equal(published.schemaVersion, 2);
+  assert.match(published.items[0].seriesID, /^[A-Za-z0-9_-]{43}$/);
   assert.equal(
     published.items[0].id,
     await contract.sha256Base64URL(notificationContract.canonicalNotificationItem(published.items[0])),
@@ -616,6 +620,41 @@ test("paired clients receive a signed Controller-rule notification schedule that
   assert.equal(modalVisible.items[0].fireAt, new Date(NOW - 4 * 60 * 1000).toISOString());
 });
 
+test("repeat occurrences share one stable series identity while distinct reminders do not", async (t) => {
+  const schedule = [{
+    title: "Standup",
+    body: "First occurrence",
+    fireAt: NOW + 60_000,
+    sourcePath: "Daily/Standup.md",
+    sourceKey: "Daily/Standup.md::task:4",
+    reminderId: "scheduled-task",
+  }, {
+    title: "Standup",
+    body: "Second occurrence",
+    fireAt: NOW + 6 * 60_000,
+    sourcePath: "Daily/Standup.md",
+    sourceKey: "Daily/Standup.md::task:4",
+    reminderId: "scheduled-task",
+  }, {
+    title: "Review",
+    body: "Different reminder",
+    fireAt: NOW + 11 * 60_000,
+    sourcePath: "Daily/Standup.md",
+    sourceKey: "Daily/Standup.md::task:5",
+    reminderId: "scheduled-task",
+  }];
+  const harness = createHarness({ notificationScheduleProvider: async () => schedule });
+  t.after(() => harness.service.stop());
+  await pairAndPublish(harness);
+
+  const path = `${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.json`;
+  const published = JSON.parse(harness.files.get(path));
+  assert.equal(published.items.length, 3);
+  assert.equal(published.items[0].seriesID, published.items[1].seriesID);
+  assert.notEqual(published.items[0].id, published.items[1].id);
+  assert.notEqual(published.items[1].seriesID, published.items[2].seriesID);
+});
+
 test("signed notification completion re-resolves one current Controller item and consumes replay", async (t) => {
   const completionTarget = { targetKind: "task", taskLine: 7 };
   const schedule = [{
@@ -623,6 +662,8 @@ test("signed notification completion re-resolves one current Controller item and
     body: "Starts in 15 minutes",
     fireAt: NOW + 60 * 60 * 1000,
     sourcePath: "Projects/Alpha.md",
+    sourceKey: "Projects/Alpha.md::task:7",
+    reminderId: "scheduled-task",
     completionTarget,
   }];
   const harness = createHarness({
@@ -634,6 +675,10 @@ test("signed notification completion re-resolves one current Controller item and
     ?? {
       id: await contract.sha256Base64URL(notificationContract.canonicalNotificationItem({
         id: "",
+        seriesID: await contract.sha256Base64URL(notificationContract.canonicalNotificationSeries(
+          schedule[0].sourceKey,
+          schedule[0].reminderId,
+        )),
         title: schedule[0].title,
         body: schedule[0].body,
         fireAt: new Date(schedule[0].fireAt).toISOString(),
@@ -656,6 +701,8 @@ test("notification completion fails closed for stale, ambiguous, unsigned, or ex
     body: "Same occurrence",
     fireAt: NOW + 60_000,
     sourcePath: "Projects/Duplicate.md",
+    sourceKey: "Projects/Duplicate.md::task:1",
+    reminderId: "scheduled-task",
     completionTarget: { targetKind: "task", taskLine: 1 },
   };
   let schedule = [current];
@@ -664,6 +711,10 @@ test("notification completion fails closed for stale, ambiguous, unsigned, or ex
   await harness.service.handlePairRoute(pairParams());
   const unsignedItem = {
     id: "",
+    seriesID: await contract.sha256Base64URL(notificationContract.canonicalNotificationSeries(
+      current.sourceKey,
+      current.reminderId,
+    )),
     title: current.title,
     body: current.body,
     fireAt: new Date(current.fireAt).toISOString(),

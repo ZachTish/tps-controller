@@ -1,5 +1,13 @@
 # TPS Controller
 
+## 0.9.1 terminal notification invalidation
+
+- Every Controller reminder now publishes one opaque, stable series identity across all of its repeat occurrences. TishOS uses that identity to keep a user-created Snooze only while the freshly verified Controller schedule still contains the underlying reminder.
+- Completing, disabling, removing, filtering out, or otherwise making a reminder terminal removes its series from the next signed schedule. TishOS then cancels both the ordinary future occurrences and every pending Snooze derived from that reminder, preventing a completed task from continuing to alert.
+- Occurrence IDs remain unique per fire time and content, so Apple still deduplicates individual notifications correctly. The series identity contains no note path or reminder text and is authenticated inside notification schedule schema 2.
+- This is a paired wire update: install TPS Controller 0.9.1 and TishOS 0.9.1 together. TishOS remains able to read legacy schema-1 schedules, but series-aware Snooze retention is enabled only for schema 2.
+- Focused coverage proves repeat occurrences share a series while different reminders do not, validates the signed schema-2 publication, and verifies TishOS cancels a Snooze as soon as that series disappears. The complete declared suite and mandatory separate production build passed; the final build reported `[runtime-deploy] target=test ... unchanged`. Obsidian 1.13.7 reloaded only **Obsidian Plugin Test Vault**, and source/runtime artifacts are byte-identical (`main.js` `9adc64433e08925406b2369526755c45f34b26873e3f36d72260e5b4d10d7ee4`, `manifest.json` `73fc06abd44d4ce8bbb3e5718b028113f2413229ee8bc1bc499df6a89636f185`, `styles.css` `2da24f2a872483deb0ccc2944fb3b05c1b8a4e6b9f90b3290a3fabb86ec06999`). Production was not accessed or promoted.
+
 ## 0.9.0 authenticated native-notification completion
 
 - TishOS note/task alerts can send one signed, replay-protected **Complete** request through the existing per-device Controller pairing. The route is exact-vault and accepts only the opaque notification item ID, `complete`, a canonical request UUID/time, and an HMAC; it has no free-form path, status, body, or arguments.

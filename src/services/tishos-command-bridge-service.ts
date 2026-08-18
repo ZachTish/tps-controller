@@ -40,6 +40,7 @@ import {
     TISHOS_NATIVE_NOTIFICATION_MAX_LATE_MS,
     TISHOS_NATIVE_NOTIFICATION_ROOT,
     canonicalNotificationItem,
+    canonicalNotificationSeries,
     canonicalNotificationSchedule,
     isValidNotificationBody,
     isValidNotificationSourcePath,
@@ -161,6 +162,8 @@ interface NativeNotificationProjectionValue {
     title: string;
     body: string;
     fireAt: number;
+    sourceKey: string;
+    reminderId: string;
     sourcePath?: string;
     completionTarget?: OverdueItem;
 }
@@ -811,13 +814,24 @@ export class TishOSCommandBridgeService {
             !Number.isSafeInteger(value.fireAt)
             || value.fireAt < now - TISHOS_NATIVE_NOTIFICATION_MAX_LATE_MS
             || value.fireAt > maximumFireAt
+            || typeof value.sourceKey !== "string"
+            || value.sourceKey.length === 0
+            || utf8ByteCount(value.sourceKey) > 4_096
+            || typeof value.reminderId !== "string"
+            || value.reminderId.length === 0
+            || utf8ByteCount(value.reminderId) > 256
         ) return null;
         const title = this.boundedNotificationText(value.title, 256, "Obsidian reminder");
         const body = this.boundedNotificationText(value.body, 1_024, "", true);
         const sourcePath = isValidNotificationSourcePath(value.sourcePath) ? value.sourcePath : undefined;
         if (!isValidCommandName(title) || !isValidNotificationBody(body)) return null;
+        const seriesID = await sha256Base64URL(canonicalNotificationSeries(
+            value.sourceKey,
+            value.reminderId,
+        ));
         const unsignedItem: TishOSNativeNotificationItem = {
             id: "",
+            seriesID,
             title,
             body,
             fireAt: new Date(value.fireAt).toISOString(),
@@ -865,7 +879,7 @@ export class TishOSCommandBridgeService {
                 }
                 const generatedAt = new Date(this.now()).toISOString();
                 const unsigned: Omit<TishOSNativeNotificationSchedule, "mac"> = {
-                    schemaVersion: 1,
+                    schemaVersion: 2,
                     clientID: pairing.clientID,
                     vaultName,
                     generatedAt,
@@ -1756,7 +1770,7 @@ export class TishOSCommandBridgeService {
                 "schemaVersion", "clientID", "vaultName", "generatedAt", "publisher", "items", "mac",
             ])) return null;
             if (
-                value.schemaVersion !== 1
+                value.schemaVersion !== 2
                 || value.clientID !== pairing.clientID
                 || value.vaultName !== this.app.vault.getName()
                 || !isCanonicalGeneratedAt(value.generatedAt)
@@ -1773,11 +1787,12 @@ export class TishOSCommandBridgeService {
                 const expected = expectedItems[index];
                 if (!isRecord(actual)) return null;
                 const expectedKeys = expected.sourcePath
-                    ? ["id", "title", "body", "fireAt", "sourcePath"]
-                    : ["id", "title", "body", "fireAt"];
+                    ? ["id", "seriesID", "title", "body", "fireAt", "sourcePath"]
+                    : ["id", "seriesID", "title", "body", "fireAt"];
                 if (!hasExactKeys(actual, expectedKeys)) return null;
                 if (
                     actual.id !== expected.id
+                    || actual.seriesID !== expected.seriesID
                     || actual.title !== expected.title
                     || actual.body !== expected.body
                     || actual.fireAt !== expected.fireAt
@@ -1788,7 +1803,7 @@ export class TishOSCommandBridgeService {
             const items = value.items as TishOSNativeNotificationItem[];
             if (validateNotificationItems(items) === null) return null;
             const unsigned: Omit<TishOSNativeNotificationSchedule, "mac"> = {
-                schemaVersion: 1,
+                schemaVersion: 2,
                 clientID: value.clientID as string,
                 vaultName: value.vaultName as string,
                 generatedAt: value.generatedAt as string,

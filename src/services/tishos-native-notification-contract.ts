@@ -16,6 +16,7 @@ export const TISHOS_NATIVE_NOTIFICATION_MAX_SOURCE_PATH_BYTES = 512;
 
 export interface TishOSNativeNotificationItem {
     id: string;
+    seriesID: string;
     title: string;
     body: string;
     fireAt: string;
@@ -23,7 +24,7 @@ export interface TishOSNativeNotificationItem {
 }
 
 export interface TishOSNativeNotificationSchedule {
-    schemaVersion: 1;
+    schemaVersion: 2;
     clientID: string;
     vaultName: string;
     generatedAt: string;
@@ -66,9 +67,21 @@ export function isCanonicalNotificationDate(value: unknown): value is string {
     return isCanonicalGeneratedAt(value);
 }
 
+export function canonicalNotificationSeries(
+    sourceKey: string,
+    reminderID: string,
+): Uint8Array {
+    return new TextEncoder().encode(
+        "tishos-native-notification-series-v1\n"
+        + field("source", sourceKey)
+        + field("reminder", reminderID),
+    );
+}
+
 export function canonicalNotificationItem(item: TishOSNativeNotificationItem): Uint8Array {
     return new TextEncoder().encode(
-        "tishos-native-notification-item-v1\n"
+        "tishos-native-notification-item-v2\n"
+        + field("series", item.seriesID)
         + field("title", item.title)
         + field("body", item.body)
         + field("fire", item.fireAt)
@@ -79,8 +92,8 @@ export function canonicalNotificationItem(item: TishOSNativeNotificationItem): U
 export function canonicalNotificationSchedule(
     schedule: Omit<TishOSNativeNotificationSchedule, "mac">,
 ): Uint8Array {
-    let value = "tishos-native-notification-schedule-v1\n";
-    value += "schema:1\n";
+    let value = "tishos-native-notification-schedule-v2\n";
+    value += "schema:2\n";
     value += field("client", schedule.clientID);
     value += field("vault", schedule.vaultName);
     value += field("generated", schedule.generatedAt);
@@ -102,6 +115,7 @@ export function validateNotificationItems(
     for (const item of values) {
         if (
             !isCanonicalBase64URLSHA256(item.id)
+            || !isCanonicalBase64URLSHA256(item.seriesID)
             || ids.has(item.id)
             || !isValidCommandName(item.title)
             || !isValidNotificationBody(item.body)
@@ -120,7 +134,7 @@ export function validateNotificationItems(
 export function validateNotificationScheduleShape(
     value: Omit<TishOSNativeNotificationSchedule, "mac">,
 ): boolean {
-    return value.schemaVersion === 1
+    return value.schemaVersion === 2
         && normalizeUUID(value.clientID) === value.clientID
         && isValidVaultName(value.vaultName)
         && isCanonicalGeneratedAt(value.generatedAt)
