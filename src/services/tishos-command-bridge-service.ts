@@ -792,17 +792,40 @@ export class TishOSCommandBridgeService {
         const now = this.now();
         const maximumFireAt = now + 60 * 24 * 60 * 60 * 1000;
         const unique = new Map<string, TishOSNativeNotificationItem>();
-        for (const value of values) {
+        const exactCandidates = new Set<string>();
+        const orderedValues = [...values].sort((left, right) => {
+            const leftFireAt = Number.isSafeInteger(left.fireAt) ? left.fireAt : Number.MAX_SAFE_INTEGER;
+            const rightFireAt = Number.isSafeInteger(right.fireAt) ? right.fireAt : Number.MAX_SAFE_INTEGER;
+            if (leftFireAt !== rightFireAt) return leftFireAt - rightFireAt;
+            return this.nativeNotificationCandidateKey(left)
+                .localeCompare(this.nativeNotificationCandidateKey(right));
+        });
+        for (const value of orderedValues) {
+            const candidateKey = this.nativeNotificationCandidateKey(value);
+            if (exactCandidates.has(candidateKey)) continue;
+            exactCandidates.add(candidateKey);
             const item = await this.buildNativeNotificationItem(value, now, maximumFireAt);
             if (item && !unique.has(item.id)) unique.set(item.id, item);
+            if (unique.size >= TISHOS_NATIVE_NOTIFICATION_MAX_ITEMS) break;
         }
         const items = [...unique.values()].sort((left, right) =>
             left.fireAt.localeCompare(right.fireAt) || left.id.localeCompare(right.id),
-        ).slice(0, TISHOS_NATIVE_NOTIFICATION_MAX_ITEMS);
+        );
         if (validateNotificationItems(items) === null) {
             throw new Error("Native notification projection failed validation.");
         }
         return items;
+    }
+
+    private nativeNotificationCandidateKey(value: NativeNotificationProjectionValue): string {
+        return JSON.stringify([
+            value.fireAt,
+            value.sourceKey,
+            value.reminderId,
+            value.title,
+            value.body,
+            value.sourcePath,
+        ]);
     }
 
     private async buildNativeNotificationItem(
