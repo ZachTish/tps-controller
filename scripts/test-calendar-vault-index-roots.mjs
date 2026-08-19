@@ -126,6 +126,20 @@ function loadAutoCreateService(stats) {
                 setInlineTaskFieldValue: (line) => line,
             };
         }
+        if (specifier === "./external-calendar-task-note") {
+            return {
+                buildExternalCalendarTaskNoteLink: () => ({
+                    alias: "Event",
+                    linkTarget: "Calendar Events/Event",
+                    markdown: "[[Calendar Events/Event|Event]]",
+                    notePath: "Calendar Events/Event.md",
+                    occurrenceDay: "2026-08-18",
+                    seriesKey: "feed#uid",
+                }),
+                normalizeExternalCalendarTaskNoteFolder: (value) => String(value || "Calendar Events"),
+                normalizeExternalCalendarTaskNoteStrategy: (value) => value === "series" ? "series" : "occurrence-day",
+            };
+        }
         throw new Error(`Unexpected auto-create service import: ${specifier}`);
     };
     new Function("module", "exports", "require", compiled.outputText)(module, module.exports, requireImpl);

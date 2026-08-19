@@ -24,6 +24,14 @@ export interface ExternalTaskLineInsertionResult {
     unsafeFrontmatter: boolean;
 }
 
+export interface ExternalTaskBlockCapture {
+    block: string;
+    endLineExclusive: number;
+    firstLine: string;
+    lineIndex: number;
+    outcome: "found" | "not-found" | "ambiguous" | "unsafe-frontmatter";
+}
+
 type ExternalTaskLineMatcher = (line: string, lineIndex: number, lines: readonly string[]) => boolean;
 type ExternalTaskLineMutator = (line: string, lineIndex: number, lines: readonly string[]) => string;
 
@@ -303,6 +311,116 @@ export function ensureInlineTaskTitle(line: string, rawTitle: string): string {
     return `${prefixMatch[1]}${title}${body ? ` ${body.trimStart()}` : ""}`.trimEnd();
 }
 
+export function replaceInlineTaskTitle(line: string, rawTitle: string): string {
+    if (!isMarkdownCheckboxTaskLine(line)) return line;
+    const title = String(rawTitle || "").replace(/[\r\n]+/gu, " ").replace(/\s+/gu, " ").trim();
+    if (!title) return line;
+    const prefixMatch = line.match(/^(\s*(?:[-*+]|\d+[.)])\s+\[[^\]\r\n]?\]\s*)(.*)$/u);
+    if (!prefixMatch) return line;
+    const body = String(prefixMatch[2] || "");
+    const metadataIndex = findMetadataStart(body);
+    const metadata = metadataIndex >= 0 ? body.slice(metadataIndex).trimStart() : "";
+    return `${prefixMatch[1]}${title}${metadata ? ` ${metadata}` : ""}`.trimEnd();
+}
+
+export function captureExternalTaskBlock(
+    content: string,
+    matches: ExternalTaskLineMatcher,
+): ExternalTaskBlockCapture {
+    const source = String(content || "");
+    const { lines, separators } = splitLinesPreservingSeparators(source);
+    if (findMarkdownBodyStartLine(lines) < 0) {
+        return { block: "", endLineExclusive: -1, firstLine: "", lineIndex: -1, outcome: "unsafe-frontmatter" };
+    }
+    const matchingIndexes = findMarkdownCheckboxTaskLineIndexes(lines).filter((lineIndex) =>
+        matches(lines[lineIndex] || "", lineIndex, lines));
+    if (matchingIndexes.length === 0) {
+        return { block: "", endLineExclusive: -1, firstLine: "", lineIndex: -1, outcome: "not-found" };
+    }
+    if (matchingIndexes.length > 1) {
+        return { block: "", endLineExclusive: -1, firstLine: "", lineIndex: -1, outcome: "ambiguous" };
+    }
+    const lineIndex = matchingIndexes[0];
+    const endLineExclusive = findTaskBlockEnd(lines, lineIndex);
+    const block = lines.slice(lineIndex, endLineExclusive)
+        .map((line, offset) => `${line}${separators[lineIndex + offset] || ""}`)
+        .join("");
+    return {
+        block,
+        endLineExclusive,
+        firstLine: lines[lineIndex] || "",
+        lineIndex,
+        outcome: "found",
+    };
+}
+
+export function removeExactExternalTaskBlock(
+    content: string,
+    matches: ExternalTaskLineMatcher,
+    expectedBlock: string,
+): ExternalTaskLineMutationResult {
+    const source = String(content || "");
+    const capture = captureExternalTaskBlock(source, matches);
+    if (capture.outcome !== "found") {
+        return { content: source, lineIndex: capture.lineIndex, outcome: capture.outcome };
+    }
+    if (capture.block !== expectedBlock) {
+        return { content: source, lineIndex: capture.lineIndex, outcome: "invalid-result" };
+    }
+    const { lines, separators } = splitLinesPreservingSeparators(source);
+    lines.splice(capture.lineIndex, capture.endLineExclusive - capture.lineIndex);
+    separators.splice(capture.lineIndex, capture.endLineExclusive - capture.lineIndex);
+    return {
+        content: lines.map((line, index) => `${line}${separators[index] || ""}`).join(""),
+        lineIndex: capture.lineIndex,
+        outcome: "changed",
+    };
+}
+
+export function insertExternalTaskBlockAfterLeadingTaskBlocks(
+    content: string,
+    taskBlock: string,
+    isManagedTask: ExternalTaskLineMatcher,
+): ExternalTaskLineInsertionResult {
+    const blockSource = String(taskBlock || "");
+    const blockParts = splitLinesPreservingSeparators(blockSource);
+    if (blockParts.lines.length > 1 && blockParts.lines.at(-1) === "" && !blockParts.separators.at(-1)) {
+        blockParts.lines.pop();
+        blockParts.separators.pop();
+    }
+    const firstLine = blockParts.lines[0] || "";
+    if (!isMarkdownCheckboxTaskLine(firstLine)) {
+        return { content: String(content || ""), lineIndex: -1, inserted: false, unsafeFrontmatter: false };
+    }
+    const source = String(content || "");
+    const { lines, separators } = splitLinesPreservingSeparators(source);
+    const bodyStartLine = findMarkdownBodyStartLine(lines);
+    if (bodyStartLine < 0) {
+        return { content: source, lineIndex: -1, inserted: false, unsafeFrontmatter: true };
+    }
+    const safeTaskIndexes = new Set(findMarkdownCheckboxTaskLineIndexes(lines));
+    let insertionIndex = bodyStartLine;
+    while (
+        insertionIndex < lines.length
+        && safeTaskIndexes.has(insertionIndex)
+        && isManagedTask(lines[insertionIndex] || "", insertionIndex, lines)
+    ) {
+        insertionIndex = findTaskBlockEnd(lines, insertionIndex);
+    }
+    const separator = separators[insertionIndex - 1] || separators[insertionIndex] || "\n";
+    const insertedLines = [...blockParts.lines];
+    const insertedSeparators = insertedLines.map((_, index) =>
+        blockParts.separators[index] || separator);
+    lines.splice(insertionIndex, 0, ...insertedLines);
+    separators.splice(insertionIndex, 0, ...insertedSeparators);
+    return {
+        content: lines.map((line, index) => `${line}${separators[index] || ""}`).join(""),
+        lineIndex: insertionIndex,
+        inserted: true,
+        unsafeFrontmatter: false,
+    };
+}
+
 function insertBeforeHiddenMetadata(line: string, token: string): string {
     const hiddenMatch = findHiddenMetadata(line);
     if (!hiddenMatch || hiddenMatch.index == null) {
@@ -363,6 +481,32 @@ function getIndentWidth(line: string): number {
     let width = 0;
     for (const char of leading) width += char === "\t" ? 4 : 1;
     return width;
+}
+
+function findTaskBlockEnd(lines: readonly string[], lineIndex: number): number {
+    const parentIndent = getIndentWidth(lines[lineIndex] || "");
+    let end = lineIndex + 1;
+    while (end < lines.length) {
+        const line = lines[end] || "";
+        if (line.trim()) {
+            if (getIndentWidth(line) <= parentIndent) break;
+            end += 1;
+            continue;
+        }
+        let nextContentLine = end + 1;
+        while (nextContentLine < lines.length && !(lines[nextContentLine] || "").trim()) {
+            nextContentLine += 1;
+        }
+        if (
+            nextContentLine < lines.length
+            && getIndentWidth(lines[nextContentLine] || "") > parentIndent
+        ) {
+            end = nextContentLine;
+            continue;
+        }
+        break;
+    }
+    return end;
 }
 
 function normalizeInlineTag(value: string): string {

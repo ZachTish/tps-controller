@@ -2158,6 +2158,44 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                             void commit();
                         });
                     });
+
+                new Setting(acContent)
+                    .setName("Linked event note")
+                    .setDesc("Choose whether recurring events link to one shared note or a different note for each scheduled day.")
+                    .addDropdown(drop => drop
+                        .addOption("occurrence-day", "One note per scheduled day")
+                        .addOption("series", "One note for the recurring series")
+                        .setValue(calendar.autoCreateTaskNoteStrategy || "occurrence-day")
+                        .onChange(async (val: "occurrence-day" | "series") => {
+                            calendar.autoCreateTaskNoteStrategy = val;
+                            summary.textContent = this.buildCalendarOutputSummary(calendar);
+                            await save();
+                        }));
+
+                new Setting(acContent)
+                    .setName("Linked note folder")
+                    .setDesc("Folder used when a linked event note is created by opening its task title.")
+                    .addText(t => {
+                        const commit = async () => {
+                            const normalized = normalizePath(t.getValue().trim().replace(/^\/+|\/+$/g, "")) || "Calendar Events";
+                            if ((calendar.autoCreateTaskNoteFolder || "Calendar Events") === normalized) return;
+                            calendar.autoCreateTaskNoteFolder = normalized;
+                            t.setValue(normalized);
+                            await save();
+                        };
+                        t.setValue(calendar.autoCreateTaskNoteFolder || "Calendar Events")
+                            .setPlaceholder("Calendar Events")
+                            .onChange(() => {
+                                // Commit full paths on blur/Enter so settings rerenders cannot truncate typing.
+                            });
+                        t.inputEl.addEventListener("blur", () => void commit());
+                        t.inputEl.addEventListener("keydown", (event) => {
+                            if (event.key !== "Enter") return;
+                            event.preventDefault();
+                            t.inputEl.blur();
+                            void commit();
+                        });
+                    });
             } else {
                 new Setting(acContent)
                 .setName("Type Folder")
@@ -2228,7 +2266,10 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             const destination = (calendar.autoCreateTaskDestination || 'daily-note') === 'daily-note'
                 ? 'daily note'
                 : calendar.autoCreateTaskTargetPath || 'single task note';
-            return `${state} · Task → ${destination}`;
+            const noteStrategy = (calendar.autoCreateTaskNoteStrategy || 'occurrence-day') === 'series'
+                ? 'one series note'
+                : 'one note per day';
+            return `${state} · Task → ${destination} · ${noteStrategy}`;
         }
         const destination = calendar.autoCreateFolder || calendar.autoCreateTypeFolder || 'default note folder';
         return `${state} · Note → ${destination}`;

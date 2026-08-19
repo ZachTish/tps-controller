@@ -168,6 +168,8 @@ export class CalendarAutomationService {
                             mode: c.autoCreateMode || "note",
                             taskDestination: c.autoCreateTaskDestination || "daily-note",
                             taskTargetPath: this.resolveTaskTargetPath(c),
+                            taskNoteStrategy: c.autoCreateTaskNoteStrategy || "occurrence-day",
+                            taskNoteFolder: c.autoCreateTaskNoteFolder || "Calendar Events",
                             typeFolder: c.autoCreateTypeFolder || "",
                             folder: c.autoCreateFolder || "",
                             tag: normalizeCalendarTag(c.autoCreateTag || ""),

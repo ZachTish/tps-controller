@@ -41,9 +41,28 @@ function loadExternalCalendarInlineTaskModule() {
   return module.exports;
 }
 
+function loadExternalCalendarTaskNoteModule() {
+  const sourceText = readFileSync(new URL("../src/services/external-calendar-task-note.ts", import.meta.url), "utf8");
+  const compiled = ts.transpileModule(sourceText, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+  });
+  const module = { exports: {} };
+  const requireImpl = (specifier) => {
+    if (specifier === "obsidian") return { normalizePath };
+    if (specifier === "../utils") {
+      return { normalizeCalendarUrl: (value) => String(value || "").trim().replace(/\/+$/u, "") };
+    }
+    if (specifier === "../types") return {};
+    throw new Error(`Unexpected task-note helper import: ${specifier}`);
+  };
+  new Function("module", "exports", "require", compiled.outputText)(module, module.exports, requireImpl);
+  return module.exports;
+}
+
 function loadAutoCreateService() {
   const dailyTemplate = loadDailyTemplateModule();
   const externalCalendarInlineTask = loadExternalCalendarInlineTaskModule();
+  const externalCalendarTaskNote = loadExternalCalendarTaskNoteModule();
   const sourceText = readFileSync(new URL("../src/services/auto-create-service.ts", import.meta.url), "utf8");
   const compiled = ts.transpileModule(sourceText, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
@@ -83,7 +102,7 @@ function loadAutoCreateService() {
     if (specifier === "../utils/tag-utils") return { normalizeTagValue: (value) => String(value || "") };
     if (specifier === "../tps-gcm-api") {
       return {
-        buildCalendarExternalId: () => "",
+        buildCalendarExternalId: (_app, event) => `calendar:${event.sourceUrl || ""}#${event.id}`,
         emitFilesUpdated() {},
         ensureDailyNoteForIsoDateViaGcm: (...args) => gcmAttemptHandler(...args),
         ensureInternalIdInFrontmatter: () => "",
@@ -93,6 +112,7 @@ function loadAutoCreateService() {
     if (specifier === "./daily-note-template") return dailyTemplate;
     if (specifier === "./external-calendar-cancellation") return { cancelOpenInlineTaskLine: noOp };
     if (specifier === "./external-calendar-inline-task") return externalCalendarInlineTask;
+    if (specifier === "./external-calendar-task-note") return externalCalendarTaskNote;
     if (specifier === "./external-calendar-service") return {};
     if (specifier === "../types") return {};
     throw new Error(`Unexpected AutoCreateService test import: ${specifier}`);
@@ -260,6 +280,10 @@ function createHarness({
         if (!files.has(file.path)) throw new Error(`Missing file: ${file.path}`);
         return files.get(file.path);
       },
+      async read(file) {
+        if (!files.has(file.path)) throw new Error(`Missing file: ${file.path}`);
+        return files.get(file.path);
+      },
       async process(file, processor) {
         if (!files.has(file.path)) throw new Error(`Missing file: ${file.path}`);
         files.set(file.path, processor(files.get(file.path)));
@@ -366,6 +390,256 @@ test("Controller standalone Daily Note creation is template-aware, nested-format
     assert.match(content, /title: Wednesday, January 13/);
     assert.match(content, /createdAt: 14\.45/);
     assert.match(content, /Controller template body/);
+  } finally {
+    restoreMoment();
+  }
+});
+
+test("Controller task sync ignores stale note-mode folders before routing to the Daily Note writer", async () => {
+  const restoreMoment = installMoment();
+  try {
+    const targetPath = "Inbox/Daily/2027/01/13.md";
+    const harness = createHarness({
+      initialFiles: {
+        [targetPath]: "---\nkind: dailynote\n---\n\n",
+      },
+    });
+    gcmAttemptHandler = async () => ({
+      available: true,
+      file: harness.app.vault.getAbstractFileByPath(targetPath),
+    });
+    const { AutoCreateService } = loadAutoCreateService();
+    const service = new AutoCreateService(harness.app);
+    const event = {
+      id: "stale-note-folder-event",
+      uid: "stale-note-folder-event",
+      title: "Still create this task",
+      description: "",
+      startDate: new Date(2027, 0, 13, 9, 0, 0),
+      endDate: new Date(2027, 0, 13, 9, 30, 0),
+      sourceUrl: "https://calendar.example/team.ics",
+      location: "",
+      url: "",
+      isAllDay: false,
+    };
+    const empty = new Map();
+
+    const result = await service.processEvent(
+      event,
+      empty,
+      empty,
+      empty,
+      empty,
+      empty,
+      empty,
+      {
+        mode: "task",
+        taskDestination: "daily-note",
+        taskNoteStrategy: "occurrence-day",
+        taskNoteFolder: "Calendar Events",
+        typeFolder: "_archive/Legacy calendar notes",
+        folder: "_archive/Legacy calendar notes",
+        autoCreateEnabled: true,
+      },
+      [],
+      false,
+    );
+
+    assert.equal(result.action, "created");
+    assert.equal(result.file?.path, targetPath);
+    assert.match(harness.files.get(targetPath), /Still create this task/u);
+  } finally {
+    restoreMoment();
+  }
+});
+
+test("Controller migrates a rescheduled calendar task block to the new Daily Note", async () => {
+  const restoreMoment = installMoment();
+  try {
+    const sourcePath = "Inbox/Daily/2026/08/18.md";
+    const targetPath = "Inbox/Daily/2026/08/19.md";
+    const externalId = "calendar:https://calendar.example/team.ics#series-uid-20260818T090000";
+    const sourceLine = `- [ ] Team standup [scheduled:: 2026-08-18 09:00:00] [timeEstimate:: 30] %% tps-inline-props:${JSON.stringify({
+      externalId,
+      externalEventId: "series-uid-20260818T090000",
+      tpsCalendarUid: "series-uid",
+      tpsCalendarSourceUrl: "https://calendar.example/team.ics",
+    })} %%`;
+    const harness = createHarness({
+      initialFiles: {
+        [sourcePath]: ['---', 'kind: dailynote', '---', sourceLine, '  - preserve this child', '', '- [ ] Keep me', ''].join('\n'),
+        [targetPath]: ['---', 'kind: dailynote', '---', '', 'Target body', ''].join('\n'),
+      },
+    });
+    gcmAttemptHandler = async (_app, isoDate) => ({
+      available: true,
+      file: isoDate === '2026-08-19'
+        ? harness.app.vault.getAbstractFileByPath(targetPath)
+        : null,
+    });
+    const { AutoCreateService } = loadAutoCreateService();
+    const service = new AutoCreateService(harness.app);
+    const event = {
+      id: "series-uid-20260818T090000",
+      uid: "series-uid",
+      title: "Team standup",
+      description: "",
+      startDate: new Date(2026, 7, 19, 10, 0, 0),
+      endDate: new Date(2026, 7, 19, 10, 30, 0),
+      sourceUrl: "https://calendar.example/team.ics",
+      location: "",
+      url: "",
+      isAllDay: false,
+    };
+    const calendarInfo = {
+      mode: "task",
+      taskDestination: "daily-note",
+      taskNoteStrategy: "occurrence-day",
+      taskNoteFolder: "Calendar Events",
+    };
+    const taskNoteLink = service.buildTaskNoteLink(event, calendarInfo, null);
+    const result = await service.updateExistingInlineTask({
+      file: harness.app.vault.getAbstractFileByPath(sourcePath),
+      isInlineTask: true,
+      inSyncScope: true,
+      taskLineIndex: 3,
+      taskRawLine: sourceLine,
+      associatedNotePath: null,
+      externalId,
+      eventId: event.id,
+      uid: event.uid,
+      eventUrl: null,
+      storedStart: "2026-08-18 09:00:00",
+      storedEnd: 30,
+      storedTitle: "Team standup",
+      storedLocation: "",
+      storedAllDay: false,
+      startDate: new Date(2026, 7, 18, 9, 0, 0),
+      sourceUrl: event.sourceUrl,
+      orphanCandidateAt: null,
+      isArchived: false,
+    }, event, calendarInfo, taskNoteLink, {
+      expectedStart: "2026-08-19 10:00:00",
+      expectedEnd: 30,
+      startChanged: true,
+      endChanged: false,
+      titleMissing: false,
+      locationMissing: false,
+      sourceChanged: false,
+      urlChanged: false,
+      allDayChanged: false,
+      repairedEventId: false,
+    });
+
+    assert.equal(result.changed, true);
+    assert.equal(result.file.path, targetPath);
+    assert.doesNotMatch(harness.files.get(sourcePath), /series-uid-20260818T090000/u);
+    assert.match(harness.files.get(sourcePath), /Keep me/u);
+    const target = harness.files.get(targetPath);
+    assert.match(target, /\[\[Calendar Events\/2026-08-19\/Calendar event--[a-f0-9]{8}\|Team standup\]\]/u);
+    assert.match(target, /\[scheduled:: 2026-08-19 10:00:00\]/u);
+    assert.match(target, /preserve this child/u);
+    assert.match(target, /"associatedNotePath":"Calendar Events\/2026-08-19\/Calendar event--[a-f0-9]{8}\.md"/u);
+  } finally {
+    restoreMoment();
+  }
+});
+
+test("Controller matches a rescheduled single event by unique source-scoped UID and rejects recurring ambiguity", () => {
+  const { AutoCreateService } = loadAutoCreateService();
+  const harness = createHarness();
+  const service = new AutoCreateService(harness.app);
+  const event = {
+    id: 'single-uid-20260819T100000',
+    uid: 'single-uid',
+    title: 'Moved event',
+    startDate: new Date(2026, 7, 19, 10, 0, 0),
+    sourceUrl: 'https://calendar.example/feed.ics',
+  };
+  const candidate = {
+    file: new FakeFile('Inbox/Daily/2026/08/18.md'),
+    uid: event.uid,
+    sourceUrl: event.sourceUrl,
+    isArchived: false,
+  };
+  const uidKey = service.buildUidKey(event.uid, event.sourceUrl);
+  const empty = new Map();
+
+  const unique = service.findVaultNoteForEvent(
+    event,
+    empty,
+    empty,
+    empty,
+    new Map([[uidKey, [candidate]]]),
+    empty,
+    empty,
+  );
+  assert.equal(unique.note, candidate);
+  assert.equal(unique.repairedEventId, true);
+
+  const ambiguous = service.findVaultNoteForEvent(
+    event,
+    empty,
+    empty,
+    empty,
+    new Map([[uidKey, [candidate, { ...candidate, file: new FakeFile('Other.md') }]]]),
+    empty,
+    empty,
+  );
+  assert.equal(ambiguous.note, null);
+});
+
+test("Controller rolls back a reschedule target when the source task block changes concurrently", async () => {
+  const restoreMoment = installMoment();
+  try {
+    const sourcePath = 'Inbox/Daily/2026/08/18.md';
+    const targetPath = 'Inbox/Daily/2026/08/19.md';
+    const externalId = 'calendar:https://calendar.example/feed.ics#move-race';
+    const sourceLine = `- [ ] Move race [scheduled:: 2026-08-18 09:00:00] %% tps-inline-props:${JSON.stringify({ externalId })} %%`;
+    const harness = createHarness({ initialFiles: {
+      [sourcePath]: ['---', '---', sourceLine, '  - original child', '', 'Keep source body', ''].join('\n'),
+      [targetPath]: ['---', '---', '', 'Keep target body', ''].join('\n'),
+    } });
+    gcmAttemptHandler = async () => ({
+      available: true,
+      file: harness.app.vault.getAbstractFileByPath(targetPath),
+    });
+    const originalProcess = harness.app.vault.process.bind(harness.app.vault);
+    let driftInjected = false;
+    harness.app.vault.process = async (file, processor) => {
+      if (file.path === targetPath && !driftInjected) {
+        driftInjected = true;
+        harness.files.set(sourcePath, harness.files.get(sourcePath).replace('original child', 'concurrent child edit'));
+      }
+      return originalProcess(file, processor);
+    };
+    const { AutoCreateService } = loadAutoCreateService();
+    const service = new AutoCreateService(harness.app);
+    const event = {
+      id: 'move-race', uid: 'move-race', title: 'Move race', description: '',
+      startDate: new Date(2026, 7, 19, 10), endDate: new Date(2026, 7, 19, 10, 30),
+      sourceUrl: 'https://calendar.example/feed.ics', location: '', url: '', isAllDay: false,
+    };
+    const calendarInfo = { mode: 'task', taskDestination: 'daily-note', taskNoteStrategy: 'series' };
+    const taskNoteLink = service.buildTaskNoteLink(event, calendarInfo, null);
+    const result = await service.updateExistingInlineTask({
+      file: harness.app.vault.getAbstractFileByPath(sourcePath), isInlineTask: true, inSyncScope: true,
+      taskLineIndex: 2, taskRawLine: sourceLine, associatedNotePath: null, externalId,
+      eventId: event.id, uid: event.uid, eventUrl: null, storedStart: '2026-08-18 09:00:00',
+      storedEnd: '', storedTitle: 'Move race', storedLocation: '', storedAllDay: false,
+      startDate: new Date(2026, 7, 18, 9), sourceUrl: event.sourceUrl,
+      orphanCandidateAt: null, isArchived: false,
+    }, event, calendarInfo, taskNoteLink, {
+      expectedStart: '2026-08-19 10:00:00', expectedEnd: '', startChanged: true, endChanged: false,
+      titleMissing: false, locationMissing: false, sourceChanged: false, urlChanged: false,
+      allDayChanged: false, repairedEventId: false,
+    });
+
+    assert.equal(result.changed, false);
+    assert.match(harness.files.get(sourcePath), /concurrent child edit/u);
+    assert.match(harness.files.get(sourcePath), /move-race/u);
+    assert.doesNotMatch(harness.files.get(targetPath), /move-race/u);
+    assert.match(harness.files.get(targetPath), /Keep target body/u);
   } finally {
     restoreMoment();
   }

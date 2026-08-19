@@ -95,6 +95,21 @@ test("external calendar normalization preserves live settings-editor references 
     assert.strictEqual(normalized[0], capturedCalendar);
     assert.equal(normalized[0].url, value);
   }
+  assert.equal(capturedCalendar.autoCreateTaskNoteStrategy, "occurrence-day");
+  assert.equal(capturedCalendar.autoCreateTaskNoteFolder, "Calendar Events");
+});
+
+test("external calendar task-note strategy normalization preserves supported series choices", () => {
+  const calendars = [{
+    id: "calendar-series",
+    url: "feed.ics",
+    autoCreateMode: "task",
+    autoCreateTaskNoteStrategy: "series",
+    autoCreateTaskNoteFolder: "External Events/Linked",
+  }];
+  normalizeExternalCalendarsInPlace(calendars, (path) => path);
+  assert.equal(calendars[0].autoCreateTaskNoteStrategy, "series");
+  assert.equal(calendars[0].autoCreateTaskNoteFolder, "External Events/Linked");
 });
 
 test("external calendar normalization preserves settings-editor reorder and delete operations", () => {

@@ -374,6 +374,48 @@ test('inline calendar event changes patch the task record without touching note 
   assert.match(autoCreateSource, /if \(match\.isInlineTask\) \{[\s\S]*updateExistingInlineTask/);
 });
 
+test('calendar task title replacement preserves inline fields, tags, and hidden identity', () => {
+  const metadata = JSON.stringify({ externalId: 'calendar:feed#event', associatedNotePath: 'Old.md' });
+  const line = `- [ ] Old title [scheduled:: 2026-08-18 09:00:00] #meeting %% tps-inline-props:${metadata} %%`;
+  const updated = inlineTaskHelper.replaceInlineTaskTitle(line, '[[Calendar Events/Series/Meeting|Meeting]]');
+
+  assert.match(updated, /^- \[ \] \[\[Calendar Events\/Series\/Meeting\|Meeting\]\]/u);
+  assert.match(updated, /\[scheduled:: 2026-08-18 09:00:00\] #meeting/u);
+  assert.match(updated, /calendar:feed#event/u);
+});
+
+test('calendar reschedule block helpers preserve children and remove only an exact captured source block', () => {
+  const externalId = 'calendar:https://calendar.example/feed#move-event';
+  const firstLine = `- [ ] Meeting [scheduled:: 2026-08-18 09:00:00] %% tps-inline-props:${JSON.stringify({ externalId })} %%`;
+  const source = ['---', 'kind: dailynote', '---', firstLine, '  - child checklist', '    child note', '', '- [ ] Unrelated', ''].join('\r\n');
+  const capture = inlineTaskHelper.captureExternalTaskBlock(source, (line) => line.includes(externalId));
+
+  assert.equal(capture.outcome, 'found');
+  assert.match(capture.block, /child checklist\r\n    child note\r\n/u);
+
+  const nextFirstLine = inlineTaskHelper.setInlineTaskFieldValue(firstLine, 'scheduled', '2026-08-19 10:00:00');
+  const movedBlock = `${nextFirstLine}${capture.block.slice(capture.firstLine.length)}`;
+  const target = ['---', 'kind: dailynote', '---', '', 'Target body', ''].join('\n');
+  const inserted = inlineTaskHelper.insertExternalTaskBlockAfterLeadingTaskBlocks(
+    target,
+    movedBlock,
+    (line) => line.includes('calendar:'),
+  );
+  assert.equal(inserted.inserted, true);
+  assert.match(inserted.content, /2026-08-19 10:00:00/u);
+  assert.match(inserted.content, /child checklist/u);
+
+  const removed = inlineTaskHelper.removeExactExternalTaskBlock(source, (line) => line.includes(externalId), capture.block);
+  assert.equal(removed.outcome, 'changed');
+  assert.doesNotMatch(removed.content, /move-event/u);
+  assert.match(removed.content, /Unrelated/u);
+
+  const drifted = source.replace('child note', 'externally edited child note');
+  const rejected = inlineTaskHelper.removeExactExternalTaskBlock(drifted, (line) => line.includes(externalId), capture.block);
+  assert.equal(rejected.outcome, 'invalid-result');
+  assert.equal(rejected.content, drifted);
+});
+
 test('calendar task mutation ignores checkbox-shaped YAML and fails closed on unterminated frontmatter', () => {
   const externalId = 'calendar:https://calendar.example/feed#yaml-scalar';
   const yamlCheckbox = `  - [ ] not a task %% tps-inline-props:${JSON.stringify({ externalId })} %%`;

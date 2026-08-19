@@ -22,24 +22,36 @@ import { applyDailyNoteTemplateVariables } from "./daily-note-template";
 import { cancelOpenInlineTaskLine } from "./external-calendar-cancellation";
 import {
     addTagToInlineTaskLine,
-    ensureInlineTaskTitle,
+    captureExternalTaskBlock,
     findMarkdownBodyStartLine,
     findMarkdownCheckboxTaskLineIndexes,
     getVisibleInlineTaskText,
     insertTaskLineAfterLeadingTaskBlocks,
+    insertExternalTaskBlockAfterLeadingTaskBlocks,
     isMarkdownCheckboxTaskLine,
     mutateExternalTaskLineContent,
     patchCanonicalInlineTaskMetadata,
+    removeExactExternalTaskBlock,
+    replaceInlineTaskTitle,
     resolveInlineTaskTemporalValues,
     setInlineTaskFieldValue,
     type ExternalTaskLineMutationOutcome,
     type InlineTaskTemporalValues,
 } from "./external-calendar-inline-task";
+import {
+    buildExternalCalendarTaskNoteLink,
+    normalizeExternalCalendarTaskNoteFolder,
+    normalizeExternalCalendarTaskNoteStrategy,
+    type ExternalCalendarTaskNoteLink,
+    type ExternalCalendarTaskNoteStrategy,
+} from "./external-calendar-task-note";
 
 interface CalendarAutoCreateConfig {
     mode?: "note" | "task";
     taskDestination?: "daily-note" | "event-note";
     taskTargetPath?: string | null;
+    taskNoteStrategy?: ExternalCalendarTaskNoteStrategy;
+    taskNoteFolder?: string | null;
     typeFolder?: string | null;
     folder?: string | null;
     tag?: string | null;
@@ -53,6 +65,19 @@ interface DailyNoteTarget {
     template: string;
     templateDateFormat: string;
     templateTimeFormat: string;
+}
+
+interface InlineTaskUpdateChanges {
+    expectedStart: string;
+    expectedEnd: string | number;
+    startChanged: boolean;
+    endChanged: boolean;
+    titleMissing: boolean;
+    locationMissing: boolean;
+    sourceChanged: boolean;
+    urlChanged: boolean;
+    allDayChanged: boolean;
+    repairedEventId: boolean;
 }
 
 const TEMPLATER_COMMAND_PATTERN = /<%[\s\S]*?%>/u;
@@ -97,6 +122,7 @@ interface VaultNote {
     inSyncScope: boolean;
     taskLineIndex?: number;
     taskRawLine?: string;
+    associatedNotePath?: string | null;
     externalId: string | null;
     eventId: string | null;
     uid: string;
@@ -212,7 +238,7 @@ export class AutoCreateService {
                 successfulUrls: fetchResult.successfulUrls.size,
                 failedUrls: fetchResult.failedUrls.size,
             });
-            const { byEventKey, byLegacyEventId, byUidStart, byTitleDay, byEventUrl, allNotes } = await logger.timeAsync("AutoCreate", "vault-index", {
+            const { byEventKey, byLegacyEventId, byUidStart, byUid, byTitleDay, byEventUrl, allNotes } = await logger.timeAsync("AutoCreate", "vault-index", {
                 scanRoots: scanRoots.length,
             }, () => this.buildVaultIndex(scanRoots));
             logger.flow("AutoCreate", "vault-index:result", {
@@ -220,6 +246,7 @@ export class AutoCreateService {
                 eventKeys: byEventKey.size,
                 legacyEventIds: byLegacyEventId.size,
                 uidStartKeys: byUidStart.size,
+                uidKeys: byUid.size,
                 titleDayKeys: byTitleDay.size,
                 eventUrls: byEventUrl.size,
             });
@@ -253,6 +280,7 @@ export class AutoCreateService {
                         byEventKey,
                         byLegacyEventId,
                         byUidStart,
+                        byUid,
                         byTitleDay,
                         byEventUrl,
                         calendarConfigs[event.sourceUrl || ""],
@@ -393,6 +421,7 @@ export class AutoCreateService {
         byEventKey: Map<string, VaultNote>;
         byLegacyEventId: Map<string, VaultNote[]>;
         byUidStart: Map<string, VaultNote>;
+        byUid: Map<string, VaultNote[]>;
         byTitleDay: Map<string, VaultNote>;
         byEventUrl: Map<string, VaultNote>;
         allNotes: VaultNote[];
@@ -400,6 +429,7 @@ export class AutoCreateService {
         const byEventKey = new Map<string, VaultNote>();
         const byLegacyEventId = new Map<string, VaultNote[]>();
         const byUidStart = new Map<string, VaultNote>();
+        const byUid = new Map<string, VaultNote[]>();
         const byTitleDay = new Map<string, VaultNote>();
         const byEventUrl = new Map<string, VaultNote>();
         const allNotes: VaultNote[] = [];
@@ -427,6 +457,7 @@ export class AutoCreateService {
                     const key = this.buildUidStartKeyFromParts(note.uid, note.startDate, note.sourceUrl);
                     if (!byUidStart.has(key)) byUidStart.set(key, note);
                 }
+                if (note.uid) this.addUidCandidate(byUid, note);
                 if (note.storedTitle && note.startDate && Number.isFinite(note.startDate.getTime())) {
                     const key = this.buildTitleDayKey(note.storedTitle.trim().toLowerCase(), note.startDate, note.sourceUrl);
                     if (!byTitleDay.has(key)) byTitleDay.set(key, note);
@@ -476,6 +507,7 @@ export class AutoCreateService {
                 const key = this.buildUidStartKeyFromParts(uid, startDate, sourceUrl);
                 if (!byUidStart.has(key)) byUidStart.set(key, note);
             }
+            if (uid) this.addUidCandidate(byUid, note);
             if (note.storedTitle && startDate && Number.isFinite(startDate.getTime())) {
                 const key = this.buildTitleDayKey(note.storedTitle.trim().toLowerCase(), startDate, sourceUrl);
                 if (!byTitleDay.has(key)) byTitleDay.set(key, note);
@@ -485,7 +517,7 @@ export class AutoCreateService {
             }
         }
 
-        return { byEventKey, byLegacyEventId, byUidStart, byTitleDay, byEventUrl, allNotes };
+        return { byEventKey, byLegacyEventId, byUidStart, byUid, byTitleDay, byEventUrl, allNotes };
     }
 
     private async getInlineExternalTaskNotes(file: TFile, inSyncScope: boolean): Promise<VaultNote[]> {
@@ -518,6 +550,7 @@ export class AutoCreateService {
                 inSyncScope,
                 taskLineIndex: lineIndex,
                 taskRawLine: line,
+                associatedNotePath: this.normalizeAssociatedNotePath(props.get("associatednotepath")),
                 externalId,
                 eventId,
                 uid: uid || "",
@@ -560,6 +593,12 @@ export class AutoCreateService {
         return props;
     }
 
+    private normalizeAssociatedNotePath(value: unknown): string | null {
+        const normalized = normalizePath(String(value || "").trim().replace(/^\/+|\/+$/gu, ""));
+        if (!normalized || normalized === ".") return null;
+        return normalized.toLowerCase().endsWith(".md") ? normalized : `${normalized}.md`;
+    }
+
     private mergeEncodedInlineMetadata(props: Map<string, string>, raw: string, alreadyJson = false): void {
         if (!raw) return;
         try {
@@ -598,6 +637,7 @@ export class AutoCreateService {
         byEventKey: Map<string, VaultNote>,
         byLegacyEventId: Map<string, VaultNote[]>,
         byUidStart: Map<string, VaultNote>,
+        byUid: Map<string, VaultNote[]>,
         byTitleDay: Map<string, VaultNote>,
         byEventUrl: Map<string, VaultNote>,
         calendarInfo: CalendarAutoCreateConfig | null,
@@ -607,7 +647,7 @@ export class AutoCreateService {
         const eventKey = this.buildEventKeyForEvent(event);
         const normalizedSourceUrl = this.normalizeSourceUrl(event.sourceUrl);
         const normalizedEventUrl = this.normalizeEventUrl(event.url);
-        const vaultMatch = this.findVaultNoteForEvent(event, byEventKey, byLegacyEventId, byUidStart, byTitleDay, byEventUrl);
+        const vaultMatch = this.findVaultNoteForEvent(event, byEventKey, byLegacyEventId, byUidStart, byUid, byTitleDay, byEventUrl);
         const match = vaultMatch.note;
 
         if (match) {
@@ -640,13 +680,18 @@ export class AutoCreateService {
             const sourceChanged = !!normalizedSourceUrl && match.sourceUrl !== normalizedSourceUrl;
             const urlChanged = !!normalizedEventUrl && match.eventUrl !== normalizedEventUrl;
             const allDayChanged = match.storedAllDay === null ? event.isAllDay : match.storedAllDay !== event.isAllDay;
+            const taskNoteLink = match.isInlineTask
+                ? this.buildTaskNoteLink(event, calendarInfo, match.associatedNotePath)
+                : null;
+            const linkedTitleChanged = !!taskNoteLink && !String(match.taskRawLine || "").includes(taskNoteLink.markdown);
+            const associationChanged = !!taskNoteLink && match.associatedNotePath !== taskNoteLink.notePath;
 
-            if (!startChanged && !endChanged && !titleMissing && !locationMissing && !sourceChanged && !urlChanged && !allDayChanged && !vaultMatch.repairedEventId && !forceRegenerate) {
+            if (!startChanged && !endChanged && !titleMissing && !locationMissing && !sourceChanged && !urlChanged && !allDayChanged && !linkedTitleChanged && !associationChanged && !vaultMatch.repairedEventId && !forceRegenerate) {
                 return { action: "none", file: match.file };
             }
 
             if (match.isInlineTask) {
-                const didUpdate = await this.updateExistingInlineTask(match, event, {
+                const update = await this.updateExistingInlineTask(match, event, calendarInfo, taskNoteLink!, {
                     expectedStart,
                     expectedEnd,
                     startChanged,
@@ -658,8 +703,8 @@ export class AutoCreateService {
                     allDayChanged,
                     repairedEventId: vaultMatch.repairedEventId,
                 });
-                if (didUpdate) this.orphanDeletionTombstones.delete(event.id);
-                return { action: didUpdate ? "updated" : "none", file: match.file };
+                if (update.changed) this.orphanDeletionTombstones.delete(event.id);
+                return { action: update.changed ? "updated" : "none", file: update.file };
             }
 
             let didUpdate = false;
@@ -728,15 +773,15 @@ export class AutoCreateService {
         const archivedMatch = byEventKey.get(eventKey) || this.findLegacyEventMatch(event, byLegacyEventId, true);
         if (archivedMatch?.isArchived) return { action: "none" };
 
+        if (calendarInfo?.mode === "task") {
+            const result = await this.createTaskInTaskNote(event, calendarInfo);
+            return result || { action: "none" };
+        }
+
         const resolvedFolder = calendarInfo?.typeFolder || calendarInfo?.folder || "";
         if (normalizePath(resolvedFolder).split("/").filter(Boolean).some((segment) => segment.startsWith("_"))) {
             logger.warn(`[AutoCreateService] Refusing to create in protected path "${resolvedFolder || "(vault root)"}" for: ${event.title}`);
             return { action: "none" };
-        }
-
-        if (calendarInfo?.mode === "task") {
-            const result = await this.createTaskInTaskNote(event, calendarInfo);
-            return result || { action: "none" };
         }
 
         const file = await createMeetingNoteFromExternalEvent(
@@ -765,19 +810,10 @@ export class AutoCreateService {
     private async updateExistingInlineTask(
         match: VaultNote,
         event: ExternalCalendarEvent,
-        changes: {
-            expectedStart: string;
-            expectedEnd: string | number;
-            startChanged: boolean;
-            endChanged: boolean;
-            titleMissing: boolean;
-            locationMissing: boolean;
-            sourceChanged: boolean;
-            urlChanged: boolean;
-            allDayChanged: boolean;
-            repairedEventId: boolean;
-        },
-    ): Promise<boolean> {
+        calendarInfo: CalendarAutoCreateConfig | null,
+        taskNoteLink: ExternalCalendarTaskNoteLink,
+        changes: InlineTaskUpdateChanges,
+    ): Promise<{ changed: boolean; file: TFile }> {
         const expectedExternalId = buildCalendarExternalId(this.app, event);
         const expectedSourceUrl = this.normalizeSourceUrl(event.sourceUrl);
         const expectedEventUrl = this.normalizeEventUrl(event.url);
@@ -793,6 +829,24 @@ export class AutoCreateService {
         if (changes.locationMissing && event.location) metadataUpdates.location = event.location;
         if (changes.urlChanged) metadataUpdates.url = expectedEventUrl || null;
         if (changes.allDayChanged) metadataUpdates.allDay = event.isAllDay ? true : null;
+        metadataUpdates.associatedNotePath = taskNoteLink.notePath;
+        metadataUpdates.calendarTaskNoteStrategy = normalizeExternalCalendarTaskNoteStrategy(calendarInfo?.taskNoteStrategy);
+
+        await this.ensureTaskNoteFolder(taskNoteLink.notePath);
+
+        if (this.shouldMigrateRescheduledTask(match, event, calendarInfo, changes.startChanged)) {
+            const targetFile = await this.ensureDailyNoteFile(event.startDate);
+            if (targetFile.path !== match.file.path) {
+                return await this.migrateExistingInlineTask(
+                    match,
+                    targetFile,
+                    event,
+                    taskNoteLink,
+                    changes,
+                    metadataUpdates,
+                );
+            }
+        }
 
         const mutationState: { outcome: ExternalTaskLineMutationOutcome; lineIndex: number } = {
             outcome: "not-found",
@@ -830,25 +884,13 @@ export class AutoCreateService {
                         );
                         return !expectedSourceUrl || lineSourceUrl === expectedSourceUrl;
                     },
-                    (line) => {
-                        let nextLine = line;
-                        if (Object.keys(metadataUpdates).length > 0) {
-                            const metadataPatch = patchCanonicalInlineTaskMetadata(nextLine, metadataUpdates);
-                            if (!metadataPatch.patched) {
-                                metadataPatchUnavailable = true;
-                                return line;
-                            }
-                            nextLine = metadataPatch.line;
-                        }
-                        if (changes.titleMissing) nextLine = ensureInlineTaskTitle(nextLine, event.title);
-                        if (changes.startChanged) {
-                            nextLine = setInlineTaskFieldValue(nextLine, this.config.startProperty, changes.expectedStart);
-                        }
-                        if (changes.endChanged) {
-                            nextLine = setInlineTaskFieldValue(nextLine, this.config.endProperty, changes.expectedEnd);
-                        }
-                        return nextLine;
-                    },
+                    (line) => this.buildUpdatedInlineTaskLine(
+                        line,
+                        taskNoteLink,
+                        changes,
+                        metadataUpdates,
+                        () => { metadataPatchUnavailable = true; },
+                    ),
                 );
                 mutationState.outcome = mutation.outcome;
                 mutationState.lineIndex = mutation.lineIndex;
@@ -859,7 +901,7 @@ export class AutoCreateService {
                 path: match.file.path,
                 expectedLine: (match.taskLineIndex ?? -1) + 1,
             });
-            return false;
+            return { changed: false, file: match.file };
         }
 
         if (metadataPatchUnavailable) {
@@ -880,9 +922,9 @@ export class AutoCreateService {
                 outcome: mutationState.outcome,
                 expectedLine: (match.taskLineIndex ?? -1) + 1,
             });
-            return false;
+            return { changed: false, file: match.file };
         }
-        if (mutationState.outcome !== "changed") return false;
+        if (mutationState.outcome !== "changed") return { changed: false, file: match.file };
 
         emitFilesUpdated(this.app, [match.file.path], "tps-controller");
         logger.flow("AutoCreate", "inline-task-update:done", {
@@ -892,18 +934,245 @@ export class AutoCreateService {
             endChanged: changes.endChanged,
             metadataKeys: Object.keys(metadataUpdates).sort(),
         });
-        return true;
+        return { changed: true, file: match.file };
+    }
+
+    private buildUpdatedInlineTaskLine(
+        line: string,
+        taskNoteLink: ExternalCalendarTaskNoteLink,
+        changes: InlineTaskUpdateChanges,
+        metadataUpdates: Record<string, unknown | null>,
+        onMetadataPatchUnavailable: () => void,
+    ): string {
+        const metadataPatch = patchCanonicalInlineTaskMetadata(line, metadataUpdates);
+        if (!metadataPatch.patched) {
+            onMetadataPatchUnavailable();
+            return line;
+        }
+        let nextLine = replaceInlineTaskTitle(metadataPatch.line, taskNoteLink.markdown);
+        if (changes.startChanged) {
+            nextLine = setInlineTaskFieldValue(nextLine, this.config.startProperty, changes.expectedStart);
+        }
+        if (changes.endChanged) {
+            nextLine = setInlineTaskFieldValue(nextLine, this.config.endProperty, changes.expectedEnd);
+        }
+        return nextLine;
+    }
+
+    private shouldMigrateRescheduledTask(
+        match: VaultNote,
+        event: ExternalCalendarEvent,
+        calendarInfo: CalendarAutoCreateConfig | null,
+        startChanged: boolean,
+    ): boolean {
+        if (!startChanged || calendarInfo?.taskDestination === "event-note") return false;
+        if (!(match.startDate instanceof Date) || !Number.isFinite(match.startDate.getTime())) return false;
+        return this.formatAllDayDate(match.startDate) !== this.formatAllDayDate(event.startDate);
+    }
+
+    private async migrateExistingInlineTask(
+        match: VaultNote,
+        targetFile: TFile,
+        event: ExternalCalendarEvent,
+        taskNoteLink: ExternalCalendarTaskNoteLink,
+        changes: InlineTaskUpdateChanges,
+        metadataUpdates: Record<string, unknown | null>,
+    ): Promise<{ changed: boolean; file: TFile }> {
+        const expectedExternalId = buildCalendarExternalId(this.app, event);
+        const expectedSourceUrl = this.normalizeSourceUrl(event.sourceUrl);
+        const candidateExternalIds = new Set(
+            [match.externalId, expectedExternalId]
+                .map((value) => this.normalizeIdentityValue(value))
+                .filter((value): value is string => !!value),
+        );
+        const buildMatcher = (footnoteMetadata: Map<string, string>) => (line: string): boolean => {
+            const props = this.parseInlineDataviewProperties(line, footnoteMetadata);
+            const lineExternalId = this.normalizeIdentityValue(props.get("externalid"));
+            if (lineExternalId && candidateExternalIds.has(lineExternalId)) return true;
+            const lineEventId = this.normalizeIdentityValue(
+                props.get(this.config.eventIdKey.toLowerCase()) || props.get("externaleventid"),
+            );
+            if (!lineEventId || lineEventId !== event.id) return false;
+            const lineSourceUrl = this.normalizeSourceUrl(
+                props.get(this.config.sourceUrlKey.toLowerCase()) || props.get("tpscalendarsourceurl"),
+            );
+            return !expectedSourceUrl || lineSourceUrl === expectedSourceUrl;
+        };
+
+        let sourceBlock = "";
+        let updatedBlock = "";
+        let sourceCaptureOutcome = "not-found";
+        const sourceContent = await this.app.vault.read(match.file);
+        const sourceLines = sourceContent.split(/\r\n|\n|\r/u);
+        const sourceCapture = captureExternalTaskBlock(
+            sourceContent,
+            buildMatcher(this.parseInlineMetadataFootnotes(sourceLines)),
+        );
+        sourceCaptureOutcome = sourceCapture.outcome;
+        if (sourceCapture.outcome !== "found") {
+            logger.flowWarn("AutoCreate", "inline-task-migrate:source-unconfirmed", {
+                sourcePath: match.file.path,
+                targetPath: targetFile.path,
+                outcome: sourceCapture.outcome,
+            });
+            return { changed: false, file: match.file };
+        }
+        let metadataPatchUnavailable = false;
+        const updatedFirstLine = this.buildUpdatedInlineTaskLine(
+            sourceCapture.firstLine,
+            taskNoteLink,
+            changes,
+            metadataUpdates,
+            () => { metadataPatchUnavailable = true; },
+        );
+        if (metadataPatchUnavailable || updatedFirstLine === sourceCapture.firstLine && !changes.startChanged) {
+            return { changed: false, file: match.file };
+        }
+        sourceBlock = sourceCapture.block;
+        updatedBlock = `${updatedFirstLine}${sourceBlock.slice(sourceCapture.firstLine.length)}`;
+
+        const targetState: { outcome: "inserted" | "idempotent" | "conflict" | "unsafe" } = {
+            outcome: "conflict",
+        };
+        try {
+            await this.app.vault.process(targetFile, (content) => {
+                const lines = content.split(/\r\n|\n|\r/u);
+                const matcher = buildMatcher(this.parseInlineMetadataFootnotes(lines));
+                const existing = captureExternalTaskBlock(content, matcher);
+                if (existing.outcome === "found") {
+                    targetState.outcome = existing.block === updatedBlock ? "idempotent" : "conflict";
+                    return content;
+                }
+                if (existing.outcome !== "not-found") {
+                    targetState.outcome = existing.outcome === "unsafe-frontmatter" ? "unsafe" : "conflict";
+                    return content;
+                }
+                const insertion = insertExternalTaskBlockAfterLeadingTaskBlocks(
+                    content,
+                    updatedBlock,
+                    (line) => this.isExternalCalendarTaskLine(line, this.parseInlineMetadataFootnotes(lines)),
+                );
+                if (insertion.unsafeFrontmatter || !insertion.inserted) {
+                    targetState.outcome = insertion.unsafeFrontmatter ? "unsafe" : "conflict";
+                    return content;
+                }
+                targetState.outcome = "inserted";
+                return insertion.content;
+            });
+        } catch (error) {
+            logger.flowError("AutoCreate", "inline-task-migrate:target-write-failed", error, {
+                sourcePath: match.file.path,
+                targetPath: targetFile.path,
+            });
+            try {
+                const liveTarget = await this.app.vault.read(targetFile);
+                const liveLines = liveTarget.split(/\r\n|\n|\r/u);
+                const liveCapture = captureExternalTaskBlock(
+                    liveTarget,
+                    buildMatcher(this.parseInlineMetadataFootnotes(liveLines)),
+                );
+                targetState.outcome = liveCapture.outcome === "found" && liveCapture.block === updatedBlock
+                    ? "idempotent"
+                    : "conflict";
+            } catch {
+                targetState.outcome = "conflict";
+            }
+        }
+        const targetOutcome = targetState.outcome;
+        if (targetOutcome !== "inserted" && targetOutcome !== "idempotent") {
+            logger.flowWarn("AutoCreate", "inline-task-migrate:target-unconfirmed", {
+                sourcePath: match.file.path,
+                targetPath: targetFile.path,
+                outcome: targetOutcome,
+            });
+            return { changed: false, file: match.file };
+        }
+
+        let sourceRemoved = false;
+        try {
+            await this.app.vault.process(match.file, (content) => {
+                const lines = content.split(/\r\n|\n|\r/u);
+                const removal = removeExactExternalTaskBlock(
+                    content,
+                    buildMatcher(this.parseInlineMetadataFootnotes(lines)),
+                    sourceBlock,
+                );
+                sourceCaptureOutcome = removal.outcome;
+                sourceRemoved = removal.outcome === "changed";
+                return removal.content;
+            });
+        } catch (error) {
+            logger.flowError("AutoCreate", "inline-task-migrate:source-remove-failed", error, {
+                sourcePath: match.file.path,
+                targetPath: targetFile.path,
+            });
+        }
+
+        try {
+            const liveSource = await this.app.vault.read(match.file);
+            const liveLines = liveSource.split(/\r\n|\n|\r/u);
+            const liveCapture = captureExternalTaskBlock(
+                liveSource,
+                buildMatcher(this.parseInlineMetadataFootnotes(liveLines)),
+            );
+            sourceRemoved = liveCapture.outcome === "not-found";
+            sourceCaptureOutcome = liveCapture.outcome;
+        } catch (error) {
+            sourceRemoved = false;
+            logger.flowError("AutoCreate", "inline-task-migrate:source-confirm-failed", error, {
+                sourcePath: match.file.path,
+                targetPath: targetFile.path,
+            });
+        }
+
+        if (!sourceRemoved) {
+            if (targetOutcome === "inserted") {
+                try {
+                    await this.app.vault.process(targetFile, (content) => {
+                        const lines = content.split(/\r\n|\n|\r/u);
+                        return removeExactExternalTaskBlock(
+                            content,
+                            buildMatcher(this.parseInlineMetadataFootnotes(lines)),
+                            updatedBlock,
+                        ).content;
+                    });
+                } catch (error) {
+                    logger.flowError("AutoCreate", "inline-task-migrate:rollback-failed", error, {
+                        sourcePath: match.file.path,
+                        targetPath: targetFile.path,
+                    });
+                }
+            }
+            logger.flowWarn("AutoCreate", "inline-task-migrate:source-unconfirmed", {
+                sourcePath: match.file.path,
+                targetPath: targetFile.path,
+                outcome: sourceCaptureOutcome,
+            });
+            return { changed: false, file: match.file };
+        }
+
+        emitFilesUpdated(this.app, [match.file.path, targetFile.path], "tps-controller");
+        logger.flow("AutoCreate", "inline-task-migrate:done", {
+            sourcePath: match.file.path,
+            targetPath: targetFile.path,
+            targetOutcome,
+            childLines: Math.max(0, sourceCapture.endLineExclusive - sourceCapture.lineIndex - 1),
+        });
+        return { changed: true, file: targetFile };
     }
 
     private async createTaskInTaskNote(
         event: ExternalCalendarEvent,
         calendarInfo: CalendarAutoCreateConfig | null,
     ): Promise<{ action: "created" | "updated" | "none"; file: TFile } | null> {
-        const file = calendarInfo?.taskTargetPath
+        const useTaskTarget = calendarInfo?.taskDestination === "event-note" && !!calendarInfo?.taskTargetPath;
+        const file = useTaskTarget
             ? await this.ensureTaskTargetFile(calendarInfo.taskTargetPath)
             : await this.ensureDailyNoteFile(event.startDate);
         const externalId = buildCalendarExternalId(this.app, event);
-        const taskLine = this.buildExternalEventTaskLine(event, calendarInfo, externalId);
+        const taskNoteLink = this.buildTaskNoteLink(event, calendarInfo, null);
+        await this.ensureTaskNoteFolder(taskNoteLink.notePath);
+        const taskLine = this.buildExternalEventTaskLine(event, calendarInfo, externalId, taskNoteLink);
         const tag = normalizeTagValue(calendarInfo?.tag || "");
         const state: {
             action: "created" | "updated" | "none";
@@ -1056,10 +1325,11 @@ export class AutoCreateService {
         event: ExternalCalendarEvent,
         calendarInfo: CalendarAutoCreateConfig | null,
         externalId: string,
+        taskNoteLink: ExternalCalendarTaskNoteLink,
     ): string {
         const temporal = this.getInlineTaskTemporalValues(event);
         const parts = [
-            `- [ ] ${event.title || "External calendar event"}`,
+            `- [ ] ${taskNoteLink.markdown}`,
             `[${this.config.startProperty}:: ${temporal.start}]`,
         ];
         if (temporal.end !== "") {
@@ -1070,6 +1340,8 @@ export class AutoCreateService {
             [this.config.eventIdKey]: event.id,
             [this.config.uidKey]: event.uid || this.extractUid(event.id) || "",
             [this.config.sourceUrlKey]: event.sourceUrl || "",
+            associatedNotePath: taskNoteLink.notePath,
+            calendarTaskNoteStrategy: normalizeExternalCalendarTaskNoteStrategy(calendarInfo?.taskNoteStrategy),
         };
         const tag = normalizeTagValue(calendarInfo?.tag || "");
         if (tag) parts.push(`#${tag}`);
@@ -1077,6 +1349,25 @@ export class AutoCreateService {
         if (event.url) hiddenProps.url = event.url;
         if (event.isAllDay) hiddenProps.allDay = true;
         return `${parts.join(" ")} %% tps-inline-props:${JSON.stringify(hiddenProps)} %%`;
+    }
+
+    private buildTaskNoteLink(
+        event: ExternalCalendarEvent,
+        calendarInfo: CalendarAutoCreateConfig | null,
+        existingPath: string | null,
+    ): ExternalCalendarTaskNoteLink {
+        return buildExternalCalendarTaskNoteLink(
+            event,
+            normalizeExternalCalendarTaskNoteStrategy(calendarInfo?.taskNoteStrategy),
+            normalizeExternalCalendarTaskNoteFolder(calendarInfo?.taskNoteFolder),
+            existingPath,
+        );
+    }
+
+    private async ensureTaskNoteFolder(notePath: string): Promise<void> {
+        const normalized = this.normalizeAssociatedNotePath(notePath);
+        const folder = normalized?.includes("/") ? normalized.slice(0, normalized.lastIndexOf("/")) : "";
+        if (folder) await this.ensureFolder(folder);
     }
 
     private formatAllDayDate(date: Date): string {
@@ -1836,6 +2127,7 @@ export class AutoCreateService {
         byEventKey: Map<string, VaultNote>,
         byLegacyEventId: Map<string, VaultNote[]>,
         byUidStart: Map<string, VaultNote>,
+        byUid: Map<string, VaultNote[]>,
         byTitleDay: Map<string, VaultNote>,
         byEventUrl: Map<string, VaultNote>,
     ): { note: VaultNote | null; repairedEventId: boolean } {
@@ -1846,6 +2138,14 @@ export class AutoCreateService {
             const fallback = byUidStart.get(this.buildUidStartKey(event));
             if (fallback && !fallback.isArchived) {
                 match = fallback;
+                repairedEventId = true;
+            }
+        }
+        if (!match) {
+            const uidCandidates = (byUid.get(this.buildUidKey(event.uid, event.sourceUrl)) || [])
+                .filter((candidate) => !candidate.isArchived);
+            if (uidCandidates.length === 1) {
+                match = uidCandidates[0];
                 repairedEventId = true;
             }
         }
@@ -1870,6 +2170,18 @@ export class AutoCreateService {
 
     private buildUidStartKey(event: ExternalCalendarEvent): string {
         return this.buildUidStartKeyFromParts(event.uid || this.extractUid(event.id) || event.id || "", event.startDate, event.sourceUrl);
+    }
+
+    private buildUidKey(uid: string | null | undefined, sourceUrl: unknown): string {
+        return `${this.normalizeSourceUrl(sourceUrl) || ""}::${this.normalizeIdentityValue(uid) || ""}`;
+    }
+
+    private addUidCandidate(index: Map<string, VaultNote[]>, note: VaultNote): void {
+        const key = this.buildUidKey(note.uid, note.sourceUrl);
+        if (!note.uid || !key) return;
+        const candidates = index.get(key) || [];
+        candidates.push(note);
+        index.set(key, candidates);
     }
 
     private buildUidStartKeyFromParts(uid: string | null | undefined, startDate: Date | null | undefined, sourceUrl: unknown): string {

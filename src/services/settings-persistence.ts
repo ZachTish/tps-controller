@@ -1,4 +1,8 @@
 import type { ExternalCalendarConfig, TPSControllerSettings } from "../types";
+import {
+    normalizeExternalCalendarTaskNoteFolder,
+    normalizeExternalCalendarTaskNoteStrategy,
+} from "./external-calendar-task-note";
 
 type SettingsRecord = Record<string, unknown>;
 
@@ -43,6 +47,12 @@ export function normalizeExternalCalendarsInPlace(
             ? "event-note"
             : "daily-note";
         calendar.autoCreateTaskTargetPath = taskTarget;
+        calendar.autoCreateTaskNoteStrategy = normalizeExternalCalendarTaskNoteStrategy(
+            calendar.autoCreateTaskNoteStrategy,
+        );
+        calendar.autoCreateTaskNoteFolder = normalizeExternalCalendarTaskNoteFolder(
+            calendar.autoCreateTaskNoteFolder,
+        );
         if (legacyMode) calendar.autoCreateEnabled = false;
     });
 

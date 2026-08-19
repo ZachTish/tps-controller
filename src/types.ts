@@ -36,6 +36,8 @@ export interface ExternalCalendarConfig {
     autoCreateMode?: "note" | "task";
     autoCreateTaskDestination?: "daily-note" | "event-note";
     autoCreateTaskTargetPath?: string;
+    autoCreateTaskNoteStrategy?: "occurrence-day" | "series";
+    autoCreateTaskNoteFolder?: string;
     autoCreateTypeFolder?: string;
     autoCreateFolder?: string;
     autoCreateTag?: string;
