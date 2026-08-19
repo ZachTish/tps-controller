@@ -1,5 +1,13 @@
 # TPS Controller
 
+## 0.9.3 bounded notification publication
+
+- Controller now selects and deduplicates the earliest publishable reminder occurrences before performing per-item cryptographic hashing. Large repeating schedules no longer hash thousands of occurrences that the signed 128-item wire queue must discard.
+- This fixes the observed paired-vault failure where Controller's Notifications view showed active reminders, projection found 6,965 occurrences, but preparation remained pending and `.tishos/native-notifications/v1` was never created. TishOS can now receive the signed queue on the next Controller refresh and relay it to paired Apple devices.
+- Ordering remains deterministic by fire time and bounded candidate identity. Invalid or exact-duplicate candidates are skipped, the signed queue remains capped at 128, and no reminder rules, templates, note data, pairing credentials, or protocol schemas change.
+- Focused coverage publishes the correct earliest 128 entries from a reversed 7,002-entry projection in milliseconds and verifies unique signed item IDs. This backward-compatible performance/reliability fix keeps minimum Obsidian compatibility at 1.12.0.
+- The focused 42-test command-bridge suite, the complete declared `npm test` chain, and the mandatory separate production-mode build passed. The final build reported `[runtime-deploy] target=test ... unchanged`; a fresh **Obsidian Plugin Test Vault** load showed Controller's `TPS: User` status surface. Source and test-runtime artifacts are byte-identical (`main.js` `503eb5c27e91a462aed2448d5498444146dfc5431d0358e14a7ee46328823cf3`, `manifest.json` `f64a86e4aa3862e99a232939db696103bc327b474f96c1981afc4ac434bb5b07`, `styles.css` `2da24f2a872483deb0ccc2944fb3b05c1b8a4e6b9f90b3290a3fabb86ec06999`). Production was read only for bounded diagnosis and was not changed or promoted.
+
 ## 0.9.2 native schedule source isolation
 
 - A failure while discovering optional external-calendar reminder sources no longer discards file and task reminders that Controller already projected successfully. The signed TishOS schedule retains those local occurrences and continues publishing to every paired Apple device.

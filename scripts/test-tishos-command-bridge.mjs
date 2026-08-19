@@ -620,6 +620,32 @@ test("paired clients receive a signed Controller-rule notification schedule that
   assert.equal(modalVisible.items[0].fireAt, new Date(NOW - 4 * 60 * 1000).toISOString());
 });
 
+test("large reminder projections bound cryptographic work before publishing the earliest queue", async (t) => {
+  const schedule = Array.from({ length: 7_000 }, (_, index) => ({
+    title: `Reminder ${index}`,
+    body: "Controller-owned reminder",
+    fireAt: NOW + (7_000 - index) * 60_000,
+    sourcePath: `Daily/${index}.md`,
+    sourceKey: `Daily/${index}.md::task:1`,
+    reminderId: "scheduled-task",
+  }));
+  schedule.push({ ...schedule.at(-1) }, { ...schedule.at(-1) });
+  const harness = createHarness({ notificationScheduleProvider: async () => schedule });
+  t.after(() => harness.service.stop());
+
+  await pairAndPublish(harness);
+
+  const path = `${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.json`;
+  const published = JSON.parse(harness.files.get(path));
+  assert.equal(published.items.length, notificationContract.TISHOS_NATIVE_NOTIFICATION_MAX_ITEMS);
+  assert.equal(published.items[0].fireAt, new Date(NOW + 60_000).toISOString());
+  assert.equal(
+    published.items.at(-1).fireAt,
+    new Date(NOW + notificationContract.TISHOS_NATIVE_NOTIFICATION_MAX_ITEMS * 60_000).toISOString(),
+  );
+  assert.equal(new Set(published.items.map((item) => item.id)).size, published.items.length);
+});
+
 test("repeat occurrences share one stable series identity while distinct reminders do not", async (t) => {
   const schedule = [{
     title: "Standup",
