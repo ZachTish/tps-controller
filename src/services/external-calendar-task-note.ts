@@ -38,9 +38,11 @@ export function buildExternalCalendarTaskNoteLink(
     const normalizedExisting = normalizeExistingPath(existingPath);
     const existing = strategy === "series"
         ? normalizedExisting
-        : normalizedExisting?.split("/").includes(occurrenceDay)
-            ? normalizedExisting
-            : null;
+        : isManagedOccurrencePath(normalizedExisting, rawFolder)
+            ? normalizedExisting?.split("/").includes(occurrenceDay)
+                ? normalizedExisting
+                : null
+            : normalizedExisting;
     const notePath = existing || buildNotePath(rawFolder, strategy, occurrenceDay, identityKey);
     const linkTarget = notePath.replace(/\.md$/iu, "");
     return {
@@ -51,6 +53,13 @@ export function buildExternalCalendarTaskNoteLink(
         occurrenceDay,
         seriesKey,
     };
+}
+
+function isManagedOccurrencePath(value: string | null, rawFolder: unknown): boolean {
+    if (!value) return false;
+    const folder = normalizeExternalCalendarTaskNoteFolder(rawFolder);
+    const escapedFolder = folder.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    return new RegExp(`^${escapedFolder}/\\d{4}-\\d{2}-\\d{2}/[^/]+--[a-f0-9]{8}\\.md$`, "iu").test(value);
 }
 
 function buildNotePath(

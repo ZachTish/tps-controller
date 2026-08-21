@@ -96,7 +96,12 @@ function loadAutoCreateService() {
         matchesExclusionPattern: () => false,
         normalizeCalendarUrl: (value) => String(value || ""),
         normalizeComparablePath: (value) => String(value || ""),
-        parseFrontmatterDate: () => null,
+        parseFrontmatterDate: (value) => {
+          const normalized = String(value || "").trim().replace(" ", "T");
+          if (!normalized) return null;
+          const parsed = new Date(normalized);
+          return Number.isNaN(parsed.getTime()) ? null : parsed;
+        },
       };
     }
     if (specifier === "../utils/tag-utils") return { normalizeTagValue: (value) => String(value || "") };
@@ -189,6 +194,18 @@ function createHarness({
     };
     return file;
   };
+  const frontmatterFor = (path) => {
+    const content = String(files.get(path) || "");
+    const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u);
+    if (!match) return undefined;
+    const frontmatter = {};
+    for (const line of match[1].split(/\r?\n/u)) {
+      const separator = line.indexOf(":");
+      if (separator <= 0) continue;
+      frontmatter[line.slice(0, separator).trim()] = line.slice(separator + 1).trim().replace(/^['"]|['"]$/gu, "");
+    }
+    return frontmatter;
+  };
   const app = {
     loadLocalStorage(key) {
       if (key !== "templater-local-settings" || !hasLocalTemplaterSetting) return null;
@@ -218,6 +235,11 @@ function createHarness({
       },
       plugins: {},
     },
+    metadataCache: {
+      getFileCache(file) {
+        return { frontmatter: frontmatterFor(file.path) };
+      },
+    },
     plugins: {
       plugins: {
         "templater-obsidian": {
@@ -246,6 +268,9 @@ function createHarness({
     },
     vault: {
       configDir: ".obsidian",
+      getMarkdownFiles() {
+        return [...files.keys()].filter((path) => path.toLowerCase().endsWith(".md")).map(fileFor);
+      },
       getAbstractFileByPath(path) {
         return fileFor(normalizePath(path))
           ?? (folders.has(normalizePath(path)) ? { path: normalizePath(path) } : null);
@@ -451,6 +476,166 @@ test("Controller task sync ignores stale note-mode folders before routing to the
   } finally {
     restoreMoment();
   }
+});
+
+test("Controller links a new calendar task to the unique exact existing series note", () => {
+  const { AutoCreateService } = loadAutoCreateService();
+  const harness = createHarness({
+    initialFiles: {
+      "Inbox/Daily/2026/08/19.md": "---\nkind: dailynote\n---\n",
+      "Meetings/Daily Standup for GCP App Support.md": "---\ntitle: Daily Standup for GCP App Support\n---\n",
+    },
+  });
+  const service = new AutoCreateService(harness.app);
+  const event = {
+    id: "standup-20260819T081500",
+    uid: "standup",
+    title: "Daily Standup for GCP App Support",
+    startDate: new Date(2026, 7, 19, 8, 15),
+    sourceUrl: "https://calendar.example/team.ics",
+  };
+
+  const link = service.buildTaskNoteLink(
+    event,
+    { mode: "task", taskNoteStrategy: "series", taskNoteFolder: "Calendar Events" },
+    null,
+    "Inbox/Daily/2026/08/19.md",
+  );
+
+  assert.equal(link.notePath, "Meetings/Daily Standup for GCP App Support.md");
+  assert.equal(link.markdown, "[[Meetings/Daily Standup for GCP App Support|Daily Standup for GCP App Support]]");
+});
+
+test("Controller persists the resolved existing note in both a created task link and hidden association", async () => {
+  const restoreMoment = installMoment();
+  try {
+    const dailyPath = "Inbox/Daily/2026/08/19.md";
+    const harness = createHarness({
+      initialFiles: {
+        [dailyPath]: "---\nkind: dailynote\n---\n",
+        "Meetings/Daily Standup for GCP App Support.md": "---\ntitle: Daily Standup for GCP App Support\n---\n",
+      },
+    });
+    gcmAttemptHandler = async () => ({ available: true, file: harness.app.vault.getAbstractFileByPath(dailyPath) });
+    const { AutoCreateService } = loadAutoCreateService();
+    const service = new AutoCreateService(harness.app);
+    const event = {
+      id: "standup-20260819T081500",
+      uid: "standup",
+      title: "Daily Standup for GCP App Support",
+      description: "",
+      startDate: new Date(2026, 7, 19, 8, 15),
+      endDate: new Date(2026, 7, 19, 8, 45),
+      sourceUrl: "https://calendar.example/team.ics",
+      location: "",
+      url: "",
+      isAllDay: false,
+    };
+    const empty = new Map();
+
+    const result = await service.processEvent(
+      event,
+      empty,
+      empty,
+      empty,
+      empty,
+      empty,
+      empty,
+      { mode: "task", taskDestination: "daily-note", taskNoteStrategy: "series", taskNoteFolder: "Calendar Events" },
+      [],
+      false,
+    );
+
+    assert.equal(result.action, "created");
+    const content = harness.files.get(dailyPath);
+    assert.match(content, /\[\[Meetings\/Daily Standup for GCP App Support\|Daily Standup for GCP App Support\]\]/u);
+    assert.match(content, /"associatedNotePath":"Meetings\/Daily Standup for GCP App Support\.md"/u);
+    assert.doesNotMatch(content, /Calendar event--[a-f0-9]{8}/u);
+  } finally {
+    restoreMoment();
+  }
+});
+
+test("Controller fails closed to its deterministic placeholder when exact task-note titles are ambiguous", () => {
+  const { AutoCreateService } = loadAutoCreateService();
+  const harness = createHarness({
+    initialFiles: {
+      "Meetings/A/Team standup.md": "---\ntitle: Team standup\n---\n",
+      "Meetings/B/Team standup.md": "---\ntitle: Team standup\n---\n",
+    },
+  });
+  const service = new AutoCreateService(harness.app);
+  const event = {
+    id: "standup-20260819T081500",
+    uid: "standup",
+    title: "Team standup",
+    startDate: new Date(2026, 7, 19, 8, 15),
+    sourceUrl: "https://calendar.example/team.ics",
+  };
+
+  const link = service.buildTaskNoteLink(
+    event,
+    { mode: "task", taskNoteStrategy: "series", taskNoteFolder: "Calendar Events" },
+    null,
+    "Inbox/Daily/2026/08/19.md",
+  );
+
+  assert.match(link.notePath, /^Calendar Events\/Series\/Calendar event--[a-f0-9]{8}\.md$/u);
+});
+
+test("Controller occurrence-day task note resolution requires the exact note to match that day", () => {
+  const { AutoCreateService } = loadAutoCreateService();
+  const harness = createHarness({
+    initialFiles: {
+      "Inbox/Daily/2026/08/19.md": "---\nkind: dailynote\n---\n",
+      "Meetings/Standup Aug 18.md": "---\ntitle: Team standup\nscheduled: 2026-08-18 08:15:00\n---\n",
+      "Meetings/Standup Aug 19.md": "---\ntitle: Team standup\nscheduled: 2026-08-19 08:15:00\n---\n",
+    },
+  });
+  const service = new AutoCreateService(harness.app);
+  const event = {
+    id: "standup-20260819T081500",
+    uid: "standup",
+    title: "Team standup",
+    startDate: new Date(2026, 7, 19, 8, 15),
+    sourceUrl: "https://calendar.example/team.ics",
+  };
+
+  const link = service.buildTaskNoteLink(
+    event,
+    { mode: "task", taskNoteStrategy: "occurrence-day", taskNoteFolder: "Calendar Events" },
+    null,
+    "Inbox/Daily/2026/08/19.md",
+  );
+
+  assert.equal(link.notePath, "Meetings/Standup Aug 19.md");
+});
+
+test("Controller preserves explicit task-note paths but replaces its own stale occurrence placeholder", () => {
+  const { buildExternalCalendarTaskNoteLink } = loadExternalCalendarTaskNoteModule();
+  const event = {
+    id: "standup-20260819T081500",
+    uid: "standup",
+    title: "Team standup",
+    startDate: new Date(2026, 7, 19, 8, 15),
+    sourceUrl: "https://calendar.example/team.ics",
+  };
+
+  const explicit = buildExternalCalendarTaskNoteLink(
+    event,
+    "occurrence-day",
+    "Calendar Events",
+    "Meetings/Team standup.md",
+  );
+  const staleManaged = buildExternalCalendarTaskNoteLink(
+    event,
+    "occurrence-day",
+    "Calendar Events",
+    "Calendar Events/2026-08-18/Calendar event--deadbeef.md",
+  );
+
+  assert.equal(explicit.notePath, "Meetings/Team standup.md");
+  assert.match(staleManaged.notePath, /^Calendar Events\/2026-08-19\/Calendar event--[a-f0-9]{8}\.md$/u);
 });
 
 test("Controller migrates a rescheduled calendar task block to the new Daily Note", async () => {

@@ -144,6 +144,7 @@ export class AutoCreateService {
     private isSyncing = false;
     private readonly pendingDailyNoteEnsures = new Map<string, Promise<TFile>>();
     private readonly malformedFrontmatterWarnedPaths = new Set<string>();
+    private taskNoteTitleIndex: Map<string, TFile[]> | null = null;
     private orphanMissCount = new Map<string, number>();
     private orphanDeletionTombstones = new Map<string, number>();
     private static readonly ORPHAN_GRACE_CYCLES = 2;
@@ -209,6 +210,7 @@ export class AutoCreateService {
 
         this.isSyncing = true;
         try {
+            this.taskNoteTitleIndex = null;
             this.pruneOrphanDeletionTombstones();
             const rangeStart = new Date();
             if (options.backfillPastEvents) {
@@ -681,7 +683,7 @@ export class AutoCreateService {
             const urlChanged = !!normalizedEventUrl && match.eventUrl !== normalizedEventUrl;
             const allDayChanged = match.storedAllDay === null ? event.isAllDay : match.storedAllDay !== event.isAllDay;
             const taskNoteLink = match.isInlineTask
-                ? this.buildTaskNoteLink(event, calendarInfo, match.associatedNotePath)
+                ? this.buildTaskNoteLink(event, calendarInfo, match.associatedNotePath, match.file.path)
                 : null;
             const linkedTitleChanged = !!taskNoteLink && !String(match.taskRawLine || "").includes(taskNoteLink.markdown);
             const associationChanged = !!taskNoteLink && match.associatedNotePath !== taskNoteLink.notePath;
@@ -1170,7 +1172,7 @@ export class AutoCreateService {
             ? await this.ensureTaskTargetFile(calendarInfo.taskTargetPath)
             : await this.ensureDailyNoteFile(event.startDate);
         const externalId = buildCalendarExternalId(this.app, event);
-        const taskNoteLink = this.buildTaskNoteLink(event, calendarInfo, null);
+        const taskNoteLink = this.buildTaskNoteLink(event, calendarInfo, null, file.path);
         await this.ensureTaskNoteFolder(taskNoteLink.notePath);
         const taskLine = this.buildExternalEventTaskLine(event, calendarInfo, externalId, taskNoteLink);
         const tag = normalizeTagValue(calendarInfo?.tag || "");
@@ -1355,13 +1357,72 @@ export class AutoCreateService {
         event: ExternalCalendarEvent,
         calendarInfo: CalendarAutoCreateConfig | null,
         existingPath: string | null,
+        sourcePath = "",
     ): ExternalCalendarTaskNoteLink {
-        return buildExternalCalendarTaskNoteLink(
+        const strategy = normalizeExternalCalendarTaskNoteStrategy(calendarInfo?.taskNoteStrategy);
+        const folder = normalizeExternalCalendarTaskNoteFolder(calendarInfo?.taskNoteFolder);
+        const initial = buildExternalCalendarTaskNoteLink(
             event,
-            normalizeExternalCalendarTaskNoteStrategy(calendarInfo?.taskNoteStrategy),
-            normalizeExternalCalendarTaskNoteFolder(calendarInfo?.taskNoteFolder),
+            strategy,
+            folder,
             existingPath,
         );
+        if (this.isLiveMarkdownFile(initial.notePath)) return initial;
+
+        const exactPath = this.findUniqueExactTaskNotePath(event, strategy, sourcePath);
+        return exactPath
+            ? buildExternalCalendarTaskNoteLink(event, strategy, folder, exactPath)
+            : initial;
+    }
+
+    private findUniqueExactTaskNotePath(
+        event: ExternalCalendarEvent,
+        strategy: ExternalCalendarTaskNoteStrategy,
+        sourcePath: string,
+    ): string | null {
+        const expectedTitle = this.normalizeTaskNoteTitle(event.title);
+        if (!expectedTitle) return null;
+        const occurrenceDay = this.formatAllDayDate(event.startDate);
+        const candidates = (this.getTaskNoteTitleIndex().get(expectedTitle) || []).filter((file) => {
+            if (file.path === sourcePath) return false;
+            const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+            if (strategy === "series") return true;
+            if (normalizePath(file.path).split("/").includes(occurrenceDay)) return true;
+            const scheduled = this.findKeyInsensitive(frontmatter || {}, this.config.startProperty)
+                ?? this.findKeyInsensitive(frontmatter || {}, "scheduled");
+            const scheduledDate = parseFrontmatterDate(scheduled);
+            return scheduledDate instanceof Date
+                && Number.isFinite(scheduledDate.getTime())
+                && this.formatAllDayDate(scheduledDate) === occurrenceDay;
+        });
+        return candidates.length === 1 ? candidates[0].path : null;
+    }
+
+    private getTaskNoteTitleIndex(): Map<string, TFile[]> {
+        if (this.taskNoteTitleIndex) return this.taskNoteTitleIndex;
+        const index = new Map<string, TFile[]>();
+        for (const file of this.app.vault.getMarkdownFiles()) {
+            const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+            const authoredTitle = this.findKeyInsensitive(frontmatter || {}, this.config.titleKey)
+                ?? this.findKeyInsensitive(frontmatter || {}, "title");
+            const keys = new Set([file.basename, authoredTitle].map((value) => this.normalizeTaskNoteTitle(value)).filter(Boolean));
+            for (const key of keys) {
+                const files = index.get(key) || [];
+                files.push(file);
+                index.set(key, files);
+            }
+        }
+        this.taskNoteTitleIndex = index;
+        return index;
+    }
+
+    private normalizeTaskNoteTitle(value: unknown): string {
+        return String(value || "").replace(/[\r\n]+/gu, " ").replace(/\s+/gu, " ").trim().toLocaleLowerCase();
+    }
+
+    private isLiveMarkdownFile(path: string): boolean {
+        const file = this.app.vault.getAbstractFileByPath(normalizePath(path));
+        return file instanceof TFile && file.extension.toLowerCase() === "md";
     }
 
     private async ensureTaskNoteFolder(notePath: string): Promise<void> {

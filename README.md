@@ -1,5 +1,14 @@
 # TPS Controller
 
+## 0.10.1 existing calendar-note association repair
+
+- Task-mode calendar sync now reuses one unique existing Markdown note whose basename or authored `title` exactly matches the event. **One note for the recurring series** accepts the unique exact match directly; **One note per scheduled day** additionally requires that note's `scheduled` value or path to match the occurrence day.
+- The visible task wikilink and hidden `associatedNotePath` are written from the same resolved note path. Calendar Base therefore opens the existing note instead of offering to create Controller's opaque placeholder for that event.
+- A live explicit/custom association remains authoritative across later syncs. On reschedule, Controller replaces only its own prior day-scoped generated placeholder; it no longer overwrites a user-selected note merely because its path omits the date.
+- Exact-title resolution fails closed when more than one eligible note exists. The fallback remains the deterministic source/UID/day placeholder, so Controller never guesses between duplicate notes.
+- The title index is built at most once per calendar sync and then reused for every event. This adds no per-event full-vault scan, setting, data migration, or note rewrite. Existing task lines are repaired when their exact event is next safely reconciled.
+- Focused executable coverage creates a production-shaped `Daily Standup for GCP App Support` task, verifies the visible link and hidden association, checks per-day selection, duplicate ambiguity, explicit association retention, and stale generated-path replacement. All 20 declared test files passed with three preserved historical comparison skips, followed by the required separate build and a successful Obsidian 1.13.7 test-vault reload. Minimum supported Obsidian remains 1.12.0; artifact hashes are recorded in `release-notes/0.10.1.md`.
+
 ## 0.10.0 linked calendar tasks and Daily Note rescheduling
 
 - New task-mode calendar items use a native wikilink as their visible title. The link keeps the readable event title as its alias while the target path uses the calendar source, UID, and scheduled day to avoid collisions and remain stable across title changes.
