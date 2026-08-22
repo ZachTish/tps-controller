@@ -8,6 +8,22 @@ import { buildNotificationItemsSignature } from './notification-view-signature';
 
 export const NOTIFICATION_VIEW_TYPE = 'tps-notification-view';
 
+interface ReminderDeliveryAuditStatus {
+    remindersEnabled: boolean;
+    notificationDeliveryProvider: 'tishos' | 'ntfy';
+    localDeliveryMode: 'ntfy' | null;
+    commandBridge: {
+        available: boolean;
+        clients: Array<{
+            device: string;
+            nativeNotificationState: 'ready' | 'pending';
+            nativeNotificationItemCount: number | null;
+            nativeNotificationPublishedAt: string | null;
+            nativeNotificationReason: string | null;
+        }>;
+    };
+}
+
 // Minimal interface so the view stays decoupled from the full plugin class.
 export interface TPSControllerRemindersAPI {
     settings: { snoozeOptions?: { label: string; minutes: number }[] };
@@ -22,6 +38,7 @@ export interface TPSControllerRemindersAPI {
     markOverdueItemWontDo?(item: OverdueItem): Promise<void>;
     setOverdueItemStatus?(item: OverdueItem, status: string | null): Promise<void>;
     resolveOverdueTaskReminder?(item: OverdueItem): Promise<boolean>;
+    getReminderDeliveryAuditStatus?(): ReminderDeliveryAuditStatus;
 }
 
 export class NotificationView extends ItemView {
@@ -31,6 +48,7 @@ export class NotificationView extends ItemView {
     private isRefreshing = false;
     private refreshPending = false;
     private lastRenderedSignature = '\u0000';
+    private deliveryAuditStatus: ReminderDeliveryAuditStatus | null = null;
 
     constructor(leaf: WorkspaceLeaf, plugin: TPSControllerRemindersAPI) {
         super(leaf);
@@ -176,13 +194,16 @@ export class NotificationView extends ItemView {
         const started = performance.now();
         try {
             const nextItems = await this.plugin.getOverdueItems();
-            const nextSignature = buildNotificationItemsSignature(nextItems);
+            const deliveryAuditStatus = this.plugin.getReminderDeliveryAuditStatus?.() || null;
+            const nextSignature = `${buildNotificationItemsSignature(nextItems)}\u0000${JSON.stringify(deliveryAuditStatus)}`;
             if (nextSignature !== this.lastRenderedSignature) {
                 this.items = nextItems;
+                this.deliveryAuditStatus = deliveryAuditStatus;
                 this.lastRenderedSignature = nextSignature;
                 this.draw();
             } else {
                 this.items = nextItems;
+                this.deliveryAuditStatus = deliveryAuditStatus;
             }
             const elapsed = performance.now() - started;
             if (elapsed > 250) {
@@ -210,6 +231,14 @@ export class NotificationView extends ItemView {
         list.style.flexDirection = 'column';
         list.style.height = '100%';
         list.style.overflowY = 'auto';
+
+        const deliveryStatusText = this.buildDeliveryStatusText();
+        if (deliveryStatusText) {
+            list.createDiv({
+                cls: 'tps-notification-delivery-status',
+                text: deliveryStatusText,
+            });
+        }
 
         if (this.items.length === 0) {
             const emptyState = list.createDiv({ cls: 'tps-empty-state' });
@@ -581,6 +610,45 @@ export class NotificationView extends ItemView {
                 })();
             });
         }
+    }
+
+    private buildDeliveryStatusText(): string {
+        const status = this.deliveryAuditStatus;
+        if (!status) return '';
+        if (!status.remindersEnabled) {
+            return 'Reminder delivery is off. No reminder is being published.';
+        }
+        if (status.notificationDeliveryProvider === 'ntfy') {
+            return status.localDeliveryMode === 'ntfy'
+                ? 'ntfy is selected. TishOS receives an empty schedule; the rows below use this desktop Controller’s ntfy route.'
+                : 'ntfy is selected, but ntfy delivery does not run on this mobile/User device. TishOS receives an empty schedule.';
+        }
+        if (!status.commandBridge.available) {
+            return 'Local TishOS publication is unavailable because this device’s pairing state could not be read.';
+        }
+        if (status.commandBridge.clients.length === 0) {
+            return 'TishOS is selected, but this Obsidian device is not paired with TishOS.';
+        }
+        const pending = status.commandBridge.clients.filter((client) => client.nativeNotificationState === 'pending');
+        if (pending.length > 0) {
+            const details = pending.map((client) => {
+                const prior = client.nativeNotificationItemCount === null
+                    ? ''
+                    : `; last verified ${client.nativeNotificationItemCount} item${client.nativeNotificationItemCount === 1 ? '' : 's'}${client.nativeNotificationPublishedAt
+                        ? ` at ${new Date(client.nativeNotificationPublishedAt).toLocaleString()}`
+                        : ''}`;
+                return `${client.device}: ${client.nativeNotificationReason || 'awaiting-refresh'}${prior}`;
+            });
+            return `Local TishOS schedule pending · ${details.join(' · ')}.`;
+        }
+        const schedules = status.commandBridge.clients.map((client) => {
+            const itemCount = client.nativeNotificationItemCount || 0;
+            const updated = client.nativeNotificationPublishedAt
+                ? `, updated ${new Date(client.nativeNotificationPublishedAt).toLocaleString()}`
+                : '';
+            return `${client.device}: ${itemCount} item${itemCount === 1 ? '' : 's'}${updated}`;
+        });
+        return `Verified local TishOS schedule${schedules.length === 1 ? '' : 's'} · ${schedules.join(' · ')}.`;
     }
 
     private renderInlineMarkdownTitle(container: HTMLElement, markdown: string, sourcePath: string): void {

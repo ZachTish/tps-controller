@@ -58,6 +58,10 @@ export class OverdueService {
         const settings = this.getSettings();
         const now = Date.now();
         const overdueItems: OverdueItem[] = [];
+        if (settings.enableReminders === false) {
+            logger.flow("OverdueItems", "scan:reminders-disabled");
+            return overdueItems;
+        }
         const reminders = settings.reminders || [];
         if (!reminders.length) {
             logger.flow("OverdueItems", "scan:no-rules");

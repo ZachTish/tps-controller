@@ -26,15 +26,17 @@ export function isNotificationDeliveryProvider(value: unknown): value is Notific
 }
 
 /**
- * Existing Controller data predates a single-provider setting and delivered
- * through Messager/Notifier. Keep that established route on upgrade; fresh
- * installs default to the native TishOS path.
+ * Existing desktop Controller data predates a single-provider setting and
+ * delivered through Messager/Notifier. Preserve that route only where it can
+ * actually run. Mobile and User-role devices cannot own ntfy delivery, so a
+ * legacy missing-provider payload must select the local TishOS publisher.
  */
 export function resolveNotificationDeliveryProvider(
     value: unknown,
     hasPersistedControllerSettings: boolean,
+    canUseLegacyNtfyDelivery = true,
 ): NotificationDeliveryProvider {
     if (isNotificationDeliveryProvider(value)) return value;
-    if (value === undefined && hasPersistedControllerSettings) return "ntfy";
+    if (value === undefined && hasPersistedControllerSettings && canUseLegacyNtfyDelivery) return "ntfy";
     return DEFAULT_NOTIFICATION_DELIVERY_PROVIDER;
 }

@@ -18,6 +18,7 @@ async function importBundled(entryPoint) {
 }
 
 const providers = await importBundled("../src/services/notification-delivery-provider.ts");
+const metadataReadiness = await importBundled("../src/services/metadata-index-readiness.ts");
 const policy = await importBundled("../src/services/reminder-runtime-policy.ts");
 const mainSource = await readFile(new URL("../src/main.ts", import.meta.url), "utf8");
 const settingsSource = await readFile(new URL("../src/settings-tab.ts", import.meta.url), "utf8");
@@ -37,12 +38,53 @@ test("notification provider registry is explicit and extensible", () => {
   assert.equal(providers.isNotificationDeliveryProvider("none"), false);
 });
 
-test("provider migration preserves established ntfy installs and defaults fresh installs to TishOS", () => {
-  assert.equal(providers.resolveNotificationDeliveryProvider(undefined, false), "tishos");
-  assert.equal(providers.resolveNotificationDeliveryProvider(undefined, true), "ntfy");
+test("provider migration uses TishOS for legacy mobile/User devices and preserves desktop Controller ntfy", () => {
+  const migrate = ({ value, persisted, isMobile, role }) => providers.resolveNotificationDeliveryProvider(
+    value,
+    persisted,
+    !isMobile && role === "controller",
+  );
+
+  assert.equal(migrate({ value: undefined, persisted: false, isMobile: false, role: "user" }), "tishos");
+  assert.equal(migrate({ value: undefined, persisted: true, isMobile: true, role: "controller" }), "tishos");
+  assert.equal(migrate({ value: undefined, persisted: true, isMobile: false, role: "user" }), "tishos");
+  assert.equal(migrate({ value: undefined, persisted: true, isMobile: false, role: undefined }), "tishos");
+  assert.equal(migrate({ value: undefined, persisted: true, isMobile: false, role: "controller" }), "ntfy");
   assert.equal(providers.resolveNotificationDeliveryProvider("tishos", true), "tishos");
   assert.equal(providers.resolveNotificationDeliveryProvider("ntfy", false), "ntfy");
   assert.equal(providers.resolveNotificationDeliveryProvider("invalid", true), "tishos");
+});
+
+test("layout readiness cannot substitute for a resolved or complete metadata snapshot", () => {
+  const markdownFile = { path: "Inbox/Reminder.md" };
+  const app = (files, cacheForFile) => ({
+    workspace: { layoutReady: true },
+    vault: { getMarkdownFiles: () => files },
+    metadataCache: { getFileCache: cacheForFile },
+  });
+
+  assert.equal(
+    metadataReadiness.hasCompleteMarkdownMetadataSnapshot(app([markdownFile], () => null)),
+    false,
+    "layoutReady=true with an unindexed Markdown file must remain blocked",
+  );
+  assert.equal(
+    metadataReadiness.hasCompleteMarkdownMetadataSnapshot(app([markdownFile], () => ({}))),
+    true,
+    "an indexed metadata-free note has a non-null empty CachedMetadata object",
+  );
+  assert.equal(
+    metadataReadiness.hasCompleteMarkdownMetadataSnapshot(app([], () => null)),
+    false,
+    "an empty early vault snapshot must not become a vacuous readiness proof",
+  );
+  assert.equal(
+    metadataReadiness.hasCompleteMarkdownMetadataSnapshot(app(
+      [markdownFile, { path: "Inbox/Still Indexing.md" }],
+      (file) => file.path === markdownFile.path ? {} : null,
+    )),
+    false,
+  );
 });
 
 test("only the selected direct provider can consume reminder state", () => {
@@ -70,6 +112,16 @@ test("Controller persists one provider, gates both routes, and clears the retire
   assert.match(mainSource, /notificationDeliveryProvider === "tishos"[\s\S]*refreshCatalogs\("manual-reminder-check"\)/);
   assert.match(mainSource, /this\.settings\.notificationDeliveryProvider !== "ntfy"[\s\S]*TimeTrackingReminder/);
   assert.match(mainSource, /delete \(this\.settings as unknown as Record<string, unknown>\)\.enableLocalReminderNoticesOnUserDevices/);
+  assert.match(mainSource, /!Platform\.isMobile[\s\S]*tps-device-role-[\s\S]*=== "controller"/);
+  assert.match(mainSource, /notificationScheduleReadiness:[\s\S]*metadata-index-not-ready/);
+  assert.match(mainSource, /scheduleTishOSNativeNotificationRefresh\("metadata-resolved"\)/);
+  assert.doesNotMatch(mainSource, /metadataIndexResolved\s*=\s*this\.app\.workspace\.layoutReady/);
+  assert.match(mainSource, /hasCompleteMarkdownMetadataSnapshot\(this\.app\)/);
+  assert.ok(
+    mainSource.indexOf('this.app.metadataCache.on("resolved"') < mainSource.indexOf("await this.loadSettings()"),
+    "metadata readiness must be registered before asynchronous settings migration can yield",
+  );
+  assert.match(mainSource, /metadata-resolved-post-active/);
 });
 
 test("Reminder settings expose a provider picker rather than competing delivery toggles", () => {

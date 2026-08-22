@@ -36,6 +36,7 @@ import {
     type ReminderDeliveryMode,
 } from "./services/reminder-runtime-policy";
 import { resolveNotificationDeliveryProvider } from "./services/notification-delivery-provider";
+import { hasCompleteMarkdownMetadataSnapshot } from "./services/metadata-index-readiness";
 import {
     ControllerPeriodicReloadPreference,
     ControllerPeriodicReloadService,
@@ -213,6 +214,13 @@ export default class TPSControllerPlugin extends Plugin {
             version: this.manifest.version,
             isMobile: Platform.isMobile,
         });
+        // Register before the first await so a startup metadata resolution
+        // cannot pass while settings migration yields. Layout readiness is not
+        // metadata readiness; a late-enable fallback verifies the whole
+        // Markdown cache snapshot instead.
+        this.registerEvent(
+            this.app.metadataCache.on("resolved", () => this.handleMetadataIndexResolved())
+        );
 
         await this.loadSettings();
         this.statusBarEl = this.addStatusBarItem();
@@ -248,6 +256,13 @@ export default class TPSControllerPlugin extends Plugin {
         this.twoStageArchiveService = new TwoStageArchiveService(this.app, () => this.settings, () => this.saveSettings());
         this.s3agleAttachmentAutomationService = await this.createS3AttachmentAutomationService();
         this.tishOSCommandBridgeService = new TishOSCommandBridgeService(this.app, this.manifest, {
+            notificationScheduleReadiness: () => (
+                this.settings.enableReminders === true
+                && this.settings.notificationDeliveryProvider === "tishos"
+                && !this.hasNativeNotificationMetadataReadiness()
+            )
+                ? { ready: false, reason: "metadata-index-not-ready" }
+                : { ready: true },
             notificationScheduleProvider: () => this.settings.notificationDeliveryProvider === "tishos"
                 ? this.reminderEngine.projectScheduledNotifications(this.settings)
                 : Promise.resolve([]),
@@ -412,6 +427,7 @@ export default class TPSControllerPlugin extends Plugin {
             void this.tishOSCommandBridgeService.handleNotificationActionRoute(params);
         });
         this.tishOSCommandBridgeService.start();
+        this.scheduleParentChildStartupAfterMetadataReadiness();
         this.startS3agleAttachmentAutomation();
 
         if (this.deviceRoleManager.isController()) {
@@ -426,20 +442,6 @@ export default class TPSControllerPlugin extends Plugin {
                 logger.log("Skipping automatic startup sync request on mobile replica.");
             }
         }
-
-        // Ensure parent/child reconciliation runs once after initial metadata indexing on vault load.
-        this.registerEvent(
-            this.app.metadataCache.on("resolved", () => {
-                this.metadataIndexResolved = true;
-                this.deferCalendarSyncSettlement("metadata cache resolved");
-                if (!this.deviceRoleManager.isController()) return;
-                if (this.parentChildStartupResolvedHandled) return;
-                this.parentChildStartupResolvedHandled = true;
-                window.setTimeout(() => {
-                    void this.runParentChildMaintenanceTick();
-                }, 5000);
-            })
-        );
 
         this.registerEvent(this.app.vault.on("create", (file) => {
             this.deferCalendarSyncSettlementForFile(file, "file create");
@@ -489,6 +491,20 @@ export default class TPSControllerPlugin extends Plugin {
 
     getTishOSCommandBridgeStatus(): TishOSCommandBridgeStatus {
         return this.tishOSCommandBridgeService.getStatus();
+    }
+
+    getReminderDeliveryAuditStatus(): {
+        remindersEnabled: boolean;
+        notificationDeliveryProvider: "tishos" | "ntfy";
+        localDeliveryMode: ReminderDeliveryMode | null;
+        commandBridge: TishOSCommandBridgeStatus;
+    } {
+        return {
+            remindersEnabled: this.settings.enableReminders === true,
+            notificationDeliveryProvider: this.settings.notificationDeliveryProvider,
+            localDeliveryMode: this.getReminderDeliveryMode(),
+            commandBridge: this.getTishOSCommandBridgeStatus(),
+        };
     }
 
     refreshTishOSCommandBridgeCatalogs(): Promise<TishOSCommandBridgeRefreshResult> {
@@ -565,6 +581,8 @@ export default class TPSControllerPlugin extends Plugin {
         const resolvedNotificationProvider = resolveNotificationDeliveryProvider(
             data.notificationDeliveryProvider,
             Object.keys(data).length > 0,
+            !Platform.isMobile
+                && window.localStorage.getItem(`tps-device-role-${this.app.vault.getName()}`) === "controller",
         );
         const notificationProviderMigrationChanged =
             data.notificationDeliveryProvider !== resolvedNotificationProvider
@@ -671,8 +689,49 @@ export default class TPSControllerPlugin extends Plugin {
         }
         this.tishOSNotificationRefreshTimeoutId = window.setTimeout(() => {
             this.tishOSNotificationRefreshTimeoutId = null;
-            void this.tishOSCommandBridgeService.refreshCatalogs(`native-notifications:${reason}`);
+            void this.tishOSCommandBridgeService
+                .refreshCatalogs(`native-notifications:${reason}`)
+                .then((result) => {
+                    if (
+                        reason === "metadata-resolved"
+                        && this.metadataIndexResolved
+                        && result.unavailableReason === "native-notification-schedule-unavailable"
+                    ) {
+                        return this.tishOSCommandBridgeService.refreshCatalogs(
+                            "native-notifications:metadata-resolved-post-active",
+                        );
+                    }
+                    return result;
+                });
         }, 1_000);
+    }
+
+    private handleMetadataIndexResolved(): void {
+        this.metadataIndexResolved = true;
+        this.deferCalendarSyncSettlement("metadata cache resolved");
+        if (this.tishOSCommandBridgeService) {
+            this.scheduleTishOSNativeNotificationRefresh("metadata-resolved");
+        }
+        this.scheduleParentChildStartupAfterMetadataReadiness();
+    }
+
+    private scheduleParentChildStartupAfterMetadataReadiness(): void {
+        if (!this.metadataIndexResolved) return;
+        if (!this.deviceRoleManager?.isController?.()) return;
+        if (this.parentChildStartupResolvedHandled) return;
+        this.parentChildStartupResolvedHandled = true;
+        window.setTimeout(() => {
+            void this.runParentChildMaintenanceTick();
+        }, 5000);
+    }
+
+    private hasNativeNotificationMetadataReadiness(): boolean {
+        if (this.metadataIndexResolved) return true;
+        if (!hasCompleteMarkdownMetadataSnapshot(this.app)) return false;
+        this.metadataIndexResolved = true;
+        logger.flow("TishOSCommandBridge", "metadata-readiness:verified-cache-snapshot");
+        this.scheduleParentChildStartupAfterMetadataReadiness();
+        return true;
     }
 
     private captureSettingsSaveSnapshot(): ControllerSettingsSaveSnapshot {

@@ -662,3 +662,14 @@ body.tps-controller-mode {
   }
 }
 
+.tps-notification-delivery-status {
+  margin: 8px 10px 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 7px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.35;
+}
+

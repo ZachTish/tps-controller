@@ -89,6 +89,7 @@ function createHarness({
   sharedSecretValues = null,
   sharedStorage = null,
   vaultName = VAULT,
+  notificationScheduleReadiness,
   notificationScheduleProvider,
   completeNotification = async () => true,
 } = {}) {
@@ -245,6 +246,7 @@ function createHarness({
       now: () => NOW,
       confirmPairing,
       confirmLocalRevoke,
+      notificationScheduleReadiness,
       notificationScheduleProvider,
       completeNotification: async (value) => {
         completions.push(value);
@@ -698,6 +700,119 @@ test("schedule projection failure remains pending and reports unavailable until 
   assert.equal(recovered.failedClients, 0);
   assert.equal(harness.openedURLs.at(-1), "tishos://settings?section=command-bridge");
   assert.equal(harness.storage.getItem(PAIRING_STORAGE_KEY).includes("returnPending"), false);
+});
+
+test("pre-index pairing cannot publish an empty schedule or return until metadata resolves", async (t) => {
+  let metadataReady = false;
+  let providerCalls = 0;
+  const schedule = [{
+    title: "Indexed reminder",
+    body: "Available after metadata resolution",
+    fireAt: NOW + 60_000,
+    sourcePath: "Daily/Indexed.md",
+    sourceKey: "Daily/Indexed.md::task:1",
+    reminderId: "scheduled-task",
+  }];
+  const harness = createHarness({
+    notificationScheduleReadiness: () => metadataReady
+      ? { ready: true }
+      : { ready: false, reason: "metadata-index-not-ready" },
+    notificationScheduleProvider: async () => {
+      providerCalls += 1;
+      return schedule;
+    },
+  });
+  t.after(() => harness.service.stop());
+
+  await harness.service.handlePairRoute(pairParams());
+  harness.service.start();
+  harness.fireLayout();
+  const blocked = await harness.service.refreshCatalogs("pre-index");
+  const schedulePath = `${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.json`;
+
+  assert.equal(blocked.unavailableReason, "native-notification-schedule-unavailable");
+  assert.deepEqual(blocked.readyPairings, []);
+  assert.equal(providerCalls, 0, "projection must not run against an unresolved metadata snapshot");
+  assert.equal(harness.files.has(schedulePath), false);
+  assert.equal(harness.openedURLs.length, 0, "pairing callback must remain pending");
+  assert.deepEqual(
+    harness.service.getStatus().clients.map((client) => ({
+      state: client.nativeNotificationState,
+      count: client.nativeNotificationItemCount,
+      reason: client.nativeNotificationReason,
+    })),
+    [{ state: "pending", count: null, reason: "metadata-index-not-ready" }],
+  );
+
+  metadataReady = true;
+  const recovered = await harness.service.refreshCatalogs("metadata-resolved");
+  assert.equal(recovered.unavailableReason, undefined);
+  assert.deepEqual(recovered.readyPairings.map(({ clientID }) => clientID), [CLIENT]);
+  assert.equal(providerCalls, 1);
+  assert.equal(JSON.parse(harness.files.get(schedulePath)).items.length, 1);
+  assert.equal(harness.openedURLs.at(-1), "tishos://settings?section=command-bridge");
+  assert.deepEqual(
+    harness.service.getStatus().clients.map((client) => ({
+      state: client.nativeNotificationState,
+      count: client.nativeNotificationItemCount,
+      publishedAt: client.nativeNotificationPublishedAt,
+      reason: client.nativeNotificationReason,
+    })),
+    [{
+      state: "ready",
+      count: 1,
+      publishedAt: new Date(NOW).toISOString(),
+      reason: null,
+    }],
+  );
+
+  await harness.service.stop();
+  assert.deepEqual(
+    harness.service.getStatus().clients.map((client) => ({
+      state: client.nativeNotificationState,
+      count: client.nativeNotificationItemCount,
+      publishedAt: client.nativeNotificationPublishedAt,
+      reason: client.nativeNotificationReason,
+    })),
+    [{ state: "pending", count: null, publishedAt: null, reason: "layout-not-ready" }],
+    "stopping must clear the process-local verified schedule status",
+  );
+});
+
+test("stop clears verified schedule status even when an active publication settles afterward", async () => {
+  const providerEntered = deferred();
+  const providerRelease = deferred();
+  const harness = createHarness({
+    notificationScheduleProvider: async () => {
+      providerEntered.resolve();
+      return providerRelease.promise;
+    },
+  });
+
+  await harness.service.handlePairRoute(pairParams());
+  harness.service.start();
+  harness.fireLayout();
+  await providerEntered.promise;
+  const stopped = harness.service.stop();
+  providerRelease.resolve([{
+    title: "Settles after stop",
+    body: "Must not repopulate audit status",
+    fireAt: NOW + 60_000,
+    sourcePath: "Daily/Stopped.md",
+    sourceKey: "Daily/Stopped.md::task:1",
+    reminderId: "scheduled-task",
+  }]);
+  await stopped;
+
+  assert.deepEqual(
+    harness.service.getStatus().clients.map((client) => ({
+      state: client.nativeNotificationState,
+      count: client.nativeNotificationItemCount,
+      publishedAt: client.nativeNotificationPublishedAt,
+      reason: client.nativeNotificationReason,
+    })),
+    [{ state: "pending", count: null, publishedAt: null, reason: "layout-not-ready" }],
+  );
 });
 
 test("per-device schedule write failure cannot report pairing ready and retries independently", async (t) => {

@@ -181,9 +181,10 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             const updated = client.lastPublishedAt
                 ? ` · ${client.commandCount} commands · updated ${new Date(client.lastPublishedAt).toLocaleString()}`
                 : ' · waiting for its first catalog';
+            const nativeStatus = this.describeNativeNotificationStatus(client);
             new Setting(commandBridgeSection)
                 .setName(client.device)
-                .setDesc(`${client.platform} · ${client.clientID.slice(-8)}${updated}`)
+                .setDesc(`${client.platform} · ${client.clientID.slice(-8)}${updated} · ${nativeStatus}`)
                 .addButton((button) => button
                     .setWarning()
                     .setButtonText('Revoke')
@@ -986,6 +987,33 @@ export class TPSControllerSettingTab extends PluginSettingTab {
         }
     }
 
+    private describeNativeNotificationStatus(client: {
+        nativeNotificationState: 'ready' | 'pending';
+        nativeNotificationItemCount: number | null;
+        nativeNotificationPublishedAt: string | null;
+        nativeNotificationReason: string | null;
+    }): string {
+        if (this.plugin.settings.enableReminders !== true) {
+            return 'native schedule blocked: reminders are off';
+        }
+        if (this.plugin.settings.notificationDeliveryProvider !== 'tishos') {
+            return 'native schedule intentionally empty: ntfy is selected';
+        }
+        if (client.nativeNotificationState === 'pending') {
+            const prior = client.nativeNotificationItemCount === null
+                ? ''
+                : `; last verified ${client.nativeNotificationItemCount} alert${client.nativeNotificationItemCount === 1 ? '' : 's'}${client.nativeNotificationPublishedAt
+                    ? ` at ${new Date(client.nativeNotificationPublishedAt).toLocaleString()}`
+                    : ''}`;
+            return `native schedule pending: ${client.nativeNotificationReason || 'awaiting refresh'}${prior}`;
+        }
+        const count = client.nativeNotificationItemCount || 0;
+        const updated = client.nativeNotificationPublishedAt
+            ? `, updated ${new Date(client.nativeNotificationPublishedAt).toLocaleString()}`
+            : '';
+        return `${count} native alert${count === 1 ? '' : 's'}${updated}`;
+    }
+
     private renderReminderSettingsPage(container: HTMLElement): void {
         this.renderPageHeading(
             container,
@@ -1009,6 +1037,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     .onChange(async (value) => {
                         this.plugin.settings.enableReminders = value;
                         await this.plugin.saveSettings();
+                        await this.plugin.refreshTishOSCommandBridgeCatalogs();
                         this.plugin.restartReminderLoop();
                         this.redisplayPreservingScroll('[data-tps-settings-focus="enable-reminders"]');
                     });
@@ -1100,6 +1129,29 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             providerSetting.addButton(button => button
                 .setButtonText('Open TishOS')
                 .onClick(() => this.plugin.openTishOSNativeNotificationSettings()));
+            const bridgeStatus = this.plugin.getTishOSCommandBridgeStatus();
+            const scheduleDescription = this.plugin.settings.enableReminders !== true
+                ? 'Blocked because Enable Reminders is off.'
+                : !bridgeStatus.available
+                    ? 'Device-local pairing state is unavailable.'
+                    : bridgeStatus.clients.length === 0
+                        ? 'This Obsidian device is not paired with TishOS.'
+                        : bridgeStatus.clients
+                            .map((client) => `${client.device}: ${this.describeNativeNotificationStatus(client)}`)
+                            .join(' · ');
+            new Setting(deliverySection)
+                .setName('Local TishOS schedule')
+                .setDesc(scheduleDescription)
+                .addButton(button => button
+                    .setButtonText('Refresh Schedule')
+                    .onClick(async () => {
+                        button.setDisabled(true);
+                        try {
+                            await this.plugin.refreshTishOSCommandBridgeCatalogs();
+                        } finally {
+                            this.redisplayPreservingScroll();
+                        }
+                    }));
         } else if (selectedProvider.id === 'ntfy') {
             providerSetting.addButton(button => button
                 .setButtonText('Open ntfy Settings')

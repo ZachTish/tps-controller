@@ -486,6 +486,63 @@ test('native schedule projection is Controller-rule-owned and read-only', async 
   assert.deepEqual(settings.alertState, before, 'projection must not consume Controller delivery state');
 });
 
+test('master reminder switch keeps the audit list and native schedule projection empty in parity', async () => {
+  const disabledSettings = {
+    enableReminders: false,
+    reminders: [{
+      id: 'disabled-rule',
+      enabled: true,
+      property: 'scheduled',
+      mode: 'task',
+      stopConditions: [],
+    }],
+    alertState: {},
+    archiveFolder: '_archive',
+    externalCalendars: [],
+  };
+  const inaccessibleApp = {
+    metadataCache: {
+      getFileCache: () => {
+        throw new Error('disabled reminder surfaces must not inspect metadata');
+      },
+    },
+    vault: {
+      getMarkdownFiles: () => {
+        throw new Error('disabled reminder surfaces must not scan the vault');
+      },
+    },
+  };
+
+  const overdueHarness = loadCompiledOverdueServiceHarness();
+  const overdue = new overdueHarness.OverdueService(inaccessibleApp, () => disabledSettings);
+  assert.deepEqual(await overdue.getOverdueItems(), []);
+  assert.equal(
+    overdueHarness.logs.some(({ args }) => args[0] === 'OverdueItems' && args[1] === 'scan:reminders-disabled'),
+    true,
+  );
+
+  const engineHarness = loadCompiledReminderEngineHarness();
+  const engine = new engineHarness.ReminderEngine(inaccessibleApp, {});
+  assert.deepEqual(await engine.projectScheduledNotifications(disabledSettings), []);
+});
+
+test('reminder audit surfaces report master, provider, and per-device publication truth', () => {
+  assert.match(mainSource, /getReminderDeliveryAuditStatus\(\)[\s\S]*remindersEnabled:[\s\S]*notificationDeliveryProvider:[\s\S]*localDeliveryMode:[\s\S]*commandBridge:/);
+  assert.match(notificationViewSource, /Reminder delivery is off\. No reminder is being published\./);
+  assert.match(notificationViewSource, /ntfy delivery does not run on this mobile\/User device/);
+  assert.match(notificationViewSource, /nativeNotificationState === 'pending'/);
+  assert.match(notificationViewSource, /nativeNotificationReason/);
+  assert.match(notificationViewSource, /nativeNotificationItemCount/);
+  assert.match(notificationViewSource, /nativeNotificationPublishedAt/);
+  assert.doesNotMatch(notificationViewSource, /reduce\([\s\S]{0,200}nativeNotificationItemCount/);
+  assert.match(settingsTabSource, /private describeNativeNotificationStatus/);
+  assert.match(settingsTabSource, /reminders are off/);
+  assert.match(settingsTabSource, /ntfy is selected/);
+  assert.match(settingsTabSource, /nativeNotificationReason/);
+  assert.match(settingsTabSource, /nativeNotificationPublishedAt/);
+  assert.match(settingsTabSource, /\.setName\('Local TishOS schedule'\)/);
+});
+
 test('native schedule retains the modal-visible due occurrence with its stable fire time', async () => {
   const now = Date.parse('2026-08-15T15:00:00.000Z');
   const triggerTime = now - 30 * 1000;
