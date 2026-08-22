@@ -1,5 +1,13 @@
 # TPS Controller
 
+## 0.10.2 verified native-notification schedule readiness
+
+- Equal-time notification items now use the same raw UTF-8 byte comparator for candidate selection, final signed-queue order, and Controller-side validation. Base64url IDs containing `-` or `_` can no longer be locale-sorted into an order that TishOS correctly rejects.
+- A paired client becomes ready only after both its exact signed command catalog and its exact signed native-notification schedule verify. Projection failures and per-device schedule write failures remain pending, report `native-notification-schedule-unavailable`, preserve prior verified artifacts, and retry automatically.
+- Schedule readiness is tracked independently per client. One client's write failure does not prevent another paired device with a verified schedule and catalog from becoming ready.
+- Pairing notices now distinguish saved authorization from completed publication instead of claiming the device is connected while its notification schedule is unavailable.
+- Focused regression coverage pins an equal-fire-time `-`/`_` digest pair, projection recovery, per-client write recovery, and mixed two-client readiness. The 46-check bridge suite, all 20 package-declared test files, TypeScript, and the required separate production build passed with the three preserved historical comparison skips. Obsidian 1.13.7 reloaded only **Obsidian Plugin Test Vault**, exposed Controller's `TPS: User` status, and retained byte-identical runtime-owned state. This backward-compatible reliability patch adds no setting, pairing migration, rule change, or wire-schema change and keeps minimum supported Obsidian compatibility at 1.12.0. Artifact hashes and full evidence are recorded in `release-notes/0.10.2.md`; production was not accessed or promoted.
+
 ## 0.10.1 existing calendar-note association repair
 
 - Task-mode calendar sync now reuses one unique existing Markdown note whose basename or authored `title` exactly matches the event. **One note for the recurring series** accepts the unique exact match directly; **One note per scheduled day** additionally requires that note's `scheduled` value or path to match the occurrence day.

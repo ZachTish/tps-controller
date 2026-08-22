@@ -11,6 +11,7 @@ import {
     canonicalCommandRevokeRequest,
     canonicalCommandRunRequest,
     canonicalNotificationActionRequest,
+    compareUTF8,
     commandEntryDigest,
     decodeBase64URL,
     hmacSHA256Base64URL,
@@ -141,6 +142,13 @@ export interface TishOSCommandBridgeRefreshResult {
 
 interface TishOSCommandBridgeRefreshOutcome extends TishOSCommandBridgeRefreshResult {
     readyPairings: Array<{ clientID: string; generation: string }>;
+}
+
+interface NativeNotificationRefreshOutcome {
+    readyClientIDs: Set<string>;
+    failedClientIDs: Set<string>;
+    publishedClients: number;
+    unchangedClients: number;
 }
 
 export interface TishOSCommandBridgeRouteResult {
@@ -610,18 +618,26 @@ export class TishOSCommandBridgeService {
         }
         if (!this.layoutReady) return this.unavailableRefresh("layout-not-ready", clients.length);
 
+        let nativeNotificationReadyClientIDs: Set<string> | null = null;
+        const nativeNotificationFailedClientIDs = new Set<string>();
         if (this.notificationScheduleProvider) {
+            nativeNotificationReadyClientIDs = new Set<string>();
             try {
                 const notificationItems = await this.buildNativeNotificationItems(
                     await this.notificationScheduleProvider(),
                 );
-                await this.refreshNativeNotificationSchedules(
+                const notificationRefresh = await this.refreshNativeNotificationSchedules(
                     state.vaultName,
                     clients,
                     notificationItems,
                     reason,
                 );
+                nativeNotificationReadyClientIDs = notificationRefresh.readyClientIDs;
+                for (const clientID of notificationRefresh.failedClientIDs) {
+                    nativeNotificationFailedClientIDs.add(clientID);
+                }
             } catch (error) {
+                for (const pairing of clients) nativeNotificationFailedClientIDs.add(pairing.clientID);
                 logger.flowWarn("TishOSCommandBridge", "native-notification-refresh:failed", {
                     reason,
                     pairedClients: clients.length,
@@ -658,9 +674,10 @@ export class TishOSCommandBridgeService {
         }
         let publishedClients = 0;
         let unchangedClients = 0;
-        let failedClients = 0;
+        const failedClientIDs = new Set(nativeNotificationFailedClientIDs);
         const readyPairings: Array<{ clientID: string; generation: string }> = [];
         const metadataChangedClients = new Set<string>();
+        const publishedCatalogClientIDs = new Set<string>();
         for (const pairing of clients) {
             try {
                 const fingerprint = await sha256Base64URL(canonicalCommandCatalog({
@@ -691,7 +708,12 @@ export class TishOSCommandBridgeService {
                         metadataChangedClients.add(pairing.clientID);
                     }
                     unchangedClients += 1;
-                    readyPairings.push({ clientID: pairing.clientID, generation: pairing.generation });
+                    if (
+                        nativeNotificationReadyClientIDs === null
+                        || nativeNotificationReadyClientIDs.has(pairing.clientID)
+                    ) {
+                        readyPairings.push({ clientID: pairing.clientID, generation: pairing.generation });
+                    }
                     continue;
                 }
                 const generatedAt = new Date(this.now()).toISOString();
@@ -717,9 +739,15 @@ export class TishOSCommandBridgeService {
                 pairing.commandCount = entries.length;
                 metadataChangedClients.add(pairing.clientID);
                 publishedClients += 1;
-                readyPairings.push({ clientID: pairing.clientID, generation: pairing.generation });
+                publishedCatalogClientIDs.add(pairing.clientID);
+                if (
+                    nativeNotificationReadyClientIDs === null
+                    || nativeNotificationReadyClientIDs.has(pairing.clientID)
+                ) {
+                    readyPairings.push({ clientID: pairing.clientID, generation: pairing.generation });
+                }
             } catch (error) {
-                failedClients += 1;
+                failedClientIDs.add(pairing.clientID);
                 if (logger.errorSummary(error).includes("one-megabyte bound")) {
                     logger.flowWarn("TishOSCommandBridge", "catalog-refresh:file-limit", {
                         reason,
@@ -759,10 +787,14 @@ export class TishOSCommandBridgeService {
                     publishedClients,
                     errorType: this.errorType(error),
                 });
-                failedClients += publishedClients;
+                for (const clientID of publishedCatalogClientIDs) failedClientIDs.add(clientID);
                 publishedClients = 0;
             }
         }
+        const failedClients = failedClientIDs.size;
+        const unavailableReason = nativeNotificationFailedClientIDs.size > 0
+            ? "native-notification-schedule-unavailable"
+            : undefined;
         logger.flow("TishOSCommandBridge", "catalog-refresh:done", {
             reason,
             pairedClients: clients.length,
@@ -773,6 +805,8 @@ export class TishOSCommandBridgeService {
             invalidCommands: normalized.invalidCount,
             duplicateCommands: normalized.duplicateCount,
             ambiguousCommands: normalized.ambiguousDuplicateCount,
+            nativeNotificationReadyClients: nativeNotificationReadyClientIDs?.size ?? null,
+            unavailableReason: unavailableReason || null,
         });
         return {
             pairedClients: clients.length,
@@ -783,6 +817,7 @@ export class TishOSCommandBridgeService {
             invalidCommands: normalized.invalidCount,
             ambiguousCommands: normalized.ambiguousDuplicateCount,
             readyPairings,
+            ...(unavailableReason ? { unavailableReason } : {}),
         };
     }
 
@@ -797,8 +832,10 @@ export class TishOSCommandBridgeService {
             const leftFireAt = Number.isSafeInteger(left.fireAt) ? left.fireAt : Number.MAX_SAFE_INTEGER;
             const rightFireAt = Number.isSafeInteger(right.fireAt) ? right.fireAt : Number.MAX_SAFE_INTEGER;
             if (leftFireAt !== rightFireAt) return leftFireAt - rightFireAt;
-            return this.nativeNotificationCandidateKey(left)
-                .localeCompare(this.nativeNotificationCandidateKey(right));
+            return compareUTF8(
+                this.nativeNotificationCandidateKey(left),
+                this.nativeNotificationCandidateKey(right),
+            );
         });
         for (const value of orderedValues) {
             const candidateKey = this.nativeNotificationCandidateKey(value);
@@ -809,7 +846,7 @@ export class TishOSCommandBridgeService {
             if (unique.size >= TISHOS_NATIVE_NOTIFICATION_MAX_ITEMS) break;
         }
         const items = [...unique.values()].sort((left, right) =>
-            left.fireAt.localeCompare(right.fireAt) || left.id.localeCompare(right.id),
+            compareUTF8(left.fireAt, right.fireAt) || compareUTF8(left.id, right.id),
         );
         if (validateNotificationItems(items) === null) {
             throw new Error("Native notification projection failed validation.");
@@ -886,10 +923,11 @@ export class TishOSCommandBridgeService {
         clients: readonly StoredPairing[],
         items: readonly TishOSNativeNotificationItem[],
         reason: string,
-    ): Promise<void> {
+    ): Promise<NativeNotificationRefreshOutcome> {
         let published = 0;
         let unchanged = 0;
-        let failed = 0;
+        const readyClientIDs = new Set<string>();
+        const failedClientIDs = new Set<string>();
         for (const pairing of clients) {
             try {
                 const secret = this.readPairingSecret(pairing);
@@ -898,6 +936,7 @@ export class TishOSCommandBridgeService {
                 await this.recoverNativeNotificationArtifacts(path, pairing, items, secret);
                 if (await this.validExistingNativeNotificationGeneratedAt(path, pairing, items, secret)) {
                     unchanged += 1;
+                    readyClientIDs.add(pairing.clientID);
                     continue;
                 }
                 const generatedAt = new Date(this.now()).toISOString();
@@ -926,8 +965,9 @@ export class TishOSCommandBridgeService {
                     generatedAt,
                 );
                 published += 1;
+                readyClientIDs.add(pairing.clientID);
             } catch (error) {
-                failed += 1;
+                failedClientIDs.add(pairing.clientID);
                 logger.flowWarn("TishOSCommandBridge", "native-notification-refresh:client-failed", {
                     reason,
                     errorType: this.errorType(error),
@@ -940,8 +980,14 @@ export class TishOSCommandBridgeService {
             projectedItems: items.length,
             publishedClients: published,
             unchangedClients: unchanged,
-            failedClients: failed,
+            failedClients: failedClientIDs.size,
         });
+        return {
+            readyClientIDs,
+            failedClientIDs,
+            publishedClients: published,
+            unchangedClients: unchanged,
+        };
     }
 
     private async processPairRequest(
@@ -979,7 +1025,7 @@ export class TishOSCommandBridgeService {
                     (ready) => ready.clientID === request.clientID && ready.generation === committed.generation,
                 ) || this.pendingReturnGenerations.get(request.clientID) === committed.generation)
             ) {
-                new Notice("Connected, but the signed command catalog is not ready yet. TPS Controller will retry automatically.");
+                new Notice("Pairing was saved, but its signed command catalog and notification schedule are not both ready yet. TPS Controller will retry automatically.");
             }
         }
         return committed.result;
@@ -1085,7 +1131,7 @@ export class TishOSCommandBridgeService {
                 platform: request.platform,
                 pairedClients: state.clients.length,
             });
-            new Notice(`TishOS command access connected for ${request.device}.`);
+            new Notice(`TishOS access approved for ${request.device}. Preparing its signed command catalog and notification schedule.`);
             this.pendingReturnGenerations.set(request.clientID, generation);
             return {
                 result: { accepted: true, reason: "paired", clientID: request.clientID },

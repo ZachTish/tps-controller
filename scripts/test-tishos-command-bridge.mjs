@@ -620,6 +620,158 @@ test("paired clients receive a signed Controller-rule notification schedule that
   assert.equal(modalVisible.items[0].fireAt, new Date(NOW - 4 * 60 * 1000).toISOString());
 });
 
+test("equal-time base64url punctuation uses the same raw UTF-8 order for publication and validation", async (t) => {
+  const fireAt = NOW + 60 * 60 * 1000;
+  const schedule = [{
+    title: "Equal 100",
+    body: "same time",
+    fireAt,
+    sourcePath: "Daily/Equal.md",
+    sourceKey: "Daily/Equal.md::task:100",
+    reminderId: "scheduled-task",
+  }, {
+    title: "Equal 14",
+    body: "same time",
+    fireAt,
+    sourcePath: "Daily/Equal.md",
+    sourceKey: "Daily/Equal.md::task:14",
+    reminderId: "scheduled-task",
+  }];
+  const harness = createHarness({ notificationScheduleProvider: async () => schedule });
+  t.after(() => harness.service.stop());
+
+  await pairAndPublish(harness);
+
+  const path = `${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.json`;
+  const published = JSON.parse(harness.files.get(path));
+  assert.deepEqual(
+    published.items.map((item) => item.id),
+    [
+      "-4H5SOKKvYAGUYUHNsqFrj_gIMnqmeiUK8SrxLaAIDU",
+      "_svxd0S04S3-HWP6Tqnccyb_xbMC2dwQt2jd7WW1c9Y",
+    ],
+  );
+  assert.equal(notificationContract.validateNotificationItems(published.items) !== null, true);
+  assert.equal(contract.compareUTF8(published.items[0].id, published.items[1].id) < 0, true);
+});
+
+test("schedule projection failure remains pending and reports unavailable until a verified schedule exists", async (t) => {
+  let projectionFails = true;
+  const schedule = [{
+    title: "Projection recovery",
+    body: "Controller-owned reminder",
+    fireAt: NOW + 60_000,
+    sourcePath: "Daily/Projection.md",
+    sourceKey: "Daily/Projection.md::task:1",
+    reminderId: "scheduled-task",
+  }];
+  const harness = createHarness({
+    notificationScheduleProvider: async () => {
+      if (projectionFails) throw new Error("Injected projection failure");
+      return schedule;
+    },
+  });
+  t.after(() => harness.service.stop());
+  await harness.service.handlePairRoute(pairParams());
+  harness.service.start();
+  harness.fireLayout();
+
+  const failed = await harness.service.refreshCatalogs("projection-failure");
+  assert.equal(failed.unavailableReason, "native-notification-schedule-unavailable");
+  assert.equal(failed.failedClients, 1);
+  assert.deepEqual(failed.readyPairings, []);
+  assert.equal(harness.openedURLs.length, 0);
+  assert.equal(
+    harness.files.has(`${contract.TISHOS_COMMAND_BRIDGE_CATALOG_ROOT}/${CLIENT}.json`),
+    true,
+    "command publication alone must not mark the paired client ready",
+  );
+  assert.equal(
+    harness.files.has(`${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.json`),
+    false,
+  );
+  assert.equal(harness.storage.getItem(PAIRING_STORAGE_KEY).includes("returnPending"), true);
+
+  projectionFails = false;
+  const recovered = await harness.service.refreshCatalogs("projection-recovery");
+  assert.equal(recovered.unavailableReason, undefined);
+  assert.equal(recovered.failedClients, 0);
+  assert.equal(harness.openedURLs.at(-1), "tishos://settings?section=command-bridge");
+  assert.equal(harness.storage.getItem(PAIRING_STORAGE_KEY).includes("returnPending"), false);
+});
+
+test("per-device schedule write failure cannot report pairing ready and retries independently", async (t) => {
+  const schedule = [{
+    title: "Write recovery",
+    body: "Controller-owned reminder",
+    fireAt: NOW + 60_000,
+    sourcePath: "Daily/Write.md",
+    sourceKey: "Daily/Write.md::task:1",
+    reminderId: "scheduled-task",
+  }];
+  const harness = createHarness({ notificationScheduleProvider: async () => schedule });
+  t.after(() => harness.service.stop());
+  await harness.service.handlePairRoute(pairParams());
+  harness.failWriteOnce(`${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/.${CLIENT}.pending`);
+  harness.service.start();
+  harness.fireLayout();
+
+  const failed = await harness.service.refreshCatalogs("schedule-write-failure");
+  assert.equal(failed.unavailableReason, "native-notification-schedule-unavailable");
+  assert.equal(failed.failedClients, 1);
+  assert.deepEqual(failed.readyPairings, []);
+  assert.equal(harness.openedURLs.length, 0);
+  assert.equal(harness.storage.getItem(PAIRING_STORAGE_KEY).includes("returnPending"), true);
+
+  const recovered = await harness.service.refreshCatalogs("schedule-write-recovery");
+  assert.equal(recovered.unavailableReason, undefined);
+  assert.equal(recovered.failedClients, 0);
+  assert.equal(harness.openedURLs.at(-1), "tishos://settings?section=command-bridge");
+  assert.equal(
+    harness.files.has(`${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.json`),
+    true,
+  );
+});
+
+test("one failed schedule does not block a different client's verified pairing readiness", async (t) => {
+  const secondSecretBytes = Uint8Array.from({ length: 32 }, (_, index) => 255 - index);
+  const secondSecret = contract.encodeBase64URL(secondSecretBytes);
+  const schedule = [{
+    title: "Per-client readiness",
+    body: "Controller-owned reminder",
+    fireAt: NOW + 60_000,
+    sourcePath: "Daily/Clients.md",
+    sourceKey: "Daily/Clients.md::task:1",
+    reminderId: "scheduled-task",
+  }];
+  const harness = createHarness({ notificationScheduleProvider: async () => schedule });
+  t.after(() => harness.service.stop());
+  const first = await harness.service.handlePairRoute(pairParams());
+  const second = await harness.service.handlePairRoute(pairParams(
+    SECOND_CLIENT,
+    secondSecret,
+    { platform: "macos", device: "QA Mac" },
+  ));
+  assert.equal(first.accepted, true);
+  assert.equal(second.accepted, true);
+  harness.failWriteOnce(`${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/.${CLIENT}.pending`);
+  harness.service.start();
+  harness.fireLayout();
+
+  const partial = await harness.service.refreshCatalogs("partial-schedule-write-failure");
+  assert.equal(partial.unavailableReason, "native-notification-schedule-unavailable");
+  assert.equal(partial.failedClients, 1);
+  assert.deepEqual(partial.readyPairings.map(({ clientID }) => clientID), [SECOND_CLIENT]);
+  assert.equal(
+    harness.files.has(`${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.json`),
+    false,
+  );
+  assert.equal(
+    harness.files.has(`${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${SECOND_CLIENT}.json`),
+    true,
+  );
+});
+
 test("large reminder projections bound cryptographic work before publishing the earliest queue", async (t) => {
   const schedule = Array.from({ length: 7_000 }, (_, index) => ({
     title: `Reminder ${index}`,

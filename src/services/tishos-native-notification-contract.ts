@@ -1,4 +1,5 @@
 import {
+    compareUTF8,
     isCanonicalBase64URLSHA256,
     isCanonicalGeneratedAt,
     isValidCommandName,
@@ -122,7 +123,8 @@ export function validateNotificationItems(
             || !isCanonicalNotificationDate(item.fireAt)
             || (item.sourcePath !== undefined && !isValidNotificationSourcePath(item.sourcePath))
         ) return null;
-        if (previousFireAt > item.fireAt || (previousFireAt === item.fireAt && previousID >= item.id)) return null;
+        const fireAtOrder = previousFireAt ? compareUTF8(previousFireAt, item.fireAt) : -1;
+        if (fireAtOrder > 0 || (fireAtOrder === 0 && compareUTF8(previousID, item.id) >= 0)) return null;
         ids.add(item.id);
         previousFireAt = item.fireAt;
         previousID = item.id;
