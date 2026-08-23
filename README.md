@@ -1,5 +1,11 @@
 # TPS Controller
 
+## 0.10.5 iPhone pairing return
+
+- After approving a TishOS vault connection in Obsidian on iPhone or iPad, Controller now returns through a direct same-frame custom-scheme navigation. Mobile WebKit can silently block the former asynchronous popup-style return, leaving TishOS waiting even though Controller saved the pairing.
+- The pending return is cleared only after the direct navigation call succeeds. A thrown navigation failure remains durable and retries on the next Controller publication refresh.
+- macOS keeps its existing working return path. This local-device fix neither enables nor requires Mac relay and changes no pairing credential, signed catalog, signed notification schedule, reminder rule, or note data.
+
 ## 0.10.4 portable local TishOS vault identity
 
 - The phone-local TishOS bridge now accepts the same independently linked vault when Files and Obsidian preserve capitalization or canonically equivalent Unicode differently, including `TishOs v0.1` versus `TishOS v0.1`.

@@ -115,6 +115,7 @@ function createHarness({
   let registryAvailable = true;
   let failNextRename = false;
   let failNextSecretClear = false;
+  let failNextReturnNavigation = false;
   const storageSaveFailureCountdowns = new Map();
   const swallowedStorageSaveKeys = new Set();
   const removalFailures = new Map();
@@ -130,6 +131,15 @@ function createHarness({
     setInterval,
     clearInterval,
     open(url) { openedURLs.push(String(url)); },
+    location: {
+      assign(url) {
+        if (failNextReturnNavigation) {
+          failNextReturnNavigation = false;
+          throw new Error("Injected return navigation failure");
+        }
+        openedURLs.push(String(url));
+      },
+    },
   };
   const adapter = {
     async exists(path) {
@@ -274,6 +284,7 @@ function createHarness({
     setThrowOnExecute(value) { throwOnExecute = value; },
     failRenameOnce() { failNextRename = true; },
     failSecretClearOnce() { failNextSecretClear = true; },
+    failReturnNavigationOnce() { failNextReturnNavigation = true; },
     failStorageSaveOnce(key) { storageSaveFailureCountdowns.set(key, 0); },
     swallowStorageSaveOnce(key) { swallowedStorageSaveKeys.add(key); },
     failStorageSaveAfter(key, successfulSaves) { storageSaveFailureCountdowns.set(key, successfulSaves); },
@@ -557,6 +568,30 @@ test("pairing is exact-vault, explicit, SecretStorage-only, and returns after fi
   const { mac, ...unsigned } = catalog;
   assert.equal(await contract.verifyHmacSHA256Base64URL(SECRET_BYTES, contract.canonicalCommandCatalog(unsigned), mac), true);
   assert.equal([...harness.storage.values.values()].some((value) => value.includes("returnPending")), false);
+});
+
+test("iPhone pair return uses direct navigation and remains pending after a failed dispatch", async (t) => {
+  const harness = createHarness();
+  t.after(() => harness.service.stop());
+  const result = await harness.service.handlePairRoute(pairParams());
+  assert.equal(result.accepted, true);
+
+  harness.failReturnNavigationOnce();
+  harness.service.start();
+  harness.fireLayout();
+  await harness.service.refreshCatalogs("mobile-return-failure");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.openedURLs.length, 0);
+  assert.equal(harness.storage.getItem(PAIRING_STORAGE_KEY).includes("returnPending"), true);
+
+  const retried = await harness.service.refreshCatalogs("mobile-return-retry");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    harness.openedURLs.at(-1),
+    "tishos://settings?section=command-bridge",
+    JSON.stringify({ readyPairings: retried.readyPairings, stored: harness.storage.getItem(PAIRING_STORAGE_KEY) }),
+  );
+  assert.equal(harness.storage.getItem(PAIRING_STORAGE_KEY).includes("returnPending"), false);
 });
 
 test("paired clients receive a signed Controller-rule notification schedule that refreshes semantically", async (t) => {

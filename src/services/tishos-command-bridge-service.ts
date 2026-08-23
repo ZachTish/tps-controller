@@ -66,6 +66,7 @@ const REPLAY_RETENTION_MS = TISHOS_COMMAND_BRIDGE_MAX_REQUEST_AGE_MS + TISHOS_CO
 const LOCAL_TOKEN = /^[0-9a-f]{32}$/;
 
 type ProtocolParams = Record<string, string | undefined>;
+type TishOSPlatform = "ios" | "ipados" | "macos";
 
 // Obsidian invokes protocol handlers with an already-parsed object, so duplicate
 // raw query keys are no longer observable at this boundary. TishOS emits each key
@@ -75,7 +76,7 @@ type ProtocolParams = Record<string, string | undefined>;
 interface StoredPairing {
     clientID: string;
     generation: string;
-    platform: "ios" | "ipados" | "macos";
+    platform: TishOSPlatform;
     device: string;
     secretID: string;
     pairedAt: string;
@@ -117,7 +118,7 @@ interface StoredRevocationState {
 
 export interface TishOSCommandBridgeClientStatus {
     clientID: string;
-    platform: "ios" | "ipados" | "macos";
+    platform: TishOSPlatform;
     device: string;
     pairedAt: string;
     lastPublishedAt: string | null;
@@ -146,7 +147,7 @@ export interface TishOSCommandBridgeRefreshResult {
 }
 
 interface TishOSCommandBridgeRefreshOutcome extends TishOSCommandBridgeRefreshResult {
-    readyPairings: Array<{ clientID: string; generation: string }>;
+    readyPairings: Array<{ clientID: string; generation: string; platform: TishOSPlatform }>;
 }
 
 interface NativeNotificationRefreshOutcome {
@@ -729,7 +730,7 @@ export class TishOSCommandBridgeService {
         let publishedClients = 0;
         let unchangedClients = 0;
         const failedClientIDs = new Set(nativeNotificationFailedClientIDs);
-        const readyPairings: Array<{ clientID: string; generation: string }> = [];
+        const readyPairings: Array<{ clientID: string; generation: string; platform: TishOSPlatform }> = [];
         const metadataChangedClients = new Set<string>();
         const publishedCatalogClientIDs = new Set<string>();
         for (const pairing of clients) {
@@ -766,7 +767,11 @@ export class TishOSCommandBridgeService {
                         nativeNotificationReadyClientIDs === null
                         || nativeNotificationReadyClientIDs.has(pairing.clientID)
                     ) {
-                        readyPairings.push({ clientID: pairing.clientID, generation: pairing.generation });
+                        readyPairings.push({
+                            clientID: pairing.clientID,
+                            generation: pairing.generation,
+                            platform: pairing.platform,
+                        });
                     }
                     continue;
                 }
@@ -798,7 +803,11 @@ export class TishOSCommandBridgeService {
                     nativeNotificationReadyClientIDs === null
                     || nativeNotificationReadyClientIDs.has(pairing.clientID)
                 ) {
-                    readyPairings.push({ clientID: pairing.clientID, generation: pairing.generation });
+                    readyPairings.push({
+                        clientID: pairing.clientID,
+                        generation: pairing.generation,
+                        platform: pairing.platform,
+                    });
                 }
             } catch (error) {
                 failedClientIDs.add(pairing.clientID);
@@ -2186,14 +2195,21 @@ export class TishOSCommandBridgeService {
     }
 
     private returnToTishOSIfReady(
-        readyPairings: ReadonlyArray<{ clientID: string; generation: string }>,
+        readyPairings: ReadonlyArray<{
+            clientID: string;
+            generation: string;
+            platform: TishOSPlatform;
+        }>,
     ): void {
         if (this.stopped) return;
         const readyPending = readyPairings.filter(
             (ready) => this.pendingReturnGenerations.get(ready.clientID) === ready.generation,
         );
         if (!readyPending.length || !this.savePendingReturnState(readyPending, false)) return;
-        if (this.returnToTishOS()) {
+        const platform = readyPending.some((ready) => ready.platform === "ios" || ready.platform === "ipados")
+            ? "ios"
+            : "macos";
+        if (this.returnToTishOS(platform)) {
             for (const ready of readyPending) this.pendingReturnGenerations.delete(ready.clientID);
             return;
         }
@@ -2249,10 +2265,18 @@ export class TishOSCommandBridgeService {
         }
     }
 
-    private returnToTishOS(): boolean {
-        logger.flow("TishOSCommandBridge", "pair:return-to-tishos");
+    private returnToTishOS(platform: "ios" | "macos"): boolean {
+        logger.flow("TishOSCommandBridge", "pair:return-to-tishos", { platform });
         try {
-            window.open("tishos://settings?section=command-bridge");
+            const url = "tishos://settings?section=command-bridge";
+            if (platform === "ios") {
+                // Mobile WebKit can silently reject an asynchronous custom-scheme
+                // popup. A same-frame navigation is not popup-gated and hands the
+                // route directly back to the installed TishOS application.
+                window.location.assign(url);
+            } else {
+                window.open(url);
+            }
             return true;
         } catch (error) {
             logger.flowWarn("TishOSCommandBridge", "pair:return-failed", { errorType: this.errorType(error) });
