@@ -159,6 +159,15 @@ export function isValidVaultName(value: unknown): value is string {
     return isValidBoundedText(value, 256);
 }
 
+export function portableVaultNamesMatch(left: unknown, right: unknown): boolean {
+    if (!isValidVaultName(left) || !isValidVaultName(right)) return false;
+    const normalize = (value: string): string => value
+        .normalize("NFC")
+        .toLocaleLowerCase("en-US")
+        .normalize("NFC");
+    return normalize(left) === normalize(right);
+}
+
 export function isCanonicalGeneratedAt(value: unknown): value is string {
     if (typeof value !== "string" || !GENERATED_AT.test(value)) return false;
     const parsed = Date.parse(value);

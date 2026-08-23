@@ -1066,6 +1066,49 @@ test("pair route rejects cancel, wrong stripped-native vault, uppercase UUID, an
   assert.equal(throwingConfirmation.storage.length, 0);
 });
 
+test("capitalization-only local vault identity pairs, publishes, runs, acts, and revokes", async (t) => {
+  const controllerVaultName = "QA VAULT + 100%";
+  const harness = createHarness({ vaultName: controllerVaultName });
+  t.after(() => harness.service.stop());
+
+  assert.equal(contract.portableVaultNamesMatch(VAULT, controllerVaultName), true);
+  assert.equal(
+    contract.portableVaultNamesMatch("Cafe\u0301 Vault", "Caf\u00e9 Vault"),
+    true,
+  );
+  assert.equal(contract.portableVaultNamesMatch(VAULT, "Another Vault"), false);
+
+  assert.equal((await harness.service.handlePairRoute(pairParams())).reason, "paired");
+  harness.service.start();
+  harness.fireLayout();
+  await harness.service.refreshCatalogs("portable-vault-name");
+
+  const catalog = JSON.parse(harness.files.get(
+    `${contract.TISHOS_COMMAND_BRIDGE_CATALOG_ROOT}/${CLIENT}.json`,
+  ));
+  assert.equal(catalog.vaultName, controllerVaultName);
+
+  const run = await harness.service.handleRunRoute(await signedRunParams(COMMANDS[0]));
+  assert.equal(run.reason, "executed");
+
+  const action = await harness.service.handleNotificationActionRoute(
+    await signedNotificationActionParams(
+      "A".repeat(43),
+      CLIENT,
+      "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    ),
+  );
+  assert.equal(action.reason, "provider-unavailable");
+
+  const revoke = await harness.service.handleRevokeRoute(
+    await signedRevokeParams(
+      CLIENT,
+      "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+    ),
+  );
+  assert.equal(revoke.reason, "revoked");
+});
+
 test("default pairing confirmation waits for Obsidian's modal handoff and settles on close", async (t) => {
   const harness = createHarness();
   t.after(() => harness.service.stop());

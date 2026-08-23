@@ -457,7 +457,7 @@ test("TishOS notification settings handoff is explicit, scoped, and non-mutating
   assert.match(mainSource, /params\.action !== 'tps-controller-settings'/);
   assert.match(mainSource, /params\.v !== '1'/);
   assert.match(mainSource, /params\.section !== 'reminders'/);
-  assert.match(mainSource, /params\.targetVault !== this\.app\.vault\.getName\(\)/);
+  assert.match(mainSource, /!portableVaultNamesMatch\(params\.targetVault, this\.app\.vault\.getName\(\)\)/);
   assert.match(mainSource, /this\.openSettingsPage\('reminders'\)/);
   assert.match(mainSource, /settingManager\.openTabById\(this\.manifest\.id\)/);
   assert.doesNotMatch(

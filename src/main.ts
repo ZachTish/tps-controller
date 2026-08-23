@@ -37,6 +37,7 @@ import {
 } from "./services/reminder-runtime-policy";
 import { resolveNotificationDeliveryProvider } from "./services/notification-delivery-provider";
 import { hasCompleteMarkdownMetadataSnapshot } from "./services/metadata-index-readiness";
+import { portableVaultNamesMatch } from "./services/tishos-command-bridge-contract";
 import {
     ControllerPeriodicReloadPreference,
     ControllerPeriodicReloadService,
@@ -401,13 +402,16 @@ export default class TPSControllerPlugin extends Plugin {
                 params.action !== 'tps-controller-settings'
                 || params.v !== '1'
                 || params.section !== 'reminders'
-                || params.targetVault !== this.app.vault.getName()
+                || !portableVaultNamesMatch(params.targetVault, this.app.vault.getName())
             ) {
                 logger.flowWarn('TishOSIntegration', 'settings-handoff:rejected', {
                     action: params.action,
                     version: params.v ?? null,
                     section: params.section ?? null,
-                    vaultMatches: params.targetVault === this.app.vault.getName(),
+                    vaultMatches: portableVaultNamesMatch(
+                        params.targetVault,
+                        this.app.vault.getName(),
+                    ),
                 });
                 return;
             }

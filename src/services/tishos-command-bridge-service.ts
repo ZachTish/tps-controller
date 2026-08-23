@@ -26,6 +26,7 @@ import {
     isValidVaultName,
     normalizeCommandRegistry,
     normalizeUUID,
+    portableVaultNamesMatch,
     sha256Base64URL,
     utf8ByteCount,
     verifyHmacSHA256Base64URL,
@@ -1435,8 +1436,11 @@ export class TishOSCommandBridgeService {
         const vaultName = this.app.vault.getName();
         if (!hasOnlyKeys(params, allowed)) return { reason: "unknown-or-malformed-parameter" };
         if (params.action !== TISHOS_COMMAND_BRIDGE_PAIR_ROUTE || params.v !== "1") return { reason: "route-or-version" };
-        if (params["expected-vault"] !== vaultName || (params.vault !== undefined && params.vault !== vaultName)) return { reason: "wrong-vault" };
         if (!isValidVaultName(params["expected-vault"])) return { reason: "invalid-vault" };
+        if (
+            !portableVaultNamesMatch(params["expected-vault"], vaultName)
+            || (params.vault !== undefined && params.vault !== params["expected-vault"])
+        ) return { reason: "wrong-vault" };
         const clientID = normalizeUUID(params.client || "");
         if (!clientID || params.client !== clientID) return { reason: "invalid-client" };
         const secret = params.secret || "";
@@ -1454,8 +1458,11 @@ export class TishOSCommandBridgeService {
         const vaultName = this.app.vault.getName();
         if (!hasOnlyKeys(params, allowed)) return { reason: "unknown-or-malformed-parameter" };
         if (params.action !== TISHOS_COMMAND_BRIDGE_RUN_ROUTE || params.v !== "1") return { reason: "route-or-version" };
-        if (params["expected-vault"] !== vaultName || (params.vault !== undefined && params.vault !== vaultName)) return { reason: "wrong-vault" };
         if (!isValidVaultName(params["expected-vault"])) return { reason: "invalid-vault" };
+        if (
+            !portableVaultNamesMatch(params["expected-vault"], vaultName)
+            || (params.vault !== undefined && params.vault !== params["expected-vault"])
+        ) return { reason: "wrong-vault" };
         const clientID = normalizeUUID(params.client || "");
         const requestID = normalizeUUID(params.request || "");
         if (!clientID || params.client !== clientID) return { reason: "invalid-client" };
@@ -1466,7 +1473,7 @@ export class TishOSCommandBridgeService {
         if (!isCanonicalBase64URLSHA256(params.mac || "")) return { reason: "invalid-mac" };
         return {
             request: {
-                vaultName,
+                vaultName: params["expected-vault"],
                 clientID,
                 commandID: params.command,
                 entryDigest: params.entry,
@@ -1492,10 +1499,11 @@ export class TishOSCommandBridgeService {
             || params.operation !== "complete"
             || params.v !== "1"
         ) return { reason: "route-or-version" };
-        if (params["expected-vault"] !== vaultName || (params.vault !== undefined && params.vault !== vaultName)) {
-            return { reason: "wrong-vault" };
-        }
         if (!isValidVaultName(params["expected-vault"])) return { reason: "invalid-vault" };
+        if (
+            !portableVaultNamesMatch(params["expected-vault"], vaultName)
+            || (params.vault !== undefined && params.vault !== params["expected-vault"])
+        ) return { reason: "wrong-vault" };
         const clientID = normalizeUUID(params.client || "");
         const requestID = normalizeUUID(params.request || "");
         if (!clientID || params.client !== clientID) return { reason: "invalid-client" };
@@ -1507,7 +1515,7 @@ export class TishOSCommandBridgeService {
         if (!isCanonicalBase64URLSHA256(params.mac || "")) return { reason: "invalid-mac" };
         return {
             request: {
-                vaultName,
+                vaultName: params["expected-vault"],
                 clientID,
                 itemID: params.item,
                 action: "complete",
@@ -1524,8 +1532,11 @@ export class TishOSCommandBridgeService {
         const vaultName = this.app.vault.getName();
         if (!hasOnlyKeys(params, allowed)) return { reason: "unknown-or-malformed-parameter" };
         if (params.action !== TISHOS_COMMAND_BRIDGE_REVOKE_ROUTE || params.v !== "1") return { reason: "route-or-version" };
-        if (params["expected-vault"] !== vaultName || (params.vault !== undefined && params.vault !== vaultName)) return { reason: "wrong-vault" };
         if (!isValidVaultName(params["expected-vault"])) return { reason: "invalid-vault" };
+        if (
+            !portableVaultNamesMatch(params["expected-vault"], vaultName)
+            || (params.vault !== undefined && params.vault !== params["expected-vault"])
+        ) return { reason: "wrong-vault" };
         const clientID = normalizeUUID(params.client || "");
         const requestID = normalizeUUID(params.request || "");
         if (!clientID || params.client !== clientID) return { reason: "invalid-client" };
@@ -1534,7 +1545,7 @@ export class TishOSCommandBridgeService {
         if (!isCanonicalBase64URLSHA256(params.mac || "")) return { reason: "invalid-mac" };
         return {
             request: {
-                vaultName,
+                vaultName: params["expected-vault"],
                 clientID,
                 requestID,
                 issuedAt: params.issuedAt,
