@@ -5,6 +5,7 @@
 - After approving a TishOS vault connection in Obsidian on iPhone or iPad, Controller now returns through a direct same-frame custom-scheme navigation. Mobile WebKit can silently block the former asynchronous popup-style return, leaving TishOS waiting even though Controller saved the pairing.
 - The pending return is cleared only after the direct navigation call succeeds. A thrown navigation failure remains durable and retries on the next Controller publication refresh.
 - macOS keeps its existing working return path. This local-device fix neither enables nor requires Mac relay and changes no pairing credential, signed catalog, signed notification schedule, reminder rule, or note data.
+- The public `0.10.5` release is tagged from commit `27c4074`; release `main.js` SHA-256 is `3659ff4fe77b270e4ed1844d455663cc45b4b2fb96ab9d65ab973d4a6a7cf47a`.
 
 ## 0.10.4 portable local TishOS vault identity
 
