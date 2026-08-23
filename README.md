@@ -6,6 +6,7 @@
 - The action is bound into the existing HMAC envelope and retains freshness, replay, current-item, client, and vault checks. Unknown actions, external/read-only projections, malformed signatures, stale requests, and ambiguous items fail closed.
 - Mac relay remains optional and is never used for this mutation. The iPhone or iPad opens its own Obsidian app; normal vault sync makes the snooze global across devices.
 - This release adds no setting, credential migration, notification schedule schema, reminder rule, or arbitrary snooze duration. Minimum supported Obsidian remains 1.12.0.
+- The public `0.10.6` release is tagged from commit `778c01e`; release `main.js` SHA-256 is `bf39724b0f05b237042208f5d7299826ce138e489ea70d3e31f132fd840dec78`.
 
 ## 0.10.5 iPhone pairing return
 
