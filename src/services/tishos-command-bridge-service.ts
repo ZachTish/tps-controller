@@ -171,6 +171,7 @@ interface TishOSCommandBridgeServiceOptions {
     notificationScheduleReadiness?: () => { ready: boolean; reason?: string };
     notificationScheduleProvider?: () => Promise<readonly NativeNotificationProjectionValue[]>;
     completeNotification?: (value: NativeNotificationProjectionValue) => Promise<boolean>;
+    snoozeNotification?: (value: NativeNotificationProjectionValue) => Promise<boolean>;
 }
 
 interface NativeNotificationClientStatus {
@@ -400,6 +401,8 @@ export class TishOSCommandBridgeService {
         (() => { ready: boolean; reason?: string }) | null;
     private readonly completeNotification:
         ((value: NativeNotificationProjectionValue) => Promise<boolean>) | null;
+    private readonly snoozeNotification:
+        ((value: NativeNotificationProjectionValue) => Promise<boolean>) | null;
     private readonly nativeNotificationStatusByClientID = new Map<string, NativeNotificationClientStatus>();
 
     constructor(
@@ -411,6 +414,7 @@ export class TishOSCommandBridgeService {
         this.notificationScheduleProvider = options.notificationScheduleProvider || null;
         this.notificationScheduleReadiness = options.notificationScheduleReadiness || null;
         this.completeNotification = options.completeNotification || null;
+        this.snoozeNotification = options.snoozeNotification || null;
         this.confirmPairing = options.confirmPairing || (async (request) => {
             // Obsidian dismisses an open Settings modal while handing off an
             // external protocol URL. Opening our confirmation in that same
@@ -1341,7 +1345,10 @@ export class TishOSCommandBridgeService {
             if (replayState.entries.some((entry) =>
                 entry.clientID === request.clientID && entry.requestID === request.requestID
             )) return this.reject("notification-action", "replay", request.clientID);
-            if (!this.notificationScheduleProvider || !this.completeNotification) {
+            const actionHandler = request.action === "complete"
+                ? this.completeNotification
+                : this.snoozeNotification;
+            if (!this.notificationScheduleProvider || !actionHandler) {
                 return this.reject("notification-action", "provider-unavailable", request.clientID);
             }
             const values = await this.notificationScheduleProvider();
@@ -1363,19 +1370,20 @@ export class TishOSCommandBridgeService {
             if (!this.consumeReplayRequest(replayState, request.clientID, request.requestID)) {
                 return this.reject("notification-action", "replay-capacity", request.clientID);
             }
-            const executed = await this.completeNotification(matches[0]);
+            const executed = await actionHandler(matches[0]);
+            const successReason = request.action === "complete" ? "completed" : "snoozed";
             logger.flow(
                 "TishOSCommandBridge",
-                executed ? "notification-action:completed" : "notification-action:execution-failed",
+                executed ? `notification-action:${successReason}` : "notification-action:execution-failed",
             );
             if (this.isLifecycleActive(lifecycle)) {
                 new Notice(executed
-                    ? "Completed from TishOS."
-                    : "The reminder changed before it could be completed.");
+                    ? request.action === "complete" ? "Completed from TishOS." : "Snoozed for 10 minutes from TishOS."
+                    : `The reminder changed before it could be ${request.action === "complete" ? "completed" : "snoozed"}.`);
             }
             return {
                 accepted: true,
-                reason: executed ? "completed" : "execution-failed",
+                reason: executed ? successReason : "execution-failed",
                 clientID: request.clientID,
                 executed,
             };
@@ -1505,7 +1513,7 @@ export class TishOSCommandBridgeService {
         if (!hasOnlyKeys(params, allowed)) return { reason: "unknown-or-malformed-parameter" };
         if (
             params.action !== TISHOS_NOTIFICATION_ACTION_ROUTE
-            || params.operation !== "complete"
+            || (params.operation !== "complete" && params.operation !== "snooze")
             || params.v !== "1"
         ) return { reason: "route-or-version" };
         if (!isValidVaultName(params["expected-vault"])) return { reason: "invalid-vault" };
@@ -1527,7 +1535,7 @@ export class TishOSCommandBridgeService {
                 vaultName: params["expected-vault"],
                 clientID,
                 itemID: params.item,
-                action: "complete",
+                action: params.operation,
                 requestID,
                 issuedAt: params.issuedAt,
                 mac: params.mac,

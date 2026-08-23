@@ -64,7 +64,7 @@ export interface TishOSNotificationActionRequest {
     vaultName: string;
     clientID: string;
     itemID: string;
-    action: "complete";
+    action: "complete" | "snooze";
     requestID: string;
     issuedAt: string;
     mac: string;

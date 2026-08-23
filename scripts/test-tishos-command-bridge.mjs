@@ -92,6 +92,7 @@ function createHarness({
   notificationScheduleReadiness,
   notificationScheduleProvider,
   completeNotification = async () => true,
+  snoozeNotification = async () => true,
 } = {}) {
   const files = new Map();
   const directories = new Set();
@@ -101,6 +102,7 @@ function createHarness({
   const removals = [];
   const executions = [];
   const completions = [];
+  const snoozes = [];
   const openedURLs = [];
   const notices = [];
   const statOverrides = new Map();
@@ -262,6 +264,10 @@ function createHarness({
         completions.push(value);
         return completeNotification(value);
       },
+      snoozeNotification: async (value) => {
+        snoozes.push(value);
+        return snoozeNotification(value);
+      },
     },
   );
   return {
@@ -275,6 +281,7 @@ function createHarness({
     removals,
     executions,
     completions,
+    snoozes,
     openedURLs,
     notices,
     fireLayout() { assert.ok(layoutCallback); layoutCallback(); },
@@ -393,18 +400,19 @@ async function signedNotificationActionParams(
   requestID = REQUEST,
   issuedAt = String(NOW),
   secret = SECRET_BYTES,
+  action = "complete",
 ) {
   const unsigned = {
     vaultName: VAULT,
     clientID: client,
     itemID,
-    action: "complete",
+    action,
     requestID,
     issuedAt,
   };
   return {
     action: serviceModule.TISHOS_NOTIFICATION_ACTION_ROUTE,
-    operation: "complete",
+    operation: action,
     vault: VAULT,
     v: "1",
     "expected-vault": VAULT,
@@ -1021,6 +1029,58 @@ test("signed notification completion re-resolves one current Controller item and
   assert.equal(harness.completions[0].completionTarget, completionTarget);
   assert.equal((await harness.service.handleNotificationActionRoute(params)).reason, "replay");
   assert.equal(harness.completions.length, 1);
+});
+
+test("signed notification snooze re-resolves one current Controller item and consumes replay", async (t) => {
+  const completionTarget = { targetKind: "task", taskLine: 9 };
+  const scheduled = {
+    title: "Review proposal",
+    body: "Starts in 20 minutes",
+    fireAt: NOW + 75 * 60 * 1000,
+    sourcePath: "Projects/Alpha.md",
+    sourceKey: "Projects/Alpha.md::task:9",
+    reminderId: "scheduled-task",
+    completionTarget,
+  };
+  const schedule = [scheduled];
+  const harness = createHarness({ notificationScheduleProvider: async () => schedule });
+  t.after(() => harness.service.stop());
+  await harness.service.handlePairRoute(pairParams());
+  const seriesID = await contract.sha256Base64URL(
+    notificationContract.canonicalNotificationSeries(scheduled.sourceKey, scheduled.reminderId),
+  );
+  const itemID = await contract.sha256Base64URL(
+    notificationContract.canonicalNotificationItem({
+      id: "",
+      seriesID,
+      title: scheduled.title,
+      body: scheduled.body,
+      fireAt: new Date(scheduled.fireAt).toISOString(),
+      sourcePath: scheduled.sourcePath,
+    }),
+  );
+  const params = await signedNotificationActionParams(
+    itemID,
+    CLIENT,
+    "dddddddd-eeee-4fff-8aaa-bbbbbbbbbbbb",
+    String(NOW),
+    SECRET_BYTES,
+    "snooze",
+  );
+  const result = await harness.service.handleNotificationActionRoute(params);
+  assert.equal(result.accepted, true);
+  assert.equal(result.reason, "snoozed");
+  assert.equal(result.executed, true);
+  assert.equal(harness.snoozes.length, 1);
+  assert.equal(harness.snoozes[0].completionTarget, completionTarget);
+  assert.equal((await harness.service.handleNotificationActionRoute(params)).reason, "replay");
+  assert.equal(harness.snoozes.length, 1);
+
+  const unsupported = { ...params, operation: "dismiss" };
+  assert.equal(
+    (await harness.service.handleNotificationActionRoute(unsupported)).reason,
+    "route-or-version",
+  );
 });
 
 test("notification completion fails closed for stale, ambiguous, unsigned, or external items", async (t) => {

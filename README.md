@@ -1,5 +1,12 @@
 # TPS Controller
 
+## 0.10.6 global TishOS notification snooze
+
+- Snooze from a writable TishOS native notification now uses the authenticated same-device Obsidian route already used by Complete. Controller re-resolves the exact current notification item, writes a fixed ten-minute snooze through the configured task-inline or note-frontmatter property, and republishes the signed schedule.
+- The action is bound into the existing HMAC envelope and retains freshness, replay, current-item, client, and vault checks. Unknown actions, external/read-only projections, malformed signatures, stale requests, and ambiguous items fail closed.
+- Mac relay remains optional and is never used for this mutation. The iPhone or iPad opens its own Obsidian app; normal vault sync makes the snooze global across devices.
+- This release adds no setting, credential migration, notification schedule schema, reminder rule, or arbitrary snooze duration. Minimum supported Obsidian remains 1.12.0.
+
 ## 0.10.5 iPhone pairing return
 
 - After approving a TishOS vault connection in Obsidian on iPhone or iPad, Controller now returns through a direct same-frame custom-scheme navigation. Mobile WebKit can silently block the former asynchronous popup-style return, leaving TishOS waiting even though Controller saved the pairing.

@@ -603,6 +603,22 @@ export class OverdueService {
         return true;
     }
 
+    async snoozeItemFromNativeNotification(item: OverdueItem, minutes: number): Promise<boolean> {
+        if (item.targetKind === "task" && typeof item.taskLine === "number") {
+            const snoozeKey = this.getSettings().snoozeProperty || "reminderSnooze";
+            const snoozeTime = minutes > 0
+                ? moment().add(minutes, "minutes").format("YYYY-MM-DD HH:mm")
+                : null;
+            return this.updateTaskLineProperties(
+                item,
+                { [snoozeKey]: snoozeTime },
+                "notification-snooze",
+            );
+        }
+        await this.snoozeFile(item.file, minutes);
+        return true;
+    }
+
     async markItemWontDo(item: OverdueItem): Promise<void> {
         await this.setItemStatus(item, "wont-do");
     }

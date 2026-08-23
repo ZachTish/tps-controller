@@ -279,6 +279,18 @@ export default class TPSControllerPlugin extends Plugin {
                 }
                 return completed;
             },
+            snoozeNotification: async (value) => {
+                const target = value.completionTarget;
+                if (!target) return false;
+                const snoozed = await this.overdueService.snoozeItemFromNativeNotification(target, 10);
+                if (snoozed) {
+                    this.refreshNotificationViews();
+                    void this.tishOSCommandBridgeService.refreshCatalogs(
+                        "notification-snooze",
+                    );
+                }
+                return snoozed;
+            },
         });
 
         // Commands
