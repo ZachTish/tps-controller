@@ -14,6 +14,7 @@ const CATALOG_PREFIX = "tishos-command-catalog-v1\n";
 const REQUEST_PREFIX = "tishos-command-request-v1\n";
 const REVOKE_PREFIX = "tishos-command-revoke-v1\n";
 const NOTIFICATION_ACTION_PREFIX = "tishos-notification-action-v1\n";
+const NOTIFICATION_ACTION_SERIES_PREFIX = "tishos-notification-action-v2\n";
 const FORBIDDEN_DISPLAY_CHARACTER = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const BASE64URL_SHA256 = /^[A-Za-z0-9_-]{43}$/;
@@ -64,6 +65,7 @@ export interface TishOSNotificationActionRequest {
     vaultName: string;
     clientID: string;
     itemID: string;
+    seriesID?: string;
     action: "complete" | "snooze";
     requestID: string;
     issuedAt: string;
@@ -286,10 +288,13 @@ export function canonicalCommandRevokeRequest(request: Omit<TishOSCommandRevokeR
 export function canonicalNotificationActionRequest(
     request: Omit<TishOSNotificationActionRequest, "mac">,
 ): Uint8Array {
-    let value = NOTIFICATION_ACTION_PREFIX;
+    let value = request.seriesID
+        ? NOTIFICATION_ACTION_SERIES_PREFIX
+        : NOTIFICATION_ACTION_PREFIX;
     value += field("vault", request.vaultName);
     value += field("client", request.clientID);
     value += field("item", request.itemID);
+    if (request.seriesID) value += field("series", request.seriesID);
     value += field("action", request.action);
     value += field("request", request.requestID);
     value += field("issued", request.issuedAt);

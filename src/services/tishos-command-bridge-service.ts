@@ -1331,6 +1331,7 @@ export class TishOSCommandBridgeService {
                     vaultName: request.vaultName,
                     clientID: request.clientID,
                     itemID: request.itemID,
+                    ...(request.seriesID ? { seriesID: request.seriesID } : {}),
                     action: request.action,
                     requestID: request.requestID,
                     issuedAt: request.issuedAt,
@@ -1355,12 +1356,30 @@ export class TishOSCommandBridgeService {
             const matches: NativeNotificationProjectionValue[] = [];
             for (const value of values) {
                 const item = await this.buildNativeNotificationItem(value);
-                if (item?.id === request.itemID && value.completionTarget) matches.push(value);
+                const identityMatches = request.seriesID
+                    ? item?.seriesID === request.seriesID
+                    : item?.id === request.itemID;
+                if (identityMatches && value.completionTarget) matches.push(value);
             }
             if (!this.isLifecycleActive(lifecycle)) {
                 return this.reject("notification-action", "service-stopped", request.clientID);
             }
-            if (matches.length !== 1) {
+            let match: NativeNotificationProjectionValue | undefined;
+            if (request.seriesID && matches.length > 0) {
+                const first = matches[0];
+                const oneSource = matches.every((candidate) =>
+                    candidate.sourceKey === first.sourceKey
+                    && candidate.reminderId === first.reminderId
+                );
+                if (oneSource) {
+                    match = matches.reduce((earliest, candidate) =>
+                        candidate.fireAt < earliest.fireAt ? candidate : earliest
+                    );
+                }
+            } else if (matches.length === 1) {
+                match = matches[0];
+            }
+            if (!match) {
                 return this.reject(
                     "notification-action",
                     matches.length === 0 ? "item-unavailable" : "item-ambiguous",
@@ -1370,7 +1389,7 @@ export class TishOSCommandBridgeService {
             if (!this.consumeReplayRequest(replayState, request.clientID, request.requestID)) {
                 return this.reject("notification-action", "replay-capacity", request.clientID);
             }
-            const executed = await actionHandler(matches[0]);
+            const executed = await actionHandler(match);
             const successReason = request.action === "complete" ? "completed" : "snoozed";
             logger.flow(
                 "TishOSCommandBridge",
@@ -1507,14 +1526,21 @@ export class TishOSCommandBridgeService {
     ): { request?: TishOSNotificationActionRequest; reason: string } {
         const allowed = new Set([
             "action", "operation", "vault", "v", "expected-vault", "client", "item",
-            "request", "issuedAt", "mac",
+            "series", "request", "issuedAt", "mac",
         ]);
         const vaultName = this.app.vault.getName();
         if (!hasOnlyKeys(params, allowed)) return { reason: "unknown-or-malformed-parameter" };
         if (
             params.action !== TISHOS_NOTIFICATION_ACTION_ROUTE
             || (params.operation !== "complete" && params.operation !== "snooze")
-            || params.v !== "1"
+        ) return { reason: "route-or-version" };
+        const seriesID = params.v === "2" && isCanonicalBase64URLSHA256(params.series || "")
+            ? params.series
+            : undefined;
+        if (
+            (params.v === "1" && params.series !== undefined)
+            || (params.v === "2" && !seriesID)
+            || (params.v !== "1" && params.v !== "2")
         ) return { reason: "route-or-version" };
         if (!isValidVaultName(params["expected-vault"])) return { reason: "invalid-vault" };
         if (
@@ -1535,6 +1561,7 @@ export class TishOSCommandBridgeService {
                 vaultName: params["expected-vault"],
                 clientID,
                 itemID: params.item,
+                ...(seriesID ? { seriesID } : {}),
                 action: params.operation,
                 requestID,
                 issuedAt: params.issuedAt,

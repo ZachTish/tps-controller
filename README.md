@@ -1,5 +1,13 @@
 # TPS Controller
 
+## 0.10.7 durable TishOS notification actions
+
+- Snooze and Complete from a fired repeating TishOS notification now authenticate both the exact fired occurrence and its durable reminder-series identity. Controller can therefore re-resolve the one current writable reminder after its schedule has advanced to later repeat occurrences.
+- A series with several projected future occurrences resolves to its single underlying source/reminder pair and uses the earliest current occurrence. A digest collision spanning different sources, an unavailable/terminal reminder, an external projection, or malformed/replayed authority still fails closed.
+- Existing version-1 exact-occurrence actions remain compatible. Version 2 adds the series identity to the HMAC envelope; it changes no pairing credential, signed schedule schema, reminder rule, setting, or note format.
+- Mac relay remains optional and read-only for mutation. The action opens same-device Obsidian, and normal vault sync carries the completed or snoozed property to other devices. Minimum supported Obsidian remains 1.12.0.
+- The focused 52-check bridge suite, all 20 package-declared test files, TypeScript, standalone production build, and BRAT packaging pass. The final build reported the isolated test runtime unchanged; release `main.js` SHA-256 is `a8588e6b8ffc7bcd4d5ba8130ecd0e47c00972d8c400605a5f74e717ceb35e4e`.
+
 ## 0.10.6 global TishOS notification snooze
 
 - Snooze from a writable TishOS native notification now uses the authenticated same-device Obsidian route already used by Complete. Controller re-resolves the exact current notification item, writes a fixed ten-minute snooze through the configured task-inline or note-frontmatter property, and republishes the signed schedule.

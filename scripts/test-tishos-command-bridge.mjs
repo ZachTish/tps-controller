@@ -401,11 +401,13 @@ async function signedNotificationActionParams(
   issuedAt = String(NOW),
   secret = SECRET_BYTES,
   action = "complete",
+  seriesID,
 ) {
   const unsigned = {
     vaultName: VAULT,
     clientID: client,
     itemID,
+    ...(seriesID ? { seriesID } : {}),
     action,
     requestID,
     issuedAt,
@@ -414,10 +416,11 @@ async function signedNotificationActionParams(
     action: serviceModule.TISHOS_NOTIFICATION_ACTION_ROUTE,
     operation: action,
     vault: VAULT,
-    v: "1",
+    v: seriesID ? "2" : "1",
     "expected-vault": VAULT,
     client,
     item: itemID,
+    ...(seriesID ? { series: seriesID } : {}),
     request: requestID,
     issuedAt,
     mac: await contract.hmacSHA256Base64URL(
@@ -1081,6 +1084,70 @@ test("signed notification snooze re-resolves one current Controller item and con
     (await harness.service.handleNotificationActionRoute(unsupported)).reason,
     "route-or-version",
   );
+});
+
+test("signed series action survives a fired repeat occurrence moving forward", async (t) => {
+  const completionTarget = { targetKind: "task", taskLine: 9 };
+  const fired = {
+    title: "Review proposal",
+    body: "Repeat until complete",
+    fireAt: NOW + 60_000,
+    sourcePath: "Projects/Alpha.md",
+    sourceKey: "Projects/Alpha.md::task:9",
+    reminderId: "scheduled-task",
+    completionTarget,
+  };
+  let schedule = [fired];
+  const harness = createHarness({ notificationScheduleProvider: async () => schedule });
+  t.after(() => harness.service.stop());
+  await harness.service.handlePairRoute(pairParams());
+  const seriesID = await contract.sha256Base64URL(
+    notificationContract.canonicalNotificationSeries(fired.sourceKey, fired.reminderId),
+  );
+  const firedItemID = await contract.sha256Base64URL(
+    notificationContract.canonicalNotificationItem({
+      id: "",
+      seriesID,
+      title: fired.title,
+      body: fired.body,
+      fireAt: new Date(fired.fireAt).toISOString(),
+      sourcePath: fired.sourcePath,
+    }),
+  );
+  const nextFireAt = fired.fireAt + 5 * 60_000;
+  schedule = [
+    { ...fired, fireAt: nextFireAt + 5 * 60_000 },
+    { ...fired, fireAt: nextFireAt },
+  ];
+
+  const exactOnly = await signedNotificationActionParams(
+    firedItemID,
+    CLIENT,
+    "11111111-eeee-4fff-8aaa-bbbbbbbbbbbb",
+    String(NOW),
+    SECRET_BYTES,
+    "snooze",
+  );
+  assert.equal(
+    (await harness.service.handleNotificationActionRoute(exactOnly)).reason,
+    "item-unavailable",
+  );
+
+  const durable = await signedNotificationActionParams(
+    firedItemID,
+    CLIENT,
+    "22222222-eeee-4fff-8aaa-bbbbbbbbbbbb",
+    String(NOW),
+    SECRET_BYTES,
+    "snooze",
+    seriesID,
+  );
+  const result = await harness.service.handleNotificationActionRoute(durable);
+  assert.equal(result.reason, "snoozed");
+  assert.equal(result.executed, true);
+  assert.equal(harness.snoozes.length, 1);
+  assert.equal(harness.snoozes[0].completionTarget, completionTarget);
+  assert.equal(harness.snoozes[0].fireAt, nextFireAt);
 });
 
 test("notification completion fails closed for stale, ambiguous, unsigned, or external items", async (t) => {
