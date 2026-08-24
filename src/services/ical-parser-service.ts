@@ -253,6 +253,8 @@ export class ICalParserService {
                                 {
                                     uid,
                                     id: occurrenceId, // Pass the generated ID
+                                    occurrenceIdentity: occurrenceId,
+                                    isRecurring: true,
                                     summary,
                                     description,
                                     location,
@@ -295,7 +297,19 @@ export class ICalParserService {
                             startDate,
                             endDate,
                             event.startDate.isDate,
-                            { uid, id: stableId, summary, description, location, organizer, attendees, url, isCancelled },
+                            {
+                                uid,
+                                id: stableId,
+                                occurrenceIdentity: event.recurrenceId ? stableId : uid,
+                                isRecurring: !!event.recurrenceId,
+                                summary,
+                                description,
+                                location,
+                                organizer,
+                                attendees,
+                                url,
+                                isCancelled,
+                            },
                             rangeStart,
                             rangeEnd
                         )) {
@@ -512,6 +526,8 @@ export class ICalParserService {
             attendees: string[];
             url: string;
             isCancelled?: boolean;
+            occurrenceIdentity?: string;
+            isRecurring?: boolean;
         },
         rangeStart?: Date,
         rangeEnd?: Date
@@ -532,6 +548,8 @@ export class ICalParserService {
             isAllDay,
             url: props.url,
             isCancelled: props.isCancelled,
+            occurrenceIdentity: props.occurrenceIdentity || props.id || props.uid,
+            isRecurring: props.isRecurring === true,
         });
         return true;
     }

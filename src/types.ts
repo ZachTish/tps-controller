@@ -25,7 +25,12 @@ export interface ExternalCalendarEvent {
     isAllDay: boolean;
     url?: string;
     isCancelled?: boolean;
+    /** Stable logical occurrence identity. A single event keeps its UID across reschedules. */
+    occurrenceIdentity?: string;
+    isRecurring?: boolean;
 }
+
+export type CalendarStorageMode = "legacy" | "native-records";
 
 export interface ExternalCalendarConfig {
     id: string;
@@ -169,6 +174,7 @@ export interface OverdueItem {
 
 export interface TPSControllerSettings {
     // Calendar Sync
+    calendarStorageMode: CalendarStorageMode;
     syncIntervalMinutes: number;
     noLossSyncMode: boolean;
     syncOnEventDelete: "delete" | "archive" | "nothing";
@@ -215,6 +221,7 @@ export interface TPSControllerSettings {
 
 export const DEFAULT_CONTROLLER_SETTINGS: TPSControllerSettings = {
     // Calendar Sync
+    calendarStorageMode: "legacy",
     syncIntervalMinutes: 5,
     noLossSyncMode: true,
     syncOnEventDelete: "nothing",

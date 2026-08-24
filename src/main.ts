@@ -14,6 +14,7 @@ import { NotificationView, NOTIFICATION_VIEW_TYPE } from "./views/notification-v
 import type { AlertState, OverdueItem } from "./types";
 import { OverdueService } from "./services/overdue-service";
 import { CalendarAutomationService } from "./services/calendar-automation";
+import { NativeCalendarRecordService } from "./services/native-calendar-record-service";
 import { migrateSettingsFromPlugins } from "./services/migration-service";
 import { TwoStageArchiveService } from "./services/two-stage-archive-service";
 import { TPS_EVENTS } from "./tps-events";
@@ -181,6 +182,7 @@ export default class TPSControllerPlugin extends Plugin {
     // Feature services
     private overdueService: OverdueService;
     private calendarAutomation: CalendarAutomationService;
+    private nativeCalendarRecordService: NativeCalendarRecordService;
     private twoStageArchiveService: TwoStageArchiveService;
     private s3agleAttachmentAutomationService: S3AttachmentAutomationAPI;
     private tishOSCommandBridgeService: TishOSCommandBridgeService;
@@ -239,6 +241,12 @@ export default class TPSControllerPlugin extends Plugin {
         // Core services
         this.autoCreateService = new AutoCreateService(this.app);
         this.externalCalendarService = new ExternalCalendarService();
+        this.nativeCalendarRecordService = new NativeCalendarRecordService(
+            this.app,
+            this.externalCalendarService,
+            () => this.settings,
+        );
+        this.nativeCalendarRecordService.setup((event) => this.registerEvent(event as any));
         this.reminderEngine = new ReminderEngine(this.app, this.externalCalendarService);
         this.syncRequestService = new SyncRequestService(this.app, this.manifest.dir);
         this.syncConflictWatcher = new SyncConflictWatcher(this.app);
@@ -249,6 +257,7 @@ export default class TPSControllerPlugin extends Plugin {
             this.app,
             this.autoCreateService,
             this.externalCalendarService,
+            this.nativeCalendarRecordService,
             () => this.settings,
             () => this.getCalendarPlugin(),
             () => this.runRecurrenceMaintenanceTick(),
@@ -398,6 +407,7 @@ export default class TPSControllerPlugin extends Plugin {
             getRole: (): DeviceRole => this.deviceRoleManager.role,
             getSettings: (): TPSControllerSettings => this.settings,
             getCalendarSettingsSnapshot: () => ({
+                calendarStorageMode: this.settings.calendarStorageMode,
                 externalCalendars: Array.isArray(this.settings.externalCalendars) ? [...this.settings.externalCalendars] : [],
                 externalCalendarFilter: this.settings.externalCalendarFilter || "",
             }),
@@ -677,6 +687,10 @@ export default class TPSControllerPlugin extends Plugin {
         for (const key of legacyTopLevelKeys) {
             delete (this.settings as any)[key];
         }
+
+        this.settings.calendarStorageMode = this.settings.calendarStorageMode === "native-records"
+            ? "native-records"
+            : "legacy";
 
         this.settings.externalCalendars = normalizeExternalCalendarsInPlace(
             this.settings.externalCalendars,

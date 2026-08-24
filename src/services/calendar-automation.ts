@@ -5,6 +5,7 @@ import type { TPSControllerSettings, ExternalCalendarConfig } from "../types";
 import { normalizeCalendarUrl, normalizeCalendarTag } from "../utils";
 import * as logger from "../logger";
 import { TPS_EVENTS } from "../tps-events";
+import { NativeCalendarRecordService } from "./native-calendar-record-service";
 
 interface CalendarPluginAPI {
     getSettings?(): any;
@@ -22,6 +23,7 @@ export class CalendarAutomationService {
         private app: App,
         private autoCreateService: AutoCreateService,
         private externalCalendarService: ExternalCalendarService,
+        private nativeCalendarRecordService: NativeCalendarRecordService,
         private getSettings: () => TPSControllerSettings,
         private getCalendarPlugin: () => CalendarPluginAPI | null,
         private onSyncComplete: () => Promise<void>,
@@ -145,6 +147,33 @@ export class CalendarAutomationService {
             if (!urls.length) {
                 logger.flowWarn("CalendarSync", "skip:no-urls", { calendars: calendars.length, force });
                 if (force) new Notice("Calendar Sync skipped: no calendar URLs are configured.");
+                return;
+            }
+
+            if (settings.calendarStorageMode === "native-records") {
+                const result = await this.nativeCalendarRecordService.sync(
+                    calendars,
+                    settings.externalCalendarFilter,
+                    force,
+                    options.backfillPastEvents,
+                );
+                await this.onSyncComplete();
+                this.app.workspace.trigger(TPS_EVENTS.CALENDAR_SYNC_COMPLETED as any, {
+                    sourcePluginId: "tps-controller",
+                    timestamp: Date.now(),
+                    force,
+                    urlCount: urls.length,
+                    storage: "native-records",
+                });
+                logger.flow("CalendarSync", "run:completed", {
+                    force,
+                    urlCount: urls.length,
+                    storage: "native-records",
+                    fetched: result.fetched,
+                    created: result.created,
+                    updated: result.updated,
+                    failedFeeds: result.failedFeeds,
+                });
                 return;
             }
 

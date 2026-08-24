@@ -131,6 +131,7 @@ function createHarness({
     app,
     autoCreateService,
     {},
+    { sync: async () => ({ fetched: 0, created: 0, updated: 0, archived: 0, failedFeeds: 0 }) },
     () => settings,
     () => null,
     runCompletion,

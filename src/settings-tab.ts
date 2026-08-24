@@ -206,6 +206,22 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             'Calendar rules',
             'Connect external feeds, choose what each feed creates, and control global sync safety.'
         );
+        const architectureSection = createSettingsSection(
+            containerEl,
+            'Data architecture',
+            'Legacy vaults keep their existing note/task synchronization. Native mode writes one ordinary Markdown record per calendar occurrence.',
+        );
+        new Setting(architectureSection)
+            .setName('Calendar storage')
+            .setDesc('Native TPS records requires GCM native-record mode. It updates scheduled/status properties in place and does not move or synthesize Daily Note task lines.')
+            .addDropdown((dropdown) => dropdown
+                .addOption('legacy', 'Legacy notes and inline tasks')
+                .addOption('native-records', 'Native TPS event records')
+                .setValue(this.plugin.settings.calendarStorageMode)
+                .onChange(async (value) => {
+                    this.plugin.settings.calendarStorageMode = value === 'native-records' ? 'native-records' : 'legacy';
+                    await this.plugin.saveSettings();
+                }));
         const extCalSection = createSettingsSection(
             containerEl,
             'External calendar feeds',

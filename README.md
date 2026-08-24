@@ -1,5 +1,13 @@
 # TPS Controller
 
+## 0.11.0
+
+- Adds opt-in **Native Markdown record** calendar storage. Controller remains the sole external-calendar ingest owner and upserts one `calendar-event` record per occurrence through GCM 1.38.0 instead of creating duplicate task lines.
+- Stable calendar/source/occurrence identity makes replays idempotent. Reschedules update the same record's `scheduled` value; cancellations and feed removals follow the existing delete policy without attaching a different occurrence's history.
+- Event titles are written as links. The existing per-calendar associated-note strategy remains available: recurring events can use one note per occurrence or one shared series note, and the chosen link/path is stored on the event record.
+- Native records contain typed start/end/duration/all-day/status and reviewed event fields. Raw feed URLs and credentials are not persisted in records. A failed feed sync is fail-closed and cannot archive prior occurrences.
+- Legacy task-line calendar behavior remains the default and requires no migration. Minimum supported Obsidian remains 1.12.0.
+
 ## 0.10.7 durable TishOS notification actions
 
 - Snooze and Complete from a fired repeating TishOS notification now authenticate both the exact fired occurrence and its durable reminder-series identity. Controller can therefore re-resolve the one current writable reminder after its schedule has advanced to later repeat occurrences.
