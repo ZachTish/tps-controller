@@ -668,6 +668,71 @@ test("paired clients receive a signed Controller-rule notification schedule that
   assert.equal(modalVisible.items[0].fireAt, new Date(NOW - 4 * 60 * 1000).toISOString());
 });
 
+test("removing a pending reminder series hands iOS back to TishOS to invalidate Apple's queue", async (t) => {
+  let schedule = [{
+    title: "Repeating task",
+    body: "First series",
+    fireAt: NOW + 60_000,
+    sourcePath: "Daily/Queue.md",
+    sourceKey: "Daily/Queue.md::task:1",
+    reminderId: "scheduled-task",
+  }, {
+    title: "Keep this task",
+    body: "Second series",
+    fireAt: NOW + 120_000,
+    sourcePath: "Daily/Queue.md",
+    sourceKey: "Daily/Queue.md::task:2",
+    reminderId: "scheduled-task",
+  }];
+  const harness = createHarness({ notificationScheduleProvider: async () => schedule });
+  t.after(() => harness.service.stop());
+  await pairAndPublish(harness);
+  harness.openedURLs.splice(0);
+
+  schedule = [schedule[1]];
+  const result = await harness.service.refreshCatalogs("task-deleted");
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(result.nativeNotificationInvalidationPlatforms, ["ios"]);
+  assert.deepEqual(harness.openedURLs, ["tishos://controller-refresh?v=1"]);
+
+  await harness.service.refreshCatalogs("unchanged-after-invalidation");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    harness.openedURLs,
+    ["tishos://controller-refresh?v=1"],
+    "the callback must happen only for the semantic removal publication",
+  );
+});
+
+test("advancing one series or aging out a delivered item does not foreground TishOS", async (t) => {
+  let schedule = [{
+    title: "Repeating task",
+    body: "Current occurrence",
+    fireAt: NOW + 60_000,
+    sourcePath: "Daily/Queue.md",
+    sourceKey: "Daily/Queue.md::task:1",
+    reminderId: "scheduled-task",
+  }];
+  const harness = createHarness({ notificationScheduleProvider: async () => schedule });
+  t.after(() => harness.service.stop());
+  await pairAndPublish(harness);
+  harness.openedURLs.splice(0);
+
+  schedule = [{ ...schedule[0], fireAt: NOW + 10 * 60_000 }];
+  const advanced = await harness.service.refreshCatalogs("repeat-advanced");
+  assert.deepEqual(advanced.nativeNotificationInvalidationPlatforms, []);
+  assert.deepEqual(harness.openedURLs, []);
+
+  schedule = [{ ...schedule[0], fireAt: NOW - 4 * 60_000 }];
+  await harness.service.refreshCatalogs("became-late");
+  schedule = [];
+  const agedOut = await harness.service.refreshCatalogs("aged-out");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(agedOut.nativeNotificationInvalidationPlatforms, []);
+  assert.deepEqual(harness.openedURLs, []);
+});
+
 test("equal-time base64url punctuation uses the same raw UTF-8 order for publication and validation", async (t) => {
   const fireAt = NOW + 60 * 60 * 1000;
   const schedule = [{
