@@ -1,5 +1,12 @@
 # TPS Controller
 
+## 0.11.1 configurable native-record identity compatibility
+
+- Native calendar reconciliation now indexes `calendar-event` records through GCM `nativeRecords` API v2 identity inspection. Calendar occurrences remain idempotent when stable record identity is stored in a tag instead of physical `tpsId`/`tpsSchemaVersion` properties.
+- Controller rebuilds its occurrence index after the required GCM API is available, covering plugin-load order where an early provisional pass could not inspect tag identity.
+- GCM v1 property identity remains supported. Controller does not own, duplicate, or rewrite the configured record-envelope profile, and calendar UID/occurrence fields remain typed calendar data.
+- This is a backward-compatible compatibility patch with no Controller settings migration. Minimum supported Obsidian remains 1.12.0.
+
 ## 0.11.0
 
 - Adds opt-in **Native Markdown record** calendar storage. Controller remains the sole external-calendar ingest owner and upserts one `calendar-event` record per occurrence through GCM 1.38.0 instead of creating duplicate task lines.

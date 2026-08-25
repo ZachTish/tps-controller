@@ -21,6 +21,12 @@ interface NativeRecordsApi {
     create(kind: "calendar-event", properties: Record<string, unknown>, options?: Record<string, unknown>): Promise<NativeRecordHandle>;
     update(reference: TFile | string, updates: Record<string, unknown>, cause?: Record<string, unknown>): Promise<NativeRecordHandle | null>;
     archive(reference: TFile | string, cause?: Record<string, unknown>): Promise<NativeRecordHandle | null>;
+    inspect?(frontmatter: unknown): {
+        id: string;
+        kind: string;
+        schemaVersion: number;
+        frontmatter: Record<string, unknown>;
+    } | null;
 }
 
 interface IndexedCalendarRecord {
@@ -90,6 +96,10 @@ export class NativeCalendarRecordService {
         backfillPastEvents: boolean,
     ): Promise<NativeCalendarSyncResult> {
         const api = this.requireApi();
+        // Controller can load before GCM has published API v2. Rebuild after
+        // the required API is confirmed so tag-identified records missed by
+        // the provisional startup pass are included before reconciliation.
+        this.rebuild();
         const result: NativeCalendarSyncResult = {
             fetched: 0,
             created: 0,
@@ -247,13 +257,17 @@ export class NativeCalendarRecordService {
     }
 
     private requireApi(): NativeRecordsApi {
-        const plugins = (this.app as any).plugins;
-        const gcm = plugins?.getPlugin?.("tps-global-context-menu") || plugins?.plugins?.["tps-global-context-menu"];
-        const api = gcm?.api?.nativeRecords;
+        const api = this.getApi();
         if (!api || Number(api.version) < 1 || api.isEnabled?.() !== true) {
             throw new Error("Controller native calendar records require TPS GCM native-record mode and nativeRecords API v1.");
         }
         return api as NativeRecordsApi;
+    }
+
+    private getApi(): NativeRecordsApi | null {
+        const plugins = (this.app as any).plugins;
+        const gcm = plugins?.getPlugin?.("tps-global-context-menu") || plugins?.plugins?.["tps-global-context-menu"];
+        return (gcm?.api?.nativeRecords || null) as NativeRecordsApi | null;
     }
 
     private rebuild(): void {
@@ -265,11 +279,17 @@ export class NativeCalendarRecordService {
     private indexFile(file: TFile, frontmatter?: Record<string, unknown> | null): void {
         this.removePath(file.path);
         const resolved = frontmatter || this.app.metadataCache.getFileCache(file)?.frontmatter;
-        if (String(resolved?.kind || "") !== "calendar-event" || Number(resolved?.tpsSchemaVersion) !== 1) return;
-        const id = String(resolved?.tpsId || "").trim();
-        const occurrenceKey = String(resolved?.calendarOccurrenceKey || "").trim();
+        const api = this.getApi();
+        const inspected = Number(api?.version) >= 2 && typeof api?.inspect === "function"
+            ? api.inspect(resolved)
+            : null;
+        const canonical = inspected?.frontmatter || resolved;
+        if (String(inspected?.kind || resolved?.kind || "") !== "calendar-event"
+            || Number(inspected?.schemaVersion || resolved?.tpsSchemaVersion) !== 1) return;
+        const id = String(inspected?.id || resolved?.tpsId || "").trim();
+        const occurrenceKey = String(canonical?.calendarOccurrenceKey || "").trim();
         if (!id || !occurrenceKey) return;
-        this.recordsByPath.set(file.path, { file, frontmatter: { ...resolved }, id, occurrenceKey });
+        this.recordsByPath.set(file.path, { file, frontmatter: { ...canonical }, id, occurrenceKey });
         const paths = this.pathsByOccurrenceKey.get(occurrenceKey) || new Set<string>();
         paths.add(file.path);
         this.pathsByOccurrenceKey.set(occurrenceKey, paths);

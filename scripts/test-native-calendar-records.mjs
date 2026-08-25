@@ -53,13 +53,13 @@ function event(overrides = {}) {
   };
 }
 
-function harness(initialEvents = []) {
+function harness(initialEvents = [], options = {}) {
   const files = new Map();
   const frontmatters = new Map();
   let events = initialEvents;
   let fetchOk = true;
   const api = {
-    version: 1,
+    version: options.apiVersion || 1,
     isEnabled: () => true,
     async create(kind, properties, options = {}) {
       const id = String(options.id);
@@ -79,6 +79,17 @@ function harness(initialEvents = []) {
     },
     async archive(reference) {
       return this.update(reference, { archived: true, archivedDate: new Date().toISOString() });
+    },
+    inspect(frontmatter) {
+      const identityTag = Array.isArray(frontmatter?.tags)
+        ? frontmatter.tags.find((tag) => String(tag).startsWith('tps/record/v1/'))
+        : null;
+      if (!identityTag) return null;
+      const [, , , kind, ...idParts] = String(identityTag).split('/');
+      const id = idParts.join('/');
+      return id && kind
+        ? { id, kind, schemaVersion: 1, frontmatter: { ...frontmatter, tpsId: id, tpsSchemaVersion: 1, kind } }
+        : null;
     },
   };
   const settings = { calendarStorageMode: 'native-records', syncOnEventDelete: 'nothing' };
@@ -105,10 +116,24 @@ function harness(initialEvents = []) {
     settings,
     files,
     frontmatters,
+    api,
     setEvents: (value) => { events = value; },
     setFetchOk: (value) => { fetchOk = value; },
   };
 }
+
+test('Controller indexes API v2 tag-identified calendar records without physical ID/schema fields', () => {
+  const h = harness([], { apiVersion: 2 });
+  const file = { path: 'calendar-tagged.md', name: 'calendar-tagged.md', basename: 'calendar-tagged', extension: 'md' };
+  h.service.indexFile(file, {
+    tags: ['calendar', 'tps/record/v1/calendar-event/calendar-tagged'],
+    title: 'Tagged event',
+    calendarOccurrenceKey: 'work:uid:occurrence',
+  });
+  const indexed = h.service.recordsByPath.get(file.path);
+  assert.equal(indexed?.id, 'calendar-tagged');
+  assert.equal(indexed?.occurrenceKey, 'work:uid:occurrence');
+});
 
 const calendar = {
   id: 'work-calendar',
