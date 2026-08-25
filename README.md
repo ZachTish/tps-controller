@@ -1,5 +1,12 @@
 # TPS Controller
 
+## 0.11.2 readable native-calendar filenames
+
+- Native calendar records now use the physical filename `YYYY-MM-DD - Event title.md` instead of `calendar-<opaque-id>.md`. The stable TPS record ID and calendar occurrence key remain the reconciliation identity, so title and date changes do not create duplicate events.
+- A reschedule or title change atomically renames the existing record through GCM. Obsidian updates links, invalid filename characters are sanitized, and an occupied readable name receives a deterministic numeric suffix rather than overwriting another note.
+- Existing opaque native calendar records adopt the readable filename during their next normal Controller reconciliation. This is a rename-only migration: the event record, stable ID, associated-note strategy, and typed properties remain unchanged.
+- Native calendar mode now requires TPS Global Context Menu 1.43.1 and `nativeRecords` API v3. Legacy task-line calendar mode is unchanged. Minimum supported Obsidian remains 1.12.0.
+
 ## 0.11.1 configurable native-record identity compatibility
 
 - Native calendar reconciliation now indexes `calendar-event` records through GCM `nativeRecords` API v2 identity inspection. Calendar occurrences remain idempotent when stable record identity is stored in a tag instead of physical `tpsId`/`tpsSchemaVersion` properties.

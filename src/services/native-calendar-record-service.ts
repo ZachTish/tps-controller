@@ -20,6 +20,7 @@ interface NativeRecordsApi {
     isEnabled(): boolean;
     create(kind: "calendar-event", properties: Record<string, unknown>, options?: Record<string, unknown>): Promise<NativeRecordHandle>;
     update(reference: TFile | string, updates: Record<string, unknown>, cause?: Record<string, unknown>): Promise<NativeRecordHandle | null>;
+    rename(reference: TFile | string, fileName: string, cause?: Record<string, unknown>): Promise<NativeRecordHandle | null>;
     archive(reference: TFile | string, cause?: Record<string, unknown>): Promise<NativeRecordHandle | null>;
     inspect?(frontmatter: unknown): {
         id: string;
@@ -151,10 +152,12 @@ export class NativeCalendarRecordService {
                 seenKeys.add(occurrenceKey);
                 const existing = this.findUniqueByOccurrenceKey(occurrenceKey);
                 const properties = this.eventProperties(calendar, calendarId, normalizedUrl, event, occurrenceKey, existing);
+                const fileName = buildNativeCalendarRecordFileName(event);
                 if (!existing) {
                     const created = await api.create("calendar-event", properties, {
                         id: `calendar-${stableHash(occurrenceKey)}`,
                         now: event.startDate,
+                        fileName,
                         cause: this.cause("controller-calendar-sync"),
                     });
                     this.trackHandle(created);
@@ -163,14 +166,26 @@ export class NativeCalendarRecordService {
                     continue;
                 }
                 const updates = changedProperties(existing.frontmatter, properties);
-                if (!Object.keys(updates).length) {
-                    result.unchanged += 1;
-                    continue;
+                let current: NativeRecordHandle = {
+                    file: existing.file,
+                    path: existing.file.path,
+                    id: existing.id,
+                    kind: "calendar-event",
+                    frontmatter: existing.frontmatter,
+                };
+                let changed = false;
+                if (Object.keys(updates).length) {
+                    const updated = await api.update(existing.file, updates, this.cause("controller-calendar-sync"));
+                    if (!updated) throw new Error("Calendar record changed before Controller could reconcile it.");
+                    current = updated;
+                    changed = true;
                 }
-                const updated = await api.update(existing.file, updates, this.cause("controller-calendar-sync"));
-                if (!updated) throw new Error("Calendar record changed before Controller could reconcile it.");
-                this.trackHandle(updated);
-                result.updated += 1;
+                const renamed = await api.rename(current.file, fileName, this.cause("controller-calendar-sync"));
+                if (!renamed) throw new Error("Calendar record changed before Controller could apply its readable filename.");
+                if (renamed.path !== current.path) changed = true;
+                this.trackHandle(renamed);
+                if (changed) result.updated += 1;
+                else result.unchanged += 1;
                 if (event.isCancelled) result.cancelled += 1;
             }
         }
@@ -258,8 +273,8 @@ export class NativeCalendarRecordService {
 
     private requireApi(): NativeRecordsApi {
         const api = this.getApi();
-        if (!api || Number(api.version) < 1 || api.isEnabled?.() !== true) {
-            throw new Error("Controller native calendar records require TPS GCM native-record mode and nativeRecords API v1.");
+        if (!api || Number(api.version) < 3 || api.isEnabled?.() !== true || typeof api.rename !== "function") {
+            throw new Error("Controller readable native calendar records require TPS GCM native-record mode and nativeRecords API v3.");
         }
         return api as NativeRecordsApi;
     }
@@ -340,6 +355,16 @@ function localDateKey(value: Date): string {
     const month = String(value.getMonth() + 1).padStart(2, "0");
     const day = String(value.getDate()).padStart(2, "0");
     return `${year}-${month}-${day}`;
+}
+
+export function buildNativeCalendarRecordFileName(event: Pick<ExternalCalendarEvent, "startDate" | "title">): string {
+    const title = String(event.title || "Untitled event")
+        .replace(/[\\/:*?"<>|#^\[\]]+/gu, "-")
+        .replace(/\s+/gu, " ")
+        .replace(/^[.\s-]+|[.\s-]+$/gu, "")
+        .slice(0, 150)
+        || "Untitled event";
+    return `${localDateKey(event.startDate)} - ${title}`;
 }
 
 function markdownLink(path: string, alias: string): string {

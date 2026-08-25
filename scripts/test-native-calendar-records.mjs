@@ -26,7 +26,7 @@ async function loadModule() {
   return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 }
 
-const { NativeCalendarRecordService } = await loadModule();
+const { NativeCalendarRecordService, buildNativeCalendarRecordFileName } = await loadModule();
 
 function futureDate(days, hour = 9) {
   const value = new Date();
@@ -59,11 +59,12 @@ function harness(initialEvents = [], options = {}) {
   let events = initialEvents;
   let fetchOk = true;
   const api = {
-    version: options.apiVersion || 1,
+    version: options.apiVersion || 3,
     isEnabled: () => true,
     async create(kind, properties, options = {}) {
       const id = String(options.id);
-      const file = { path: `_records/calendar-events/${id}.md`, name: `${id}.md`, basename: id, extension: 'md' };
+      const basename = String(options.fileName || id);
+      const file = { path: `${basename}.md`, name: `${basename}.md`, basename, extension: 'md' };
       const frontmatter = { ...properties, tpsId: id, tpsSchemaVersion: 1, kind, createdDate: new Date().toISOString(), modifiedDate: new Date().toISOString() };
       files.set(file.path, file);
       frontmatters.set(file.path, frontmatter);
@@ -76,6 +77,21 @@ function harness(initialEvents = [], options = {}) {
       const frontmatter = { ...frontmatters.get(path), ...updates, modifiedDate: new Date().toISOString() };
       frontmatters.set(path, frontmatter);
       return { file, path, id: frontmatter.tpsId, kind: frontmatter.kind, frontmatter };
+    },
+    async rename(reference, fileName) {
+      const oldPath = typeof reference === 'string' ? reference : reference.path;
+      const file = files.get(oldPath);
+      if (!file) return null;
+      const frontmatter = frontmatters.get(oldPath);
+      const nextPath = `${fileName}.md`;
+      files.delete(oldPath);
+      frontmatters.delete(oldPath);
+      file.path = nextPath;
+      file.name = nextPath;
+      file.basename = fileName;
+      files.set(nextPath, file);
+      frontmatters.set(nextPath, frontmatter);
+      return { file, path: nextPath, id: frontmatter.tpsId, kind: frontmatter.kind, frontmatter };
     },
     async archive(reference) {
       return this.update(reference, { archived: true, archivedDate: new Date().toISOString() });
@@ -135,6 +151,11 @@ test('Controller indexes API v2 tag-identified calendar records without physical
   assert.equal(indexed?.occurrenceKey, 'work:uid:occurrence');
 });
 
+test('calendar occurrence filenames use local date plus a safe readable title', () => {
+  const startDate = new Date(2026, 7, 25, 9, 0, 0);
+  assert.equal(buildNativeCalendarRecordFileName(event({ startDate, title: 'Standup / review: Q3?' })), '2026-08-25 - Standup - review- Q3');
+});
+
 const calendar = {
   id: 'work-calendar',
   url: 'https://calendar.example/team.ics',
@@ -151,6 +172,7 @@ test('single calendar occurrence is idempotent and reschedules the same record',
   assert.equal(first.created, 1);
   assert.equal(h.files.size, 1);
   const [path] = h.files.keys();
+  assert.equal(path, `${buildNativeCalendarRecordFileName(firstEvent)}.md`);
   const original = { ...h.frontmatters.get(path) };
   assert.match(original.title, /^\[\[Calendar Events\//u);
   assert.equal(original.eventTitle, 'Standup');
@@ -163,7 +185,10 @@ test('single calendar occurrence is idempotent and reschedules the same record',
   const moved = await h.service.sync([calendar], '', true, false);
   assert.equal(moved.updated, 1);
   assert.equal(h.files.size, 1, 'reschedule updates rather than duplicates');
-  const current = h.frontmatters.get(path);
+  const [movedPath] = h.files.keys();
+  assert.equal(movedPath, `${buildNativeCalendarRecordFileName(event({ startDate: movedStart }))}.md`);
+  assert.notEqual(movedPath, path, 'the readable filename follows the rescheduled day');
+  const current = h.frontmatters.get(movedPath);
   assert.equal(current.scheduled, movedStart.toISOString());
   assert.notEqual(current.associatedNotePath, original.associatedNotePath, 'per-day note target follows the new day');
 });
