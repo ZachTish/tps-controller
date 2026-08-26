@@ -53,17 +53,22 @@ function event(overrides = {}) {
   };
 }
 
-function harness(initialEvents = [], options = {}) {
+function recordLink(path, alias) {
+  return `[[${path.replace(/\.md$/u, '')}|${alias}]]`;
+}
+
+function harness(initialEvents = [], harnessOptions = {}) {
   const files = new Map();
   const frontmatters = new Map();
   let events = initialEvents;
   let fetchOk = true;
   const api = {
-    version: options.apiVersion || 3,
+    version: harnessOptions.apiVersion || 3,
     isEnabled: () => true,
-    async create(kind, properties, options = {}) {
-      const id = String(options.id);
-      const basename = String(options.fileName || id);
+    async create(kind, properties, createOptions = {}) {
+      const id = String(createOptions.id);
+      const requestedBasename = String(createOptions.fileName || id);
+      const basename = harnessOptions.resolveCreateBasename?.(requestedBasename) || requestedBasename;
       const file = { path: `${basename}.md`, name: `${basename}.md`, basename, extension: 'md' };
       const frontmatter = { ...properties, tpsId: id, tpsSchemaVersion: 1, kind, createdDate: new Date().toISOString(), modifiedDate: new Date().toISOString() };
       files.set(file.path, file);
@@ -83,12 +88,13 @@ function harness(initialEvents = [], options = {}) {
       const file = files.get(oldPath);
       if (!file) return null;
       const frontmatter = frontmatters.get(oldPath);
-      const nextPath = `${fileName}.md`;
+      const resolvedBasename = harnessOptions.resolveRenameBasename?.(fileName, oldPath) || fileName;
+      const nextPath = `${resolvedBasename}.md`;
       files.delete(oldPath);
       frontmatters.delete(oldPath);
       file.path = nextPath;
       file.name = nextPath;
-      file.basename = fileName;
+      file.basename = resolvedBasename;
       files.set(nextPath, file);
       frontmatters.set(nextPath, frontmatter);
       return { file, path: nextPath, id: frontmatter.tpsId, kind: frontmatter.kind, frontmatter };
@@ -174,10 +180,13 @@ test('single calendar occurrence is idempotent and reschedules the same record',
   const [path] = h.files.keys();
   assert.equal(path, `${buildNativeCalendarRecordFileName(firstEvent)}.md`);
   const original = { ...h.frontmatters.get(path) };
-  assert.match(original.title, /^\[\[Calendar Events\//u);
+  assert.equal(original.title, recordLink(path, 'Standup'));
+  assert.notEqual(original.title, recordLink(original.associatedNotePath, 'Standup'), 'the clickable title does not target the optional companion');
   assert.equal(original.eventTitle, 'Standup');
   const second = await h.service.sync([calendar], '', true, false);
   assert.equal(second.unchanged, 1);
+  assert.equal(second.updated, 0);
+  assert.equal(second.created, 0);
   assert.equal(h.files.size, 1);
 
   const movedStart = futureDate(3, 11);
@@ -191,6 +200,91 @@ test('single calendar occurrence is idempotent and reschedules the same record',
   const current = h.frontmatters.get(movedPath);
   assert.equal(current.scheduled, movedStart.toISOString());
   assert.notEqual(current.associatedNotePath, original.associatedNotePath, 'per-day note target follows the new day');
+  assert.equal(current.title, recordLink(movedPath, 'Standup'), 'the title follows the authoritative renamed record path');
+  assert.notEqual(current.title, recordLink(current.associatedNotePath, 'Standup'));
+});
+
+test('normal sync migrates a legacy companion-link title without changing record identity or creating a duplicate', async () => {
+  const firstEvent = event();
+  const h = harness([firstEvent]);
+  await h.service.sync([calendar], '', true, false);
+  const [path] = h.files.keys();
+  const seeded = { ...h.frontmatters.get(path) };
+  const originalId = seeded.tpsId;
+  const originalOccurrenceKey = seeded.calendarOccurrenceKey;
+  const originalAssociatedNotePath = seeded.associatedNotePath;
+  seeded.title = recordLink(originalAssociatedNotePath, 'Standup');
+  h.frontmatters.set(path, seeded);
+
+  const migrated = await h.service.sync([calendar], '', true, false);
+  assert.equal(migrated.created, 0);
+  assert.equal(migrated.updated, 1);
+  assert.equal(h.files.size, 1);
+  const [migratedPath] = h.files.keys();
+  assert.equal(migratedPath, path);
+  const current = h.frontmatters.get(migratedPath);
+  assert.equal(current.title, recordLink(migratedPath, 'Standup'));
+  assert.notEqual(current.title, recordLink(current.associatedNotePath, 'Standup'));
+  assert.equal(current.tpsId, originalId);
+  assert.equal(current.calendarOccurrenceKey, originalOccurrenceKey);
+  assert.equal(current.associatedNotePath, originalAssociatedNotePath);
+
+  const repeat = await h.service.sync([calendar], '', true, false);
+  assert.equal(repeat.created, 0);
+  assert.equal(repeat.updated, 0);
+  assert.equal(repeat.unchanged, 1);
+  assert.equal(h.files.size, 1);
+  assert.equal(h.frontmatters.get(migratedPath).title, recordLink(migratedPath, 'Standup'));
+});
+
+test('title self-link uses the collision-suffixed path returned by the native-record API', async () => {
+  const firstEvent = event();
+  const suffix = ' (2)';
+  const h = harness([firstEvent], {
+    resolveCreateBasename: (requested) => `${requested}${suffix}`,
+    resolveRenameBasename: (requested) => `${requested}${suffix}`,
+  });
+
+  const first = await h.service.sync([calendar], '', true, false);
+  assert.equal(first.created, 1);
+  const [path] = h.files.keys();
+  assert.equal(path, `${buildNativeCalendarRecordFileName(firstEvent)}${suffix}.md`);
+  const current = h.frontmatters.get(path);
+  assert.equal(current.title, recordLink(path, 'Standup'));
+  assert.notEqual(current.title, recordLink(current.associatedNotePath, 'Standup'));
+
+  const repeat = await h.service.sync([calendar], '', true, false);
+  assert.equal(repeat.created, 0);
+  assert.equal(repeat.updated, 0);
+  assert.equal(repeat.unchanged, 1);
+  assert.equal(h.files.size, 1);
+  assert.equal(h.frontmatters.get(path).title, recordLink(path, 'Standup'));
+
+  const movedStart = futureDate(4, 13);
+  const movedEvent = event({ startDate: movedStart, endDate: new Date(movedStart.getTime() + 30 * 60_000) });
+  h.setEvents([movedEvent]);
+  const moved = await h.service.sync([calendar], '', true, false);
+  assert.equal(moved.created, 0);
+  assert.equal(moved.updated, 1);
+  const [movedPath] = h.files.keys();
+  assert.equal(movedPath, `${buildNativeCalendarRecordFileName(movedEvent)}${suffix}.md`);
+  assert.equal(h.frontmatters.get(movedPath).title, recordLink(movedPath, 'Standup'));
+});
+
+test('blank calendar summaries remain valid records and self-link the returned escaped path', async () => {
+  const blankEvent = event({ title: ' \n\t ' });
+  const h = harness([blankEvent], {
+    resolveCreateBasename: (requested) => `Native #records^]/${requested}`,
+    resolveRenameBasename: (requested) => `Native #records^]/${requested}`,
+  });
+
+  const result = await h.service.sync([calendar], '', true, false);
+  assert.equal(result.created, 1);
+  const [path] = h.files.keys();
+  assert.equal(path, `Native #records^]/${buildNativeCalendarRecordFileName(blankEvent)}.md`);
+  const current = h.frontmatters.get(path);
+  assert.equal(current.eventTitle, 'Untitled event');
+  assert.equal(current.title, `[[Native \\#records\\^\\]/${buildNativeCalendarRecordFileName(blankEvent)}|Untitled event]]`);
 });
 
 test('recurring occurrences remain separate while series note strategy shares one note', async () => {

@@ -151,39 +151,46 @@ export class NativeCalendarRecordService {
                 if (seenKeys.has(occurrenceKey)) continue;
                 seenKeys.add(occurrenceKey);
                 const existing = this.findUniqueByOccurrenceKey(occurrenceKey);
-                const properties = this.eventProperties(calendar, calendarId, normalizedUrl, event, occurrenceKey, existing);
                 const fileName = buildNativeCalendarRecordFileName(event);
+                const displayTitle = normalizeCalendarEventTitle(event.title);
                 if (!existing) {
+                    const properties = this.eventProperties(calendar, calendarId, normalizedUrl, event, occurrenceKey, null);
                     const created = await api.create("calendar-event", properties, {
                         id: `calendar-${stableHash(occurrenceKey)}`,
                         now: event.startDate,
                         fileName,
                         cause: this.cause("controller-calendar-sync"),
                     });
-                    this.trackHandle(created);
+                    const linkedTitle = markdownLink(created.path, displayTitle);
+                    const linked = await api.update(created.file, { title: linkedTitle }, this.cause("controller-calendar-self-link"));
+                    if (!linked) throw new Error("Calendar record changed before Controller could link its readable title.");
+                    this.trackHandle(linked);
                     result.created += 1;
                     if (event.isCancelled) result.cancelled += 1;
                     continue;
                 }
-                const updates = changedProperties(existing.frontmatter, properties);
-                let current: NativeRecordHandle = {
-                    file: existing.file,
-                    path: existing.file.path,
-                    id: existing.id,
-                    kind: "calendar-event",
-                    frontmatter: existing.frontmatter,
-                };
-                let changed = false;
+                const originalPath = existing.file.path;
+                const renamed = await api.rename(existing.file, fileName, this.cause("controller-calendar-sync"));
+                if (!renamed) throw new Error("Calendar record changed before Controller could apply its readable filename.");
+                let current = renamed;
+                let changed = renamed.path !== originalPath;
+                const properties = this.eventProperties(
+                    calendar,
+                    calendarId,
+                    normalizedUrl,
+                    event,
+                    occurrenceKey,
+                    existing,
+                    renamed.path,
+                );
+                const updates = changedProperties(renamed.frontmatter, properties);
                 if (Object.keys(updates).length) {
-                    const updated = await api.update(existing.file, updates, this.cause("controller-calendar-sync"));
+                    const updated = await api.update(renamed.file, updates, this.cause("controller-calendar-sync"));
                     if (!updated) throw new Error("Calendar record changed before Controller could reconcile it.");
                     current = updated;
                     changed = true;
                 }
-                const renamed = await api.rename(current.file, fileName, this.cause("controller-calendar-sync"));
-                if (!renamed) throw new Error("Calendar record changed before Controller could apply its readable filename.");
-                if (renamed.path !== current.path) changed = true;
-                this.trackHandle(renamed);
+                this.trackHandle(current);
                 if (changed) result.updated += 1;
                 else result.unchanged += 1;
                 if (event.isCancelled) result.cancelled += 1;
@@ -235,6 +242,7 @@ export class NativeCalendarRecordService {
         event: ExternalCalendarEvent,
         occurrenceKey: string,
         existing: IndexedCalendarRecord | null,
+        recordPath?: string | null,
     ): Record<string, unknown> {
         const strategy = calendar.autoCreateTaskNoteStrategy || "occurrence-day";
         const folder = calendar.autoCreateTaskNoteFolder || "Calendar Events";
@@ -243,9 +251,13 @@ export class NativeCalendarRecordService {
         const scheduled = event.isAllDay ? localDateKey(event.startDate) : event.startDate.toISOString();
         const end = event.isAllDay ? localDateKey(event.endDate) : event.endDate.toISOString();
         const status = event.isCancelled ? "cancelled" : "scheduled";
+        const displayTitle = normalizeCalendarEventTitle(event.title);
         return {
-            title: markdownLink(note.notePath, event.title),
-            eventTitle: event.title,
+            // `title` is the clickable label used by native Bases. It must open
+            // this existing calendar record, never materialize the optional
+            // unresolved companion kept in associatedNote/associatedNotePath.
+            title: recordPath ? markdownLink(recordPath, displayTitle) : displayTitle,
+            eventTitle: displayTitle,
             status,
             scheduled,
             end,
@@ -358,7 +370,7 @@ function localDateKey(value: Date): string {
 }
 
 export function buildNativeCalendarRecordFileName(event: Pick<ExternalCalendarEvent, "startDate" | "title">): string {
-    const title = String(event.title || "Untitled event")
+    const title = normalizeCalendarEventTitle(event.title)
         .replace(/[\\/:*?"<>|#^\[\]]+/gu, "-")
         .replace(/\s+/gu, " ")
         .replace(/^[.\s-]+|[.\s-]+$/gu, "")
@@ -368,9 +380,13 @@ export function buildNativeCalendarRecordFileName(event: Pick<ExternalCalendarEv
 }
 
 function markdownLink(path: string, alias: string): string {
-    const target = path.replace(/\.md$/iu, "").replace(/\|/gu, "\\|");
+    const target = path.replace(/\.md$/iu, "").replace(/([#^|\]])/gu, "\\$1");
     const label = alias.replace(/\|/gu, "\\|").replace(/\]/gu, "\\]");
     return `[[${target}|${label}]]`;
+}
+
+function normalizeCalendarEventTitle(value: unknown): string {
+    return String(value || "").replace(/[\r\n]+/gu, " ").replace(/\s+/gu, " ").trim() || "Untitled event";
 }
 
 function stableHash(value: string): string {

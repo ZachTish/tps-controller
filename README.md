@@ -1,5 +1,13 @@
 # TPS Controller
 
+## 0.11.3 native-calendar title self-links
+
+- Native Markdown calendar records now use their clickable `title` property to link to the existing readable event record itself. Selecting an event title in an embedded Daily Agenda or other Base opens `YYYY-MM-DD - Event title.md` instead of following the optional companion-note path and offering to create `Calendar event--<hash>.md`.
+- New records build the self-link from the authoritative path returned by GCM, including any collision suffix. Reschedules and title changes rename first and then refresh the link, so it continues targeting the same record.
+- Existing native records whose title points to a companion adopt the self-link during their next successful reconciliation. Stable TPS/calendar identity and `associatedNote`, `associatedNotePath`, and `associatedNoteStrategy` remain unchanged.
+- Empty or whitespace-only calendar summaries remain valid and use the readable fallback `Untitled event`; configured native-record roots with wikilink control characters are escaped safely.
+- This backward-compatible patch adds no Controller setting or schema migration. Legacy task-line mode is unchanged. Native records continue to require GCM 1.43.1 / nativeRecords API v3, and minimum supported Obsidian remains 1.12.0.
+
 ## 0.11.2 readable native-calendar filenames
 
 - Native calendar records now use the physical filename `YYYY-MM-DD - Event title.md` instead of `calendar-<opaque-id>.md`. The stable TPS record ID and calendar occurrence key remain the reconciliation identity, so title and date changes do not create duplicate events.
@@ -409,6 +417,7 @@ Device role, reminder alert reset, calendar quarantine review, historical backfi
 - Normal calendar sync processes events from today forward. It does not backfill past external calendar events.
 - Historical backfill is not part of the streamlined command palette. Normal manual sync uses the current forward-looking sync window.
 - `Force Calendar Sync Now` uses the normal non-backfill window.
+- Native-record calendar events keep the optional companion relationship in `associatedNote`, `associatedNotePath`, and `associatedNoteStrategy`, while their clickable `title` self-links the authoritative readable event-record path returned by GCM. Daily Agenda and other Bases therefore open the existing record, including collision-suffixed paths, instead of materializing an unresolved companion placeholder.
 - Task-mode calendar events are written as inline Markdown tasks whose visible title is a native wikilink. The link alias is the event title; its hidden association path is source/UID scoped. Users can choose one linked note per local scheduled day or one shared linked note per recurring series. The link target uses an opaque identity suffix, so its visible alias—not its physical basename—is the human-readable title.
 - Blank task target paths write to the scheduled day's Daily Note. A configured single task note keeps every occurrence in that note and reschedules in place. Daily Note tasks that move to another local date are migrated to the newly scheduled day's canonical Daily Note with their indented child block intact.
 - When a task-mode event needs a missing daily note, Controller delegates creation to GCM's canonical Daily Note service first so configured Core/Periodic paths, templates, readable titles, and shared normalization are preserved. If GCM is unavailable, Controller merges runtime and persisted Daily Notes/Templates settings, expands core template variables, creates any folders introduced by the date format, and completes Templater before returning a writable file. A configured template that cannot be read or fully processed fails closed instead of creating or writing into a bare note.
