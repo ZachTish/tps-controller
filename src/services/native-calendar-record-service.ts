@@ -111,6 +111,8 @@ export class NativeCalendarRecordService {
             archived: 0,
             failedFeeds: 0,
         };
+        const selfLinkReconciliation = await this.reconcileIndexedSelfLinks(api);
+        result.updated += selfLinkReconciliation.count;
         const rangeStart = new Date();
         if (backfillPastEvents) rangeStart.setDate(rangeStart.getDate() - 14);
         else rangeStart.setHours(0, 0, 0, 0);
@@ -146,10 +148,13 @@ export class NativeCalendarRecordService {
             ));
             result.fetched += events.length;
             for (const event of events) {
-                if (filterTerms.some((term) => event.title.toLocaleLowerCase().includes(term))) continue;
                 const occurrenceKey = this.occurrenceKey(calendarId, normalizedUrl, event);
                 if (seenKeys.has(occurrenceKey)) continue;
                 seenKeys.add(occurrenceKey);
+                // A filtered occurrence is still present in a successful feed.
+                // Mark it seen before applying the creation/update filter so an
+                // existing record is never treated as deleted and archived.
+                if (filterTerms.some((term) => event.title.toLocaleLowerCase().includes(term))) continue;
                 const existing = this.findUniqueByOccurrenceKey(occurrenceKey);
                 const fileName = buildNativeCalendarRecordFileName(event);
                 const displayTitle = normalizeCalendarEventTitle(event.title);
@@ -191,8 +196,10 @@ export class NativeCalendarRecordService {
                     changed = true;
                 }
                 this.trackHandle(current);
-                if (changed) result.updated += 1;
-                else result.unchanged += 1;
+                // Index-wide title repair is counted once even when the same
+                // occurrence is also present in this feed pass.
+                if (changed && !selfLinkReconciliation.occurrenceKeys.has(existing.occurrenceKey)) result.updated += 1;
+                else if (!changed && !selfLinkReconciliation.occurrenceKeys.has(existing.occurrenceKey)) result.unchanged += 1;
                 if (event.isCancelled) result.cancelled += 1;
             }
         }
@@ -233,6 +240,27 @@ export class NativeCalendarRecordService {
             failedFeeds: result.failedFeeds,
         });
         return result;
+    }
+
+    private async reconcileIndexedSelfLinks(api: NativeRecordsApi): Promise<{ count: number; occurrenceKeys: Set<string> }> {
+        const occurrenceKeys = new Set<string>();
+        let count = 0;
+        const records = [...this.recordsByPath.values()].sort((left, right) => left.file.path.localeCompare(right.file.path));
+        for (const record of records) {
+            const displayTitle = calendarRecordDisplayTitle(record);
+            const linkedTitle = markdownLink(record.file.path, displayTitle);
+            if (String(record.frontmatter.title || "") === linkedTitle) continue;
+            const updated = await api.update(
+                record.file,
+                { title: linkedTitle },
+                this.cause("controller-calendar-self-link-reconcile"),
+            );
+            if (!updated) throw new Error("Calendar record changed before Controller could repair its readable title link.");
+            this.trackHandle(updated);
+            occurrenceKeys.add(record.occurrenceKey);
+            count += 1;
+        }
+        return { count, occurrenceKeys };
     }
 
     private eventProperties(
@@ -383,6 +411,26 @@ function markdownLink(path: string, alias: string): string {
     const target = path.replace(/\.md$/iu, "").replace(/([#^|\]])/gu, "\\$1");
     const label = alias.replace(/\|/gu, "\\|").replace(/\]/gu, "\\]");
     return `[[${target}|${label}]]`;
+}
+
+function calendarRecordDisplayTitle(record: IndexedCalendarRecord): string {
+    const eventTitle = String(record.frontmatter.eventTitle || "").trim();
+    if (eventTitle) return normalizeCalendarEventTitle(eventTitle);
+    const linkedAlias = markdownLinkAlias(String(record.frontmatter.title || ""));
+    if (linkedAlias) return normalizeCalendarEventTitle(linkedAlias);
+    return normalizeCalendarEventTitle(record.file.basename.replace(/^\d{4}-\d{2}-\d{2}\s+-\s+/u, ""));
+}
+
+function markdownLinkAlias(value: string): string {
+    if (!value.startsWith("[[") || !value.endsWith("]]")) return "";
+    for (let index = value.length - 3; index >= 2; index -= 1) {
+        if (value[index] !== "|") continue;
+        let precedingSlashes = 0;
+        for (let cursor = index - 1; cursor >= 0 && value[cursor] === "\\"; cursor -= 1) precedingSlashes += 1;
+        if (precedingSlashes % 2 !== 0) continue;
+        return value.slice(index + 1, -2).replace(/\\([|\]])/gu, "$1");
+    }
+    return "";
 }
 
 function normalizeCalendarEventTitle(value: unknown): string {

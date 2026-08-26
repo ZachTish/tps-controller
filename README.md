@@ -1,5 +1,13 @@
 # TPS Controller
 
+## 0.11.4 index-wide native-calendar self-link repair
+
+- Every native-record calendar sync now repairs the clickable `title` self-link of every indexed schema-v1 `calendar-event` before remote feeds are fetched or filtered. Existing records therefore adopt their own current file path even when their calendar is disabled, its feed fails, the event is outside the current sync window, or its title matches the exclusion filter.
+- Repair preserves the readable label from `eventTitle`, with safe fallbacks to the existing wikilink alias or readable filename. Stable TPS/calendar identity, schedule fields, and `associatedNote`, `associatedNotePath`, and `associatedNoteStrategy` remain unchanged, and repeated syncs are idempotent.
+- Occurrences returned by a successful feed are now marked present before title filtering. A filtered existing record can no longer be mistaken for a removed event and marked missing, archived, or deleted by the configured cleanup policy.
+- Sync accounting counts an index-wide repair once even when that occurrence is also reconciled from its feed during the same run.
+- This backward-compatible patch adds no Controller setting or schema migration. Legacy task-line mode is unchanged. Native records continue to require GCM 1.43.1 / nativeRecords API v3, and minimum supported Obsidian remains 1.12.0.
+
 ## 0.11.3 native-calendar title self-links
 
 - Native Markdown calendar records now use their clickable `title` property to link to the existing readable event record itself. Selecting an event title in an embedded Daily Agenda or other Base opens `YYYY-MM-DD - Event title.md` instead of following the optional companion-note path and offering to create `Calendar event--<hash>.md`.

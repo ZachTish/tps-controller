@@ -237,6 +237,108 @@ test('normal sync migrates a legacy companion-link title without changing record
   assert.equal(h.frontmatters.get(migratedPath).title, recordLink(migratedPath, 'Standup'));
 });
 
+test('index-wide self-link reconciliation survives a failed feed and is idempotent', async () => {
+  const h = harness([event()]);
+  await h.service.sync([calendar], '', true, false);
+  const [path] = h.files.keys();
+  const seeded = { ...h.frontmatters.get(path) };
+  const preserved = {
+    tpsId: seeded.tpsId,
+    calendarOccurrenceKey: seeded.calendarOccurrenceKey,
+    associatedNote: seeded.associatedNote,
+    associatedNotePath: seeded.associatedNotePath,
+    associatedNoteStrategy: seeded.associatedNoteStrategy,
+    scheduled: seeded.scheduled,
+  };
+  seeded.title = recordLink(seeded.associatedNotePath, seeded.eventTitle);
+  h.frontmatters.set(path, seeded);
+  h.settings.syncOnEventDelete = 'archive';
+  h.setFetchOk(false);
+
+  const repaired = await h.service.sync([calendar], '', true, false);
+  assert.equal(repaired.failedFeeds, 1);
+  assert.equal(repaired.updated, 1);
+  assert.equal(repaired.archived, 0);
+  assert.equal(h.files.size, 1);
+  assert.equal([...h.files.keys()][0], path, 'title repair does not rename the record');
+  const current = h.frontmatters.get(path);
+  assert.equal(current.title, recordLink(path, 'Standup'));
+  assert.deepEqual({
+    tpsId: current.tpsId,
+    calendarOccurrenceKey: current.calendarOccurrenceKey,
+    associatedNote: current.associatedNote,
+    associatedNotePath: current.associatedNotePath,
+    associatedNoteStrategy: current.associatedNoteStrategy,
+    scheduled: current.scheduled,
+  }, preserved, 'title repair preserves identity, association, and schedule fields');
+
+  const repeat = await h.service.sync([calendar], '', true, false);
+  assert.equal(repeat.failedFeeds, 1);
+  assert.equal(repeat.updated, 0);
+  assert.equal(repeat.archived, 0);
+  assert.equal(h.frontmatters.get(path).title, recordLink(path, 'Standup'));
+});
+
+test('index-wide self-link reconciliation runs with no active calendar and outside the sync range', async () => {
+  const h = harness([event()]);
+  await h.service.sync([calendar], '', true, false);
+  const [path] = h.files.keys();
+  const seeded = { ...h.frontmatters.get(path) };
+  seeded.scheduled = '2000-01-01T09:00:00.000Z';
+  seeded.title = recordLink(seeded.associatedNotePath, seeded.eventTitle);
+  h.frontmatters.set(path, seeded);
+
+  const repaired = await h.service.sync([{ ...calendar, enabled: false }], '', true, false);
+  assert.equal(repaired.fetched, 0);
+  assert.equal(repaired.failedFeeds, 0);
+  assert.equal(repaired.updated, 1);
+  assert.equal(repaired.missing, 0);
+  assert.equal(repaired.archived, 0);
+  assert.equal(h.files.size, 1);
+  assert.equal([...h.files.keys()][0], path);
+  assert.equal(h.frontmatters.get(path).title, recordLink(path, 'Standup'));
+  assert.equal(h.frontmatters.get(path).scheduled, '2000-01-01T09:00:00.000Z');
+
+  const repeat = await h.service.sync([{ ...calendar, autoCreateEnabled: false }], '', true, false);
+  assert.equal(repeat.updated, 0);
+  assert.equal(repeat.fetched, 0);
+  assert.equal(h.frontmatters.get(path).title, recordLink(path, 'Standup'));
+});
+
+test('filtered existing occurrences remain seen while their self-links are reconciled', async () => {
+  const h = harness([event()]);
+  await h.service.sync([calendar], '', true, false);
+  const [path] = h.files.keys();
+  const seeded = { ...h.frontmatters.get(path) };
+  const originalId = seeded.tpsId;
+  const originalOccurrenceKey = seeded.calendarOccurrenceKey;
+  const originalAssociatedNotePath = seeded.associatedNotePath;
+  const originalScheduled = seeded.scheduled;
+  seeded.title = recordLink(seeded.associatedNotePath, seeded.eventTitle);
+  h.frontmatters.set(path, seeded);
+  h.settings.syncOnEventDelete = 'archive';
+
+  const filtered = await h.service.sync([calendar], 'standup', true, false);
+  assert.equal(filtered.fetched, 1);
+  assert.equal(filtered.updated, 1);
+  assert.equal(filtered.missing, 0);
+  assert.equal(filtered.archived, 0, 'a present filtered occurrence is not treated as deleted');
+  assert.equal(h.files.size, 1);
+  assert.equal([...h.files.keys()][0], path);
+  const current = h.frontmatters.get(path);
+  assert.equal(current.title, recordLink(path, 'Standup'));
+  assert.equal(current.archived, undefined);
+  assert.equal(current.tpsId, originalId);
+  assert.equal(current.calendarOccurrenceKey, originalOccurrenceKey);
+  assert.equal(current.associatedNotePath, originalAssociatedNotePath);
+  assert.equal(current.scheduled, originalScheduled);
+
+  const repeat = await h.service.sync([calendar], 'standup', true, false);
+  assert.equal(repeat.updated, 0);
+  assert.equal(repeat.archived, 0);
+  assert.equal(h.frontmatters.get(path).title, recordLink(path, 'Standup'));
+});
+
 test('title self-link uses the collision-suffixed path returned by the native-record API', async () => {
   const firstEvent = event();
   const suffix = ' (2)';
