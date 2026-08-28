@@ -38,11 +38,12 @@ export async function buildReminderTargetsForFile(
     frontmatter: Record<string, unknown>,
     _settings: TPSControllerSettings,
 ): Promise<ReminderEvaluationTarget[]> {
+    const noteTitle = buildNoteDisplayName(file, frontmatter);
     const noteTarget: ReminderEvaluationTarget = {
         sourceKey: file.path,
         sourceType: "file",
         targetKind: "note",
-        noteTitle: buildNoteDisplayName(file),
+        noteTitle,
     };
     const targets: ReminderEvaluationTarget[] = [noteTarget];
 
@@ -98,7 +99,7 @@ export async function buildReminderTargetsForFile(
             taskPropertyKeys: Object.keys(parsed.properties),
             reminderTags: getLineReminderTags(line),
             suppressInheritedDailyNoteSchedule,
-            noteTitle: buildNoteDisplayName(file),
+            noteTitle,
             taskFrontmatter: {
                 ...frontmatter,
                 ...parsed.properties,
@@ -211,10 +212,23 @@ export function buildReminderDisplayName(file: Pick<TFile, "basename">, target: 
         return target.taskTitle;
     }
 
-    return buildNoteDisplayName(file);
+    return target.noteTitle || buildNoteDisplayName(file);
 }
 
-function buildNoteDisplayName(file: Pick<TFile, "basename">): string {
+function buildNoteDisplayName(
+    file: Pick<TFile, "basename">,
+    frontmatter: Record<string, unknown> = {},
+): string {
+    const kind = String(getFrontmatterValueCaseInsensitive(frontmatter, "kind") ?? "")
+        .trim()
+        .toLowerCase();
+    if (kind === "calendar-event") {
+        const eventTitle = String(getFrontmatterValueCaseInsensitive(frontmatter, "eventTitle") ?? "")
+            .replace(/[\r\n]+/gu, " ")
+            .replace(/\s+/gu, " ")
+            .trim();
+        if (eventTitle) return eventTitle;
+    }
     if (/^\d{4}-\d{2}-\d{2}$/.test(file.basename)) return file.basename;
     return file.basename.replace(/ \d{4}-\d{2}-\d{2}$/, "");
 }

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import moment from 'moment';
 import ts from 'typescript';
 import './test-notification-open-lifecycle.mjs';
 
@@ -127,7 +128,7 @@ function loadTimeCalculationModule() {
   const requireStub = (id) => {
     if (id === 'obsidian') {
       return {
-        moment: () => ({ isValid: () => false }),
+        moment,
         getAllTags: () => [],
       };
     }
@@ -306,7 +307,7 @@ function loadCompiledReminderEngineHarness(options = {}) {
       return {
         App: class {},
         TFile: TestTFile,
-        moment: () => ({ format: () => '12:00 PM' }),
+        moment: (...args) => moment(...args),
         normalizePath: (value) => String(value || '').replace(/^\/+|\/+$/gu, ''),
       };
     }
@@ -321,26 +322,26 @@ function loadCompiledReminderEngineHarness(options = {}) {
     if (id === '../utils') {
       return {
         normalizeCalendarUrl: (value) => String(value || ''),
-        parseFrontmatterDate: () => null,
+        parseFrontmatterDate: options.parseFrontmatterDate || (() => null),
       };
     }
     if (id === '../utils/time-calculation-service') {
       return {
         parseDate: options.parseDate || (() => null),
         parseTimeRange: options.parseTimeRange || (() => ({ start: Date.now() - 1_000, end: null })),
-        parseDuration: () => 0,
-        getEffectiveEndTime: () => null,
-        formatTemplate: (value) => String(value || ''),
-        formatRemaining: () => 'due',
+        parseDuration: options.parseDuration || (() => 0),
+        getEffectiveEndTime: options.getEffectiveEndTime || (() => null),
+        formatTemplate: options.formatTemplate || ((value) => String(value || '')),
+        formatRemaining: options.formatRemaining || (() => 'due'),
         checkStopCondition: () => false,
         normalizeStatus: (value) => String(value || '').trim().toLowerCase(),
         getStatuses: () => [],
         hasRequiredStatus: () => true,
         hasRequiredCheckboxState: () => true,
         shouldIgnoreForReminder: options.shouldIgnoreForReminder,
-        isAllDayEvent: () => false,
-        hasExplicitTimeInValue: () => true,
-        getReminderTriggerBase: (start) => start,
+        isAllDayEvent: options.isAllDayEvent || (() => false),
+        hasExplicitTimeInValue: options.hasExplicitTimeInValue || (() => true),
+        getReminderTriggerBase: options.getReminderTriggerBase || ((start) => start),
       };
     }
     if (id === './reminder-target-service') {
@@ -407,6 +408,140 @@ function beginCompiledReminderMove(harness) {
 test('all-day task reminders can repeat until their stop condition', () => {
   assert.match(source, /reminder\.repeatUntilComplete\s*&&\s*\(!reminder\.mode \|\| reminder\.mode === "task"\)/);
   assert.doesNotMatch(source, /reminder\.repeatUntilComplete\s*&&[\s\S]{0,160}!isAllDaySafe/);
+});
+
+test('native-record canonical ISO timestamps preserve their time and zone before embedded-date parsing', () => {
+  const { parseDate, parseTimeRange } = loadTimeCalculationModule();
+  const pocTimestamp = '2026-08-27T13:30:00.000Z';
+  const offsetTimestamp = '2026-08-27T08:30:00.000-05:00';
+
+  assert.equal(parseDate(pocTimestamp), Date.parse(pocTimestamp));
+  assert.equal(parseTimeRange(pocTimestamp).start, Date.parse(pocTimestamp));
+  assert.equal(parseDate(offsetTimestamp), Date.parse(offsetTimestamp));
+  assert.equal(
+    parseDate(offsetTimestamp),
+    parseDate(pocTimestamp),
+    'equivalent Z and offset timestamps must resolve to the same instant',
+  );
+});
+
+test('native projection preserves zoned time, all-day base time, repeats, and deterministic order together', async () => {
+  const now = Date.parse('2026-08-27T12:00:00.000Z');
+  const time = loadTimeCalculationModule();
+  const frontmatterByPath = new Map([
+    ['Zulu.md', { kind: 'calendar-event', status: 'scheduled', scheduled: '2026-08-27T09:00:00.000-05:00', allDay: false }],
+    ['All Day.md', { kind: 'calendar-event', status: 'scheduled', scheduled: '2026-08-28', allDay: true }],
+    ['Repeat.md', { kind: 'task', status: 'todo', due: '2026-08-27T13:00:00.000Z' }],
+    ['Alpha.md', { kind: 'calendar-event', status: 'scheduled', scheduled: '2026-08-27T14:00:00.000Z', allDay: false }],
+  ]);
+  const candidateFiles = [];
+  const engineHarness = loadCompiledReminderEngineHarness({
+    candidateFiles,
+    parseDate: time.parseDate,
+    parseTimeRange: time.parseTimeRange,
+    parseDuration: time.parseDuration,
+    getEffectiveEndTime: time.getEffectiveEndTime,
+    formatTemplate: time.formatTemplate,
+    formatRemaining: time.formatRemaining,
+    shouldIgnoreForReminder: time.shouldIgnoreForReminder,
+    isAllDayEvent: time.isAllDayEvent,
+    hasExplicitTimeInValue: time.hasExplicitTimeInValue,
+    getReminderTriggerBase: time.getReminderTriggerBase,
+    buildReminderTargetsForFile: async (_app, file) => [{
+      sourceKey: file.path,
+      sourceType: 'file',
+      targetKind: 'note',
+      noteTitle: file.basename,
+      reminderTags: [],
+    }],
+    buildEffectiveReminderContextForTarget: (_target, frontmatter, property) => ({
+      frontmatter,
+      propertyValue: frontmatter[property],
+    }),
+  });
+  for (const path of ['Zulu.md', 'All Day.md', 'Repeat.md', 'Alpha.md']) {
+    candidateFiles.push(new engineHarness.TFile(path));
+  }
+  const app = {
+    metadataCache: {
+      getFileCache: (file) => ({ frontmatter: frontmatterByPath.get(file.path) }),
+    },
+    vault: { getMarkdownFiles: () => candidateFiles, cachedRead: async () => '' },
+  };
+  const settings = {
+    enableReminders: true,
+    pollMinutes: 1.5,
+    reminders: [{
+      id: 'timed-minus-15',
+      enabled: true,
+      property: 'scheduled',
+      offsetMinutes: -15,
+      repeatUntilComplete: false,
+      repeatIntervalMinutes: 5,
+      maxRepeats: -1,
+      stopConditions: [],
+      title: 'Reminder: {filename}',
+      body: 'At {time}',
+      sourceTypes: ['file'],
+      allDayFilter: 'false',
+    }, {
+      id: 'all-day-at-nine',
+      enabled: true,
+      property: 'scheduled',
+      offsetMinutes: 0,
+      repeatUntilComplete: false,
+      repeatIntervalMinutes: 5,
+      maxRepeats: -1,
+      stopConditions: [],
+      title: 'Today: {filename}',
+      body: 'At {time}',
+      sourceTypes: ['file'],
+      allDayFilter: 'true',
+    }, {
+      id: 'repeat-three-times',
+      enabled: true,
+      property: 'due',
+      mode: 'task',
+      offsetMinutes: 0,
+      repeatUntilComplete: true,
+      repeatIntervalMinutes: 5,
+      maxRepeats: 2,
+      repeatEndAt: 'stop-condition',
+      stopConditions: [],
+      title: 'Due: {filename}',
+      body: 'At {time}',
+      sourceTypes: ['file'],
+      allDayFilter: 'false',
+    }],
+    alertState: {},
+    archiveFolder: '_archive',
+    globalIgnorePaths: [],
+    globalIgnoreTags: [],
+    globalIgnoreStatuses: [],
+    globalIgnoreCheckboxStates: [],
+    defaultAllDayBaseTime: '09:00',
+    snoozeProperty: 'reminderSnooze',
+    canceledStatusValue: 'cancelled',
+    externalCalendars: [],
+  };
+  const engine = new engineHarness.ReminderEngine(app, {});
+
+  const schedule = await engine.projectScheduledNotifications(settings, now);
+
+  assert.equal(schedule.length, 6);
+  assert.deepEqual(
+    schedule.slice(0, 5).map((item) => [item.fireAt, item.sourceKey]),
+    [
+      [Date.parse('2026-08-27T13:00:00.000Z'), 'Repeat.md'],
+      [Date.parse('2026-08-27T13:05:00.000Z'), 'Repeat.md'],
+      [Date.parse('2026-08-27T13:10:00.000Z'), 'Repeat.md'],
+      [Date.parse('2026-08-27T13:45:00.000Z'), 'Alpha.md'],
+      [Date.parse('2026-08-27T13:45:00.000Z'), 'Zulu.md'],
+    ],
+  );
+  assert.equal(moment(schedule[5].fireAt).format('YYYY-MM-DD HH:mm'), '2026-08-28 09:00');
+  assert.equal(schedule[5].sourceKey, 'All Day.md');
+  assert.deepEqual(settings.alertState, {}, 'projection remains read-only across mixed reminder semantics');
 });
 
 test('native schedule projection is Controller-rule-owned and read-only', async () => {
@@ -484,6 +619,267 @@ test('native schedule projection is Controller-rule-owned and read-only', async 
   assert.equal(schedule[0].sourcePath, 'Projects/Alpha.md');
   assert.equal(schedule[0].sourceKey, 'Projects/Alpha.md::task:3');
   assert.deepEqual(settings.alertState, before, 'projection must not consume Controller delivery state');
+});
+
+test('native calendar records suppress matched pathless external alerts while retaining truly unmatched events', async (t) => {
+  const now = Date.parse('2026-08-25T12:00:00.000Z');
+  const sourceUrl = 'https://calendar.invalid/native-records.ics';
+  const matchingEvent = {
+    id: 'series-native-20260827T090000',
+    uid: 'series-native',
+    occurrenceIdentity: 'series-native-20260827T090000',
+    title: 'Native calendar event',
+    description: '',
+    startDate: new Date('2026-08-27T14:00:00.000Z'),
+    endDate: new Date('2026-08-27T14:30:00.000Z'),
+    sourceUrl,
+    isAllDay: false,
+    isRecurring: true,
+  };
+  const unmatchedEvent = {
+    ...matchingEvent,
+    id: 'series-unmatched-20260828T100000',
+    uid: 'series-unmatched',
+    occurrenceIdentity: 'series-unmatched-20260828T100000',
+    title: 'Unmatched calendar event',
+    startDate: new Date('2026-08-28T15:00:00.000Z'),
+    endDate: new Date('2026-08-28T15:30:00.000Z'),
+  };
+  const nativeRecord = {
+    tpsId: 'calendar-native-regression',
+    tpsSchemaVersion: 1,
+    kind: 'calendar-event',
+    title: '[[Calendar Events/2026-08-27/Event note|Linked display title]]',
+    eventTitle: matchingEvent.title,
+    status: 'scheduled',
+    scheduled: matchingEvent.startDate.toISOString(),
+    calendarId: 'calendar-regression',
+    calendarUid: matchingEvent.uid,
+    calendarOccurrenceId: matchingEvent.id,
+    calendarOccurrenceIdentity: matchingEvent.occurrenceIdentity,
+    calendarOccurrenceKey: `calendar-regression:source:${matchingEvent.occurrenceIdentity}`,
+  };
+  const settings = {
+    calendarStorageMode: 'native-records',
+    enableReminders: true,
+    pollMinutes: 0.5,
+    reminders: [{
+      id: 'recommended-timed',
+      enabled: true,
+      property: 'scheduled',
+      mode: 'task',
+      offsetMinutes: -15,
+      repeatUntilComplete: false,
+      repeatIntervalMinutes: 5,
+      maxRepeats: -1,
+      stopConditions: [],
+      title: 'Reminder: {filename}',
+      body: 'At {time}',
+      sourceTypes: ['file', 'external-event'],
+      includeUnmatchedExternalEvents: true,
+      allDayFilter: 'false',
+    }],
+    alertState: {},
+    archiveFolder: '',
+    globalIgnorePaths: [],
+    globalIgnoreTags: [],
+    globalIgnoreStatuses: [],
+    globalIgnoreCheckboxStates: [],
+    defaultAllDayBaseTime: '09:00',
+    snoozeProperty: 'reminderSnooze',
+    canceledStatusValue: 'cancelled',
+    eventIdKey: 'externalEventId',
+    uidKey: 'tpsCalendarUid',
+    startProperty: 'scheduled',
+    endProperty: 'timeEstimate',
+    titleKey: 'title',
+    externalCalendars: [{ enabled: true, url: sourceUrl }],
+  };
+  let currentFrontmatter = nativeRecord;
+  const candidateFiles = [];
+  const engineHarness = loadCompiledReminderEngineHarness({
+    candidateFiles,
+    parseFrontmatterDate: (value) => {
+      const parsed = new Date(value);
+      return Number.isFinite(parsed.getTime()) ? parsed : null;
+    },
+    parseTimeRange: (value) => ({ start: Date.parse(String(value)), end: null }),
+    shouldIgnoreForReminder: () => false,
+    buildReminderTargetsForFile: async (_app, file) => [{
+      sourceKey: file.path,
+      sourceType: 'file',
+      targetKind: 'note',
+    }],
+    buildEffectiveReminderContextForTarget: (target, frontmatter, property) => {
+      if (target.sourceType === 'external-event') {
+        const scheduled = target.externalEvent.startDate.toISOString();
+        return {
+          frontmatter: { scheduled, title: target.externalEvent.title, status: 'scheduled' },
+          propertyValue: property === 'scheduled' ? scheduled : undefined,
+        };
+      }
+      return { frontmatter, propertyValue: frontmatter[property] };
+    },
+  });
+  const nativeFile = new engineHarness.TFile('_records/calendar-events/calendar-native-regression.md');
+  candidateFiles.push(nativeFile);
+  const app = {
+    metadataCache: { getFileCache: () => ({ frontmatter: currentFrontmatter }) },
+    vault: { getMarkdownFiles: () => [nativeFile], cachedRead: async () => '' },
+  };
+  const externalCalendarService = {
+    fetchEvents: async () => [matchingEvent, unmatchedEvent],
+  };
+  const engine = new engineHarness.ReminderEngine(app, externalCalendarService);
+
+  const schedule = await engine.projectScheduledNotifications(settings, now);
+  assert.equal(schedule.length, 2, 'the matched occurrence must not be projected once from its file and again from the feed');
+  assert.deepEqual(
+    schedule.map((item) => ({ sourcePath: item.sourcePath, sourceKey: item.sourceKey })),
+    [{
+      sourcePath: nativeFile.path,
+      sourceKey: nativeFile.path,
+    }, {
+      sourcePath: undefined,
+      sourceKey: `external-event::${sourceUrl}::${unmatchedEvent.id}`,
+    }],
+  );
+  assert.equal(schedule[0].fireAt, matchingEvent.startDate.getTime() - 15 * 60_000);
+  assert.equal(schedule[1].fireAt, unmatchedEvent.startDate.getTime() - 15 * 60_000);
+
+  const identityVariants = [{
+    label: 'calendarOccurrenceId',
+    frontmatter: {
+      scheduled: nativeRecord.scheduled,
+      calendarOccurrenceId: nativeRecord.calendarOccurrenceId,
+    },
+  }, {
+    label: 'calendarOccurrenceIdentity',
+    frontmatter: {
+      scheduled: nativeRecord.scheduled,
+      calendarOccurrenceIdentity: nativeRecord.calendarOccurrenceIdentity,
+    },
+  }, {
+    label: 'calendarUid plus scheduled',
+    frontmatter: {
+      scheduled: nativeRecord.scheduled,
+      calendarUid: nativeRecord.calendarUid,
+    },
+  }, {
+    label: 'eventTitle plus scheduled',
+    frontmatter: {
+      scheduled: nativeRecord.scheduled,
+      title: nativeRecord.title,
+      eventTitle: nativeRecord.eventTitle,
+    },
+  }];
+  for (const variant of identityVariants) {
+    await t.test(variant.label, async () => {
+      currentFrontmatter = variant.frontmatter;
+      const unmatched = await engine.buildUnmatchedExternalReminderTargets([], settings);
+      assert.deepEqual(
+        unmatched.map((target) => target.externalEvent.id),
+        [unmatchedEvent.id],
+        `${variant.label} must match the native record while preserving the real feed-only event`,
+      );
+    });
+  }
+});
+
+test('configured cancellation status globally suppresses native calendar records for recommended rules', async () => {
+  const now = Date.parse('2026-08-25T12:00:00.000Z');
+  const { parseTimeRange, shouldIgnoreForReminder } = loadTimeCalculationModule();
+  const cancelledRecord = {
+    tags: [
+      'calendar-event',
+      'tps/record/v1/calendar-event/calendar-cancelled-poc-shape',
+    ],
+    scheduled: '2026-09-25T15:00:00.000Z',
+    status: 'cancelled',
+    allDay: false,
+    calendarSyncState: 'cancelled',
+    kind: 'calendar-event',
+  };
+  const recommendedRule = {
+    id: 'reminder-standard-timed-scheduled',
+    label: 'Timed scheduled things',
+    enabled: true,
+    property: 'scheduled',
+    mode: 'task',
+    offsetMinutes: -15,
+    repeatUntilComplete: false,
+    repeatIntervalMinutes: 5,
+    maxRepeats: -1,
+    stopConditions: ['status: complete', 'status: wont-do'],
+    ignorePaths: [],
+    ignoreTags: [],
+    ignoreStatuses: [],
+    ignoreCheckboxStates: [],
+    requiredStatuses: [],
+    requiredCheckboxStates: [],
+    requiredPaths: [],
+    title: 'Reminder: {filename}',
+    body: 'At {time} ({remaining})',
+    triggerAtEnd: false,
+    sourceTypes: ['file', 'external-event'],
+    allDayFilter: 'false',
+    includeUnmatchedExternalEvents: true,
+  };
+  const settings = {
+    enableReminders: true,
+    reminders: [recommendedRule],
+    alertState: {},
+    archiveFolder: '',
+    canceledStatusValue: 'cancelled',
+    globalIgnorePaths: ['System/'],
+    globalIgnoreTags: ['archive', 'template'],
+    globalIgnoreStatuses: ['complete', 'wont-do'],
+    globalIgnoreCheckboxStates: ['x', '-'],
+    defaultAllDayBaseTime: '09:00',
+    snoozeProperty: 'reminderSnooze',
+    externalCalendars: [],
+  };
+  const candidateFiles = [];
+  const engineHarness = loadCompiledReminderEngineHarness({
+    candidateFiles,
+    shouldIgnoreForReminder,
+    parseTimeRange,
+    buildReminderTargetsForFile: async () => [{
+      sourceKey: '2026-09-25 - Canceled event.md',
+      sourceType: 'file',
+      targetKind: 'note',
+      reminderTags: cancelledRecord.tags.map((tag) => `#${tag}`),
+    }],
+    buildEffectiveReminderContextForTarget: (_target, baseFrontmatter) => ({
+      frontmatter: baseFrontmatter,
+      propertyValue: baseFrontmatter.scheduled,
+    }),
+  });
+  const nativeFile = new engineHarness.TFile('2026-09-25 - Canceled event.md');
+  candidateFiles.push(nativeFile);
+  const app = {
+    metadataCache: { getFileCache: () => ({ frontmatter: cancelledRecord }) },
+    vault: { getMarkdownFiles: () => [nativeFile], cachedRead: async () => '' },
+  };
+  const engine = new engineHarness.ReminderEngine(app, {});
+
+  assert.deepEqual(await engine.projectScheduledNotifications(settings, now), []);
+
+  const customCancelledRecord = { ...cancelledRecord, status: 'Declined' };
+  settings.canceledStatusValue = 'declined';
+  app.metadataCache.getFileCache = () => ({ frontmatter: customCancelledRecord });
+  assert.deepEqual(
+    await engine.projectScheduledNotifications(settings, now),
+    [],
+    'custom configured cancellation values are terminal and case-insensitive',
+  );
+
+  const scheduledRecord = { ...cancelledRecord, status: 'scheduled', calendarSyncState: 'current' };
+  settings.canceledStatusValue = 'cancelled';
+  app.metadataCache.getFileCache = () => ({ frontmatter: scheduledRecord });
+  const projected = await engine.projectScheduledNotifications(settings, now);
+  assert.equal(projected.length, 1, 'the matching recommended rule still projects an active occurrence');
+  assert.equal(projected[0].fireAt, Date.parse(scheduledRecord.scheduled) - 15 * 60_000);
 });
 
 test('master reminder switch keeps the audit list and native schedule projection empty in parity', async () => {
@@ -670,6 +1066,321 @@ test('native schedule projects the deterministic next occurrence for an overdue 
   settings.reminders[0].maxRepeats = 4;
   const exhausted = await engine.projectScheduledNotifications(settings, now);
   assert.equal(exhausted.length, 0, 'the projection honors the Controller repeat limit');
+});
+
+test('native trigger-base repeats stay on the logical cadence and stop strictly before the base', async () => {
+  const now = Date.parse('2026-08-15T13:40:00.000Z');
+  const triggerBase = Date.parse('2026-08-15T14:00:00.000Z');
+  const settings = {
+    enableReminders: true,
+    pollMinutes: 1.5,
+    reminders: [{
+      id: 'pre-event-cadence',
+      enabled: true,
+      property: 'scheduled',
+      offsetMinutes: -15,
+      repeatUntilComplete: true,
+      repeatIntervalMinutes: 5,
+      maxRepeats: -1,
+      repeatEndAt: 'trigger-base',
+      stopConditions: [],
+      title: 'Reminder: {filename}',
+      body: 'At {time}',
+      sourceTypes: ['file'],
+      allDayFilter: 'false',
+    }],
+    alertState: {},
+    archiveFolder: '_archive',
+    globalIgnorePaths: [],
+    globalIgnoreTags: [],
+    globalIgnoreStatuses: [],
+    globalIgnoreCheckboxStates: [],
+    defaultAllDayBaseTime: '09:00',
+    snoozeProperty: 'reminderSnooze',
+    externalCalendars: [],
+  };
+  const candidateFiles = [];
+  const engineHarness = loadCompiledReminderEngineHarness({
+    candidateFiles,
+    shouldIgnoreForReminder: () => false,
+    parseTimeRange: () => ({ start: triggerBase, end: null }),
+    buildReminderTargetsForFile: async () => [{
+      sourceKey: 'Calendar/Event.md',
+      sourceType: 'file',
+      targetKind: 'note',
+      reminderTags: ['calendar-event'],
+    }],
+    buildEffectiveReminderContextForTarget: () => ({
+      frontmatter: { scheduled: '2026-08-15T14:00:00.000Z' },
+      propertyValue: '2026-08-15T14:00:00.000Z',
+    }),
+  });
+  const nativeFile = new engineHarness.TFile('Calendar/Event.md');
+  candidateFiles.push(nativeFile);
+  const app = {
+    metadataCache: { getFileCache: () => ({ frontmatter: { scheduled: '2026-08-15T14:00:00.000Z' } }) },
+    vault: { getMarkdownFiles: () => [nativeFile], cachedRead: async () => '' },
+  };
+  const engine = new engineHarness.ReminderEngine(app, {});
+
+  const schedule = await engine.projectScheduledNotifications(settings, now);
+  assert.deepEqual(
+    schedule.map((item) => item.fireAt),
+    [
+      Date.parse('2026-08-15T13:45:00.000Z'),
+      Date.parse('2026-08-15T13:50:00.000Z'),
+      Date.parse('2026-08-15T13:55:00.000Z'),
+    ],
+    'the projected cadence matches foreground semantics and never manufactures an at-base follow-up',
+  );
+  assert.equal(new Set(schedule.map((item) => item.sourceKey)).size, 1);
+  assert.deepEqual(settings.alertState, {}, 'projection remains read-only');
+
+  settings.reminders[0].maxRepeats = 1;
+  const finite = await engine.projectScheduledNotifications(settings, now);
+  assert.deepEqual(
+    finite.map((item) => item.fireAt),
+    [Date.parse('2026-08-15T13:45:00.000Z'), Date.parse('2026-08-15T13:50:00.000Z')],
+    'maxRepeats counts follow-ups after the initial occurrence',
+  );
+});
+
+test('live-shaped calendar filtering gives the eligible pre-event rule one repeated series', async () => {
+  const now = Date.parse('2026-08-15T13:40:00.000Z');
+  const triggerBase = Date.parse('2026-08-15T14:00:00.000Z');
+  const time = loadTimeCalculationModule();
+  const settings = {
+    enableReminders: true,
+    pollMinutes: 1.5,
+    reminders: [{
+      id: 'fifteen-minutes-before',
+      enabled: true,
+      property: 'scheduled',
+      offsetMinutes: -15,
+      repeatUntilComplete: true,
+      repeatIntervalMinutes: 5,
+      maxRepeats: -1,
+      repeatEndAt: 'trigger-base',
+      stopConditions: [],
+      ignoreTags: ['dailynote'],
+      title: 'Reminder: {filename}',
+      body: 'At {time}',
+      sourceTypes: ['file', 'external-event'],
+      allDayFilter: 'false',
+    }, {
+      id: 'post-end-until-complete',
+      enabled: true,
+      property: 'scheduled',
+      offsetMinutes: 15,
+      triggerAtEnd: true,
+      repeatUntilComplete: true,
+      repeatIntervalMinutes: 5,
+      maxRepeats: -1,
+      repeatEndAt: 'stop-condition',
+      stopConditions: ['status: complete'],
+      ignoreTags: ['calendar-event', 'dailynote', 'health'],
+      title: 'Still due: {filename}',
+      body: 'At {time}',
+      sourceTypes: ['file'],
+      allDayFilter: 'false',
+    }],
+    alertState: {},
+    archiveFolder: '_archive',
+    globalIgnorePaths: [],
+    globalIgnoreTags: [],
+    globalIgnoreStatuses: [],
+    globalIgnoreCheckboxStates: [],
+    defaultAllDayBaseTime: '09:00',
+    snoozeProperty: 'reminderSnooze',
+    canceledStatusValue: 'cancelled',
+    externalCalendars: [],
+  };
+  const candidateFiles = [];
+  const engineHarness = loadCompiledReminderEngineHarness({
+    candidateFiles,
+    shouldIgnoreForReminder: time.shouldIgnoreForReminder,
+    parseTimeRange: () => ({ start: triggerBase, end: triggerBase + 30 * 60 * 1000 }),
+    buildReminderTargetsForFile: async () => [{
+      sourceKey: 'Calendar/Event.md',
+      sourceType: 'file',
+      targetKind: 'note',
+      reminderTags: ['calendar-event'],
+    }],
+    buildEffectiveReminderContextForTarget: (_target, frontmatter, property) => ({
+      frontmatter,
+      propertyValue: frontmatter[property],
+    }),
+  });
+  const nativeFile = new engineHarness.TFile('Calendar/Event.md');
+  candidateFiles.push(nativeFile);
+  const frontmatter = {
+    kind: 'calendar-event',
+    status: 'scheduled',
+    scheduled: '2026-08-15T14:00:00.000Z',
+    end: '2026-08-15T14:30:00.000Z',
+    allDay: false,
+  };
+  const app = {
+    metadataCache: { getFileCache: () => ({ frontmatter }) },
+    vault: { getMarkdownFiles: () => [nativeFile], cachedRead: async () => '' },
+  };
+  const engine = new engineHarness.ReminderEngine(app, {});
+
+  const schedule = await engine.projectScheduledNotifications(settings, now);
+  assert.equal(schedule.length, 3);
+  assert.deepEqual(
+    schedule.map((item) => [item.reminderId, item.fireAt]),
+    [
+      ['fifteen-minutes-before', Date.parse('2026-08-15T13:45:00.000Z')],
+      ['fifteen-minutes-before', Date.parse('2026-08-15T13:50:00.000Z')],
+      ['fifteen-minutes-before', Date.parse('2026-08-15T13:55:00.000Z')],
+    ],
+  );
+  assert.equal(
+    schedule.some((item) => item.reminderId === 'post-end-until-complete'),
+    false,
+    'the separately configured post-end rule remains excluded for calendar events',
+  );
+});
+
+test('native trigger-base catch-up never invents an at-base repeat but preserves an offset-zero initial', async () => {
+  const triggerBase = Date.parse('2026-08-15T14:00:00.000Z');
+  const settings = {
+    enableReminders: true,
+    pollMinutes: 1.5,
+    reminders: [{
+      id: 'pre-event-cadence',
+      enabled: true,
+      property: 'scheduled',
+      offsetMinutes: -15,
+      repeatUntilComplete: true,
+      repeatIntervalMinutes: 5,
+      maxRepeats: -1,
+      repeatEndAt: 'trigger-base',
+      stopConditions: [],
+      title: 'Reminder: {filename}',
+      body: 'At {time}',
+      sourceTypes: ['file'],
+      allDayFilter: 'false',
+    }],
+    alertState: {},
+    archiveFolder: '_archive',
+    globalIgnorePaths: [],
+    globalIgnoreTags: [],
+    globalIgnoreStatuses: [],
+    globalIgnoreCheckboxStates: [],
+    defaultAllDayBaseTime: '09:00',
+    snoozeProperty: 'reminderSnooze',
+    externalCalendars: [],
+  };
+  const candidateFiles = [];
+  const engineHarness = loadCompiledReminderEngineHarness({
+    candidateFiles,
+    shouldIgnoreForReminder: () => false,
+    parseTimeRange: () => ({ start: triggerBase, end: null }),
+    buildReminderTargetsForFile: async () => [{
+      sourceKey: 'Calendar/Event.md',
+      sourceType: 'file',
+      targetKind: 'note',
+      reminderTags: ['calendar-event'],
+    }],
+    buildEffectiveReminderContextForTarget: () => ({
+      frontmatter: { scheduled: '2026-08-15T14:00:00.000Z' },
+      propertyValue: '2026-08-15T14:00:00.000Z',
+    }),
+  });
+  const nativeFile = new engineHarness.TFile('Calendar/Event.md');
+  candidateFiles.push(nativeFile);
+  const app = {
+    metadataCache: { getFileCache: () => ({ frontmatter: { scheduled: '2026-08-15T14:00:00.000Z' } }) },
+    vault: { getMarkdownFiles: () => [nativeFile], cachedRead: async () => '' },
+  };
+  const engine = new engineHarness.ReminderEngine(app, {});
+
+  const catchUp = await engine.projectScheduledNotifications(
+    settings,
+    Date.parse('2026-08-15T13:58:00.000Z'),
+  );
+  assert.deepEqual(catchUp, [], 'the next cadence point at the trigger base is not a repeat');
+
+  settings.reminders[0].offsetMinutes = 0;
+  const initialAtBase = await engine.projectScheduledNotifications(
+    settings,
+    Date.parse('2026-08-15T13:58:00.000Z'),
+  );
+  assert.deepEqual(
+    initialAtBase.map((item) => item.fireAt),
+    [triggerBase],
+    'an offset-zero initial occurrence remains valid at the trigger base',
+  );
+  assert.deepEqual(settings.alertState, {}, 'catch-up projection remains read-only');
+});
+
+test('foreground trigger-base evaluation suppresses pre-event catch-up at the base but preserves an offset-zero initial', () => {
+  const triggerBase = Date.parse('2026-08-15T14:00:00.000Z');
+  const settings = {
+    enableReminders: true,
+    pollMinutes: 1.5,
+    reminders: [{
+      id: 'pre-event-cadence',
+      enabled: true,
+      property: 'scheduled',
+      offsetMinutes: -15,
+      repeatUntilComplete: true,
+      repeatIntervalMinutes: 5,
+      maxRepeats: -1,
+      repeatEndAt: 'trigger-base',
+      stopConditions: [],
+      title: 'Reminder: {filename}',
+      body: 'At {time}',
+      sourceTypes: ['file'],
+      allDayFilter: 'false',
+    }],
+    alertState: {},
+    archiveFolder: '_archive',
+    globalIgnorePaths: [],
+    globalIgnoreTags: [],
+    globalIgnoreStatuses: [],
+    globalIgnoreCheckboxStates: [],
+    defaultAllDayBaseTime: '09:00',
+    snoozeProperty: 'reminderSnooze',
+    externalCalendars: [],
+  };
+  const engineHarness = loadCompiledReminderEngineHarness({
+    shouldIgnoreForReminder: () => false,
+    parseTimeRange: () => ({ start: triggerBase, end: null }),
+    buildEffectiveReminderContextForTarget: () => ({
+      frontmatter: { scheduled: '2026-08-15T14:00:00.000Z' },
+      propertyValue: '2026-08-15T14:00:00.000Z',
+    }),
+  });
+  const nativeFile = new engineHarness.TFile('Calendar/Event.md');
+  const target = {
+    sourceKey: nativeFile.path,
+    sourceType: 'file',
+    targetKind: 'note',
+    reminderTags: ['calendar-event'],
+  };
+  const engine = new engineHarness.ReminderEngine({}, {});
+  const evaluate = () => engine.evaluateTarget({
+    target,
+    fileRef: nativeFile,
+    cache: { frontmatter: { scheduled: '2026-08-15T14:00:00.000Z' } },
+    baseFrontmatter: { scheduled: '2026-08-15T14:00:00.000Z' },
+    settings,
+    now: triggerBase,
+    alertState: settings.alertState,
+  });
+
+  const preEvent = evaluate();
+  assert.deepEqual(preEvent.notifications, [], 'an empty foreground state cannot catch up at-time');
+  assert.equal(settings.alertState[nativeFile.path]['pre-event-cadence'].triggered, true);
+
+  settings.reminders[0].offsetMinutes = 0;
+  settings.alertState = {};
+  const atBaseInitial = evaluate();
+  assert.equal(atBaseInitial.notifications.length, 1, 'an offset-zero initial remains valid at its base');
+  assert.equal(settings.alertState[nativeFile.path]['pre-event-cadence'].lastSent, triggerBase);
 });
 
 test('native schedule keeps an hours-overdue five-minute rule alive while Obsidian is suspended', async () => {
@@ -1153,13 +1864,39 @@ test('reminder target builder does not create task targets from fenced markdown 
   assert.equal(taskTargets[0].taskLine, 4);
 });
 
+test('native calendar reminders use the semantic event title instead of a wikilink or dated filename', async () => {
+  const { buildReminderDisplayName, buildReminderTargetsForFile } = loadReminderTargetModule();
+  const app = { vault: { cachedRead: async () => '' } };
+  const file = {
+    path: '2026-08-28 - Readable event record.md',
+    basename: '2026-08-28 - Readable event record',
+    extension: 'md',
+  };
+  const frontmatter = {
+    kind: 'calendar-event',
+    eventTitle: '  Semantic\n event   title  ',
+    title: '[[2026-08-28 - Readable event record|Linked event title]]',
+    scheduled: '2026-08-28T14:00:00.000Z',
+  };
+
+  const [target] = await buildReminderTargetsForFile(app, file, frontmatter, {});
+
+  assert.equal(target.noteTitle, 'Semantic event title');
+  assert.equal(buildReminderDisplayName(file, target), 'Semantic event title');
+  assert.doesNotMatch(buildReminderDisplayName(file, target), /\[\[|2026-08-28/);
+
+  const regularFile = { basename: 'Project Notes' };
+  assert.equal(buildReminderDisplayName(regularFile, { sourceType: 'file' }), 'Project Notes');
+});
+
 test('task-level reminder targets preserve task title and containing note', () => {
   assert.match(reminderTargetSource, /parseTaskReminderLine/);
   assert.match(reminderTargetSource, /sourceKey: `\$\{file\.path\}::task:\$\{index\}`/);
   assert.match(reminderTargetSource, /targetKind: "task"/);
   assert.match(reminderTargetSource, /taskTitle: parsed\.title/);
   assert.match(reminderTargetSource, /taskRawLine: lines\[index\]/);
-  assert.match(reminderTargetSource, /noteTitle: buildNoteDisplayName\(file\)/);
+  assert.match(reminderTargetSource, /const noteTitle = buildNoteDisplayName\(file, frontmatter\)/);
+  assert.match(reminderTargetSource, /noteTitle,/);
   assert.match(reminderTargetSource, /props\[key\.toLowerCase\(\)\] = value/);
   assert.match(overdueSource, /taskTitle: target\.taskTitle/);
   assert.match(overdueSource, /taskRawLine: target\.taskRawLine/);

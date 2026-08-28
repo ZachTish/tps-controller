@@ -148,7 +148,7 @@ export interface TishOSCommandBridgeRefreshResult {
 
 interface TishOSCommandBridgeRefreshOutcome extends TishOSCommandBridgeRefreshResult {
     readyPairings: Array<{ clientID: string; generation: string; platform: TishOSPlatform }>;
-    nativeNotificationInvalidationPlatforms: TishOSPlatform[];
+    nativeNotificationRemovedSeriesPlatforms: TishOSPlatform[];
 }
 
 interface NativeNotificationRefreshOutcome {
@@ -632,10 +632,19 @@ export class TishOSCommandBridgeService {
         };
         void operation.then((outcome) => {
             clear();
-            this.returnToTishOSIfReady(outcome.readyPairings);
-            this.returnToTishOSForNativeNotificationInvalidation(
-                outcome.nativeNotificationInvalidationPlatforms,
-            );
+            this.returnToTishOSAfterPairingIfReady(outcome.readyPairings);
+            if (outcome.nativeNotificationRemovedSeriesPlatforms.length > 0) {
+                // Publication is intentionally passive. iOS does not offer one
+                // app a supported way to wake another app in the background or
+                // cancel notification requests owned by that other app. TishOS
+                // will reconcile this signed replacement schedule at its next
+                // foreground or system-granted background refresh.
+                logger.flow(
+                    "TishOSCommandBridge",
+                    "native-notification-refresh:receiver-reconciliation-pending",
+                    { platforms: outcome.nativeNotificationRemovedSeriesPlatforms },
+                );
+            }
         }, clear);
         return operation;
     }
@@ -662,7 +671,7 @@ export class TishOSCommandBridgeService {
 
         let nativeNotificationReadyClientIDs: Set<string> | null = null;
         const nativeNotificationFailedClientIDs = new Set<string>();
-        const nativeNotificationInvalidationPlatforms = new Set<TishOSPlatform>();
+        const nativeNotificationRemovedSeriesPlatforms = new Set<TishOSPlatform>();
         if (this.notificationScheduleProvider) {
             nativeNotificationReadyClientIDs = new Set<string>();
             let readiness: { ready: boolean; reason?: string } = { ready: true };
@@ -698,7 +707,7 @@ export class TishOSCommandBridgeService {
                         nativeNotificationFailedClientIDs.add(clientID);
                     }
                     for (const platform of notificationRefresh.invalidationPlatforms) {
-                        nativeNotificationInvalidationPlatforms.add(platform);
+                        nativeNotificationRemovedSeriesPlatforms.add(platform);
                     }
                 } catch (error) {
                     for (const pairing of clients) {
@@ -893,7 +902,7 @@ export class TishOSCommandBridgeService {
             invalidCommands: normalized.invalidCount,
             ambiguousCommands: normalized.ambiguousDuplicateCount,
             readyPairings,
-            nativeNotificationInvalidationPlatforms: [...nativeNotificationInvalidationPlatforms],
+            nativeNotificationRemovedSeriesPlatforms: [...nativeNotificationRemovedSeriesPlatforms],
             ...(unavailableReason ? { unavailableReason } : {}),
         };
     }
@@ -2275,7 +2284,7 @@ export class TishOSCommandBridgeService {
         if (this.refreshPromise === active) this.refreshPromise = null;
     }
 
-    private returnToTishOSIfReady(
+    private returnToTishOSAfterPairingIfReady(
         readyPairings: ReadonlyArray<{
             clientID: string;
             generation: string;
@@ -2365,28 +2374,6 @@ export class TishOSCommandBridgeService {
         }
     }
 
-    private returnToTishOSForNativeNotificationInvalidation(
-        platforms: readonly TishOSPlatform[],
-    ): void {
-        if (this.stopped || !platforms.some((platform) => platform === "ios" || platform === "ipados")) {
-            return;
-        }
-        logger.flow("TishOSCommandBridge", "native-notification-invalidation:return-to-tishos", {
-            platforms,
-        });
-        try {
-            // A signed schedule can replace future reminder series while iOS
-            // still owns requests from the prior publication. Bringing TishOS
-            // forward is the only same-device path that lets it verify the new
-            // file and remove those requests from Apple's queue immediately.
-            window.location.assign("tishos://controller-refresh?v=1");
-        } catch (error) {
-            logger.flowWarn("TishOSCommandBridge", "native-notification-invalidation:return-failed", {
-                errorType: this.errorType(error),
-            });
-        }
-    }
-
     private pairingStorageKey(): string {
         return "tps-controller:command-bridge:pairings:v1";
     }
@@ -2454,7 +2441,7 @@ export class TishOSCommandBridgeService {
             invalidCommands: 0,
             ambiguousCommands: 0,
             readyPairings: [],
-            nativeNotificationInvalidationPlatforms: [],
+            nativeNotificationRemovedSeriesPlatforms: [],
             unavailableReason: reason,
         };
     }

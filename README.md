@@ -1,5 +1,20 @@
 # TPS Controller
 
+## 0.11.6 deterministic bounded reminder repeats
+
+- **Repeat until scheduled time** now projects the rule's finite cadence into signed TishOS schedules. A reminder beginning 15 minutes early and repeating every five minutes produces exact one-shot occurrences at −15, −10, and −5 minutes, never an accidental at-time or post-event alert.
+- Repeat timestamps stay anchored to the logical reminder time rather than polling, scanning, publication, or request-add latency. `maxRepeats` continues to count follow-ups after the first occurrence.
+- Production-shaped filtering tests prove an eligible calendar reminder creates one repeated series while a separately configured post-end rule that ignores calendar events remains excluded. This prevents the unsafe alternative of enabling an unlimited five-minute rule for every calendar record, which would starve ordinary reminders at the Controller and Apple queue limits.
+- This backward-compatible patch changes no signed-schedule schema, pairing credential, note format, or automatic rule migration. Existing users opt into the cadence by selecting **Repeat until scheduled time** on the reminder rule that owns the first alert. Minimum supported Obsidian remains 1.12.0.
+
+## 0.11.5 correct and passive native reminders
+
+- Canonical ISO `Z` and offset timestamps are parsed before legacy embedded-date syntax, so native calendar alerts retain their actual instant instead of collapsing to midnight or shifting by the local UTC offset.
+- Native calendar files match their feed occurrences through `calendarOccurrenceId`, `calendarOccurrenceIdentity`, `calendarUid`, and `eventTitle`; matched events produce one path-backed alert rather than a duplicate pathless alert.
+- Native calendar reminders use the semantic `eventTitle`, and the configured cancellation status is terminal across projection, delivery, and overdue views.
+- Replacing a signed schedule is passive. Controller no longer opens TishOS automatically when a future reminder series disappears; TishOS reconciles at its next foreground or system-granted background refresh. Explicit pairing and settings buttons remain foreground handoffs.
+- This local compatibility build changes no Controller settings or signed schedule schema. Minimum supported Obsidian remains 1.12.0.
+
 ## 0.11.4 index-wide native-calendar self-link repair
 
 - Every native-record calendar sync now repairs the clickable `title` self-link of every indexed schema-v1 `calendar-event` before remote feeds are fetched or filtered. Existing records therefore adopt their own current file path even when their calendar is disabled, its feed fails, the event is outside the current sync window, or its title matches the exclusion filter.
@@ -106,6 +121,12 @@
 - Migration writes the destination first, removes only the exact captured source block, and rolls the destination insertion back if source confirmation fails. Duplicate, ambiguous, malformed, concurrently edited, or unreadable records fail closed. Single-target-note calendars continue updating in place.
 - Existing task lines are not bulk rewritten. A previously synced task adopts the linked-title metadata when a later sync safely reconciles that exact task. Linked-note folders may be created, but the linked note itself is created only when the user opens an unresolved link.
 - Focused regression coverage includes daily/series link identity, title changes, source/feed collisions, stale hidden note-folder settings, successful child-block moves, concurrent source edits with rollback, ordinary-event ID drift, and recurring UID ambiguity. All 20 declared test files and the required separate production build passed with three preserved historical comparison skips. Obsidian 1.13.7 reloaded only **Obsidian Plugin Test Vault**, loaded Controller 0.10.0, and retained the healthy 11-row TPS List task fixture. Source and test-runtime artifacts are byte-identical (`main.js` `eb25d329af92ea4dd628fb7b1e569b1fb8657d5a9195d3d3f6d3c81f47699272`, `manifest.json` `992868aae8c865d1ea49ae1288b5f78b499556b7dec352cec485653c58c58140`, `styles.css` `2da24f2a872483deb0ccc2944fb3b05c1b8a4e6b9f90b3290a3fabb86ec06999`). Minimum supported Obsidian remains 1.12.0; production was not accessed or promoted.
+
+## Silent mobile native-notification publication
+
+- Publishing or replacing a signed TishOS notification schedule is passive and never opens or foregrounds TishOS. This includes removing a future reminder series after a task is completed, deleted, disabled, or filtered out.
+- TishOS verifies the replacement file and reconciles Apple's notification queue at its next foreground refresh or system-granted background refresh. Until that refresh, iOS may retain an already-scheduled obsolete request.
+- iOS does not expose a supported mechanism for one sandboxed app to wake another app silently or cancel notification requests owned by it. Custom-scheme and universal-link handoffs necessarily foreground their destination, so Controller reserves them for explicit user actions such as pairing, settings, and notification actions.
 
 ## 0.9.3 bounded notification publication
 

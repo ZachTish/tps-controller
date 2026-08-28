@@ -10,11 +10,25 @@ function isDateOnlyMidnightValue(value: string): boolean {
     return /^\d{4}-\d{2}-\d{2}(?:[ T]00:00(?::00(?:\.000)?)?(?:Z|[+-]00:00)?)?$/.test(value);
 }
 
+const CANONICAL_ISO_TIMESTAMP_PATTERN =
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function parseCanonicalIsoTimestamp(value: string): number | null {
+    if (!CANONICAL_ISO_TIMESTAMP_PATTERN.test(value)) return null;
+    const parsed = moment(value, moment.ISO_8601, true);
+    return parsed.isValid() ? parsed.valueOf() : null;
+}
+
 export function parseDate(input: any): number | null {
     if (!input) return null;
     let raw = Array.isArray(input) ? input[0] : input;
     if (!raw) return null;
-    raw = String(raw).replace(/[\[\]]/g, '');
+    raw = String(raw).replace(/[\[\]]/g, '').trim();
+
+    // Native records use canonical ISO-8601 instants. Parse those before the
+    // permissive embedded-date path below can discard the `T` time and zone.
+    const directCanonicalTimestamp = parseCanonicalIsoTimestamp(raw);
+    if (directCanonicalTimestamp !== null) return directCanonicalTimestamp;
 
     // Handle property ranges - extract START only
     if (typeof raw === 'string') {
@@ -27,6 +41,10 @@ export function parseDate(input: any): number | null {
                 raw = compactMatch[1];
             }
         }
+
+        // A range may contain a canonical timestamp as its first value.
+        const rangeCanonicalTimestamp = parseCanonicalIsoTimestamp(raw);
+        if (rangeCanonicalTimestamp !== null) return rangeCanonicalTimestamp;
 
         // Extract date from strings
         const dateTimeMatch = raw.match(/(\d{4}-\d{2}-\d{2})(?:\s+(\d{1,2}:\d{2}(?:\s*[AP]M?)?))?/i);
@@ -334,6 +352,7 @@ export function shouldIgnoreForReminder(
     globalIgnoreStatuses: string[],
     globalIgnoreCheckboxStates: string[] = [],
     targetTags?: string[],
+    canceledStatusValue?: unknown,
 ): boolean {
     // Always merge global paths with per-reminder paths so global protections
     // (vault root, _ folders, etc.) apply even when a reminder overrides the list.
@@ -372,7 +391,13 @@ export function shouldIgnoreForReminder(
     if (statuses.has("migrated") || checkboxStates.has(">")) {
         return true;
     }
-    const normalizedIgnoreStatuses = ignoreStatuses.map(s => normalizeStatus(s)).filter(Boolean);
+    // A configured cancellation status is terminal for every reminder
+    // surface. Treat it as an implicit global ignore so custom and
+    // recommended rules cannot accidentally notify for cancelled calendar
+    // records merely because their own ignore/stop lists omit that value.
+    const normalizedIgnoreStatuses = [...ignoreStatuses, canceledStatusValue]
+        .map(s => normalizeStatus(s))
+        .filter(Boolean);
     if (normalizedIgnoreStatuses.some(s => statuses.has(s))) {
         return true;
     }

@@ -328,6 +328,7 @@ export class ReminderEngine {
                 settings.globalIgnoreStatuses,
                 settings.globalIgnoreCheckboxStates,
                 target.reminderTags,
+                settings.canceledStatusValue,
             )) continue;
             const { start: propTime, end: rangeEndTime } = parseTimeRange(propValue);
             if (!propTime || !hasRequiredStatus(effectiveFm, reminder) || !hasRequiredCheckboxState(effectiveFm, reminder)) {
@@ -414,7 +415,10 @@ export class ReminderEngine {
                 }
             }
             if (fireAt > horizonEnd) continue;
-            if (reminder.repeatEndAt === "trigger-base" && fireAt > finalTriggerBase) continue;
+            if (
+                reminder.repeatEndAt === "trigger-base" &&
+                (fireAt > finalTriggerBase || (repeatOrdinal > 0 && fireAt >= finalTriggerBase))
+            ) continue;
 
             const time = moment(propTime).format("h:mm A");
             const displayName = buildReminderDisplayName(fileRef, target);
@@ -454,12 +458,13 @@ export class ReminderEngine {
                 projectedOccurrenceCount += 1;
                 if (
                     !reminder.repeatUntilComplete
-                    || reminder.repeatEndAt === "trigger-base"
                     || projectedOccurrenceCount >= 128
                 ) break;
                 repeatOrdinal += 1;
                 if (repeatOrdinal > maximumRepeatOrdinal) break;
-                fireAt += repeatMs;
+                const nextFireAt = fireAt + repeatMs;
+                if (reminder.repeatEndAt === "trigger-base" && nextFireAt >= finalTriggerBase) break;
+                fireAt = nextFireAt;
             } while (fireAt <= horizonEnd);
         }
         return items;
@@ -566,6 +571,7 @@ export class ReminderEngine {
                 settings.globalIgnoreStatuses,
                 settings.globalIgnoreCheckboxStates,
                 target.reminderTags,
+                settings.canceledStatusValue,
             )) {
                 this.countSkip(params.stats, "ignored");
                 continue;
@@ -703,7 +709,14 @@ export class ReminderEngine {
                 continue;
             }
 
-            if (repeatEndsAtTriggerBase && params.now > finalTriggerBase) {
+            const preTriggerCadenceReachedBase =
+                repeatEndsAtTriggerBase &&
+                params.now === finalTriggerBase &&
+                triggerTime < finalTriggerBase;
+            if (
+                repeatEndsAtTriggerBase &&
+                (params.now > finalTriggerBase || preTriggerCadenceReachedBase)
+            ) {
                 if (!state.triggered || state.lastTriggerKey !== triggerKey) {
                     state.triggered = true;
                     state.repeatCount = 0;
@@ -958,28 +971,42 @@ export class ReminderEngine {
         for (const file of files) {
             const cache = this.app.metadataCache.getFileCache(file);
             const fm = (cache?.frontmatter || {}) as Record<string, unknown>;
-            const eventId = this.normalizeIdentityValue(
-                this.findKeyInsensitive(fm, settings.eventIdKey) ?? this.findKeyInsensitive(fm, "externalEventId"),
-            );
-            const uidValue = this.normalizeIdentityValue(
-                this.findKeyInsensitive(fm, settings.uidKey) ?? this.findKeyInsensitive(fm, "tpsCalendarUid"),
-            );
-            const startValue = this.normalizeIdentityValue(
-                this.findKeyInsensitive(fm, settings.startProperty) ?? this.findKeyInsensitive(fm, "scheduled"),
-            );
-            const titleValue = this.normalizeIdentityValue(
-                this.findKeyInsensitive(fm, settings.titleKey) ?? file.basename,
-            );
+            const fileEventIds = this.findIdentityValues(fm, [
+                settings.eventIdKey,
+                "externalEventId",
+                "calendarOccurrenceId",
+                "calendarOccurrenceIdentity",
+            ]);
+            const fileUids = this.findIdentityValues(fm, [
+                settings.uidKey,
+                "tpsCalendarUid",
+                "calendarUid",
+            ]);
+            const startDates = this.findIdentityValues(fm, [settings.startProperty, "scheduled"])
+                .map((value) => parseFrontmatterDate(value))
+                .filter((value): value is Date => !!value && Number.isFinite(value.getTime()));
+            const titleValues = this.findIdentityValues(fm, ["eventTitle", settings.titleKey]);
+            if (!titleValues.length) {
+                const basename = this.normalizeIdentityValue(file.basename);
+                if (basename) titleValues.push(basename);
+            }
 
-            if (eventId) eventIds.add(eventId);
+            for (const eventId of fileEventIds) eventIds.add(eventId);
 
-            const startDate = startValue ? parseFrontmatterDate(startValue) : null;
-            const uidForMatch = uidValue || (eventId ? this.extractUid(eventId) || eventId : null);
-            const uidStartKey = this.buildUidStartKey(uidForMatch, startDate);
-            if (uidStartKey) uidStartKeys.add(uidStartKey);
-
-            const titleDayKey = this.buildTitleDayKey(titleValue, startDate);
-            if (titleDayKey) titleDayKeys.add(titleDayKey);
+            const uidCandidates = new Set(fileUids);
+            for (const eventId of fileEventIds) {
+                uidCandidates.add(this.extractUid(eventId) || eventId);
+            }
+            for (const startDate of startDates) {
+                for (const uid of uidCandidates) {
+                    const uidStartKey = this.buildUidStartKey(uid, startDate);
+                    if (uidStartKey) uidStartKeys.add(uidStartKey);
+                }
+                for (const title of titleValues) {
+                    const titleDayKey = this.buildTitleDayKey(title, startDate);
+                    if (titleDayKey) titleDayKeys.add(titleDayKey);
+                }
+            }
 
             if (file.extension?.toLowerCase() === "md") {
                 try {
@@ -1087,7 +1114,10 @@ export class ReminderEngine {
     }
 
     private matchesLocalEvent(index: LocalEventMatchIndex, event: ExternalCalendarEvent): boolean {
-        if (index.eventIds.has(event.id)) return true;
+        const externalIdentities = [event.id, event.occurrenceIdentity]
+            .map((value) => this.normalizeIdentityValue(value))
+            .filter((value): value is string => !!value);
+        if (externalIdentities.some((identity) => index.eventIds.has(identity))) return true;
 
         const uidStartKey = this.buildUidStartKey(event.uid || this.extractUid(event.id) || event.id, event.startDate);
         if (uidStartKey && index.uidStartKeys.has(uidStartKey)) return true;
@@ -1115,6 +1145,19 @@ export class ReminderEngine {
         const normalized = String(key || "").trim().toLowerCase();
         const found = Object.keys(obj).find((candidate) => candidate.trim().toLowerCase() === normalized);
         return found ? obj[found] : undefined;
+    }
+
+    private findIdentityValues(obj: Record<string, unknown>, keys: string[]): string[] {
+        const values = new Set<string>();
+        const visitedKeys = new Set<string>();
+        for (const key of keys) {
+            const normalizedKey = String(key || "").trim().toLowerCase();
+            if (!normalizedKey || visitedKeys.has(normalizedKey)) continue;
+            visitedKeys.add(normalizedKey);
+            const value = this.normalizeIdentityValue(this.findKeyInsensitive(obj, key));
+            if (value) values.add(value);
+        }
+        return [...values];
     }
 
     private normalizeIdentityValue(value: unknown): string | null {

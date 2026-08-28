@@ -668,7 +668,7 @@ test("paired clients receive a signed Controller-rule notification schedule that
   assert.equal(modalVisible.items[0].fireAt, new Date(NOW - 4 * 60 * 1000).toISOString());
 });
 
-test("removing a pending reminder series hands iOS back to TishOS to invalidate Apple's queue", async (t) => {
+test("removing a pending reminder series publishes silently for TishOS's next refresh", async (t) => {
   let schedule = [{
     title: "Repeating task",
     body: "First series",
@@ -693,15 +693,19 @@ test("removing a pending reminder series hands iOS back to TishOS to invalidate 
   const result = await harness.service.refreshCatalogs("task-deleted");
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.deepEqual(result.nativeNotificationInvalidationPlatforms, ["ios"]);
-  assert.deepEqual(harness.openedURLs, ["tishos://controller-refresh?v=1"]);
+  assert.deepEqual(result.nativeNotificationRemovedSeriesPlatforms, ["ios"]);
+  assert.deepEqual(
+    harness.openedURLs,
+    [],
+    "passive schedule publication must never foreground the receiving app",
+  );
 
   await harness.service.refreshCatalogs("unchanged-after-invalidation");
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(
     harness.openedURLs,
-    ["tishos://controller-refresh?v=1"],
-    "the callback must happen only for the semantic removal publication",
+    [],
+    "an unchanged follow-up publication must remain passive too",
   );
 });
 
@@ -721,7 +725,7 @@ test("advancing one series or aging out a delivered item does not foreground Tis
 
   schedule = [{ ...schedule[0], fireAt: NOW + 10 * 60_000 }];
   const advanced = await harness.service.refreshCatalogs("repeat-advanced");
-  assert.deepEqual(advanced.nativeNotificationInvalidationPlatforms, []);
+  assert.deepEqual(advanced.nativeNotificationRemovedSeriesPlatforms, []);
   assert.deepEqual(harness.openedURLs, []);
 
   schedule = [{ ...schedule[0], fireAt: NOW - 4 * 60_000 }];
@@ -729,7 +733,7 @@ test("advancing one series or aging out a delivered item does not foreground Tis
   schedule = [];
   const agedOut = await harness.service.refreshCatalogs("aged-out");
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(agedOut.nativeNotificationInvalidationPlatforms, []);
+  assert.deepEqual(agedOut.nativeNotificationRemovedSeriesPlatforms, []);
   assert.deepEqual(harness.openedURLs, []);
 });
 
