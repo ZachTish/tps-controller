@@ -1,5 +1,12 @@
 # TPS Controller
 
+## 0.11.8 exact overdue-event audit
+
+- Controller now binds each selected reminder series to its original event due time and configured repeat cadence in a small signed audit file beside the unchanged schema-2 TishOS schedule. A repeating event remains provably overdue even when its rolling queue contains only future notification times.
+- The audit is HMAC-authenticated and bound to the exact schedule MAC, generation, client, vault, and publisher. Missing, stale, malformed, or tampered audit data is ignored by compatible TishOS clients without interrupting the established notification schedule.
+- Live-series fairness now uses the original due time when available, so an overdue event receives its first bounded transport position even after Controller has advanced every repeat occurrence into the future. The existing 128-item transport limit, canonical final order, occurrence IDs, fire times, actions, credentials, settings, and schedule schema are unchanged.
+- This backward-compatible patch adds no setting or note-data migration. Minimum supported Obsidian remains 1.12.0.
+
 ## 0.11.7 fair bounded reminder coverage
 
 - Signed TishOS schedules now give every exact reminder series with a currently due occurrence one position before repeat extras consume the 128-item transport bound. Additional occurrences are selected round by round across those live series, then remaining capacity follows the existing chronological candidate order.

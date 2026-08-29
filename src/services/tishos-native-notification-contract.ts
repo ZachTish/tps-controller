@@ -14,6 +14,7 @@ export const TISHOS_NATIVE_NOTIFICATION_MAX_ITEMS = 128;
 export const TISHOS_NATIVE_NOTIFICATION_MAX_LATE_MS = 5 * 60 * 1000;
 export const TISHOS_NATIVE_NOTIFICATION_MAX_BODY_BYTES = 1_024;
 export const TISHOS_NATIVE_NOTIFICATION_MAX_SOURCE_PATH_BYTES = 512;
+export const TISHOS_NATIVE_NOTIFICATION_MAX_REPEAT_SECONDS = 60 * 24 * 60 * 60;
 
 export interface TishOSNativeNotificationItem {
     id: string;
@@ -31,6 +32,23 @@ export interface TishOSNativeNotificationSchedule {
     generatedAt: string;
     publisher: { id: string; version: string };
     items: TishOSNativeNotificationItem[];
+    mac: string;
+}
+
+export interface TishOSNativeNotificationSeriesAuditItem {
+    seriesID: string;
+    dueAt: string;
+    repeatEverySeconds: number | null;
+}
+
+export interface TishOSNativeNotificationSeriesAudit {
+    schemaVersion: 1;
+    clientID: string;
+    vaultName: string;
+    generatedAt: string;
+    publisher: { id: string; version: string };
+    scheduleMAC: string;
+    series: TishOSNativeNotificationSeriesAuditItem[];
     mac: string;
 }
 
@@ -103,6 +121,49 @@ export function canonicalNotificationSchedule(
     value += `items:${schedule.items.length}\n`;
     for (const item of schedule.items) value += field("item", item.id);
     return new TextEncoder().encode(value);
+}
+
+export function canonicalNotificationSeriesAudit(
+    audit: Omit<TishOSNativeNotificationSeriesAudit, "mac">,
+): Uint8Array {
+    let value = "tishos-native-notification-series-audit-v1\n";
+    value += "schema:1\n";
+    value += field("client", audit.clientID);
+    value += field("vault", audit.vaultName);
+    value += field("generated", audit.generatedAt);
+    value += field("publisher-id", audit.publisher.id);
+    value += field("publisher-version", audit.publisher.version);
+    value += field("schedule-mac", audit.scheduleMAC);
+    value += `series:${audit.series.length}\n`;
+    for (const item of audit.series) {
+        value += field("series-id", item.seriesID);
+        value += field("due", item.dueAt);
+        value += `repeat-seconds:${item.repeatEverySeconds ?? 0}\n`;
+    }
+    return new TextEncoder().encode(value);
+}
+
+export function validateNotificationSeriesAuditItems(
+    values: readonly TishOSNativeNotificationSeriesAuditItem[],
+): TishOSNativeNotificationSeriesAuditItem[] | null {
+    if (values.length > TISHOS_NATIVE_NOTIFICATION_MAX_ITEMS) return null;
+    const ids = new Set<string>();
+    const result: TishOSNativeNotificationSeriesAuditItem[] = [];
+    for (const item of values) {
+        if (
+            !isCanonicalBase64URLSHA256(item.seriesID)
+            || ids.has(item.seriesID)
+            || !isCanonicalNotificationDate(item.dueAt)
+            || (item.repeatEverySeconds !== null && (
+                !Number.isSafeInteger(item.repeatEverySeconds)
+                || item.repeatEverySeconds <= 0
+                || item.repeatEverySeconds > TISHOS_NATIVE_NOTIFICATION_MAX_REPEAT_SECONDS
+            ))
+        ) return null;
+        ids.add(item.seriesID);
+        result.push({ ...item });
+    }
+    return result;
 }
 
 export function validateNotificationItems(

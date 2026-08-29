@@ -1442,6 +1442,8 @@ test('native schedule keeps an hours-overdue five-minute rule alive while Obsidi
   assert.equal(schedule.length, 128);
   assert.equal(schedule[0].fireAt, Date.parse('2026-08-17T21:15:00.000Z'));
   assert.equal(schedule[1].fireAt, Date.parse('2026-08-17T21:20:00.000Z'));
+  assert.equal(schedule[0].dueAt, triggerTime);
+  assert.equal(schedule[0].repeatEverySeconds, 300);
   assert.equal(schedule[0].sourceKey, '2026-08-17.md::task:13');
 });
 

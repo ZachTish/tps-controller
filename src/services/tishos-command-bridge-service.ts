@@ -40,14 +40,19 @@ import {
     TISHOS_NATIVE_NOTIFICATION_MAX_FILE_BYTES,
     TISHOS_NATIVE_NOTIFICATION_MAX_ITEMS,
     TISHOS_NATIVE_NOTIFICATION_MAX_LATE_MS,
+    TISHOS_NATIVE_NOTIFICATION_MAX_REPEAT_SECONDS,
     TISHOS_NATIVE_NOTIFICATION_ROOT,
     canonicalNotificationItem,
     canonicalNotificationSeries,
+    canonicalNotificationSeriesAudit,
     canonicalNotificationSchedule,
     isValidNotificationBody,
     isValidNotificationSourcePath,
     validateNotificationItems,
+    validateNotificationSeriesAuditItems,
     type TishOSNativeNotificationItem,
+    type TishOSNativeNotificationSeriesAudit,
+    type TishOSNativeNotificationSeriesAuditItem,
     type TishOSNativeNotificationSchedule,
 } from "./tishos-native-notification-contract";
 
@@ -187,10 +192,17 @@ interface NativeNotificationProjectionValue {
     title: string;
     body: string;
     fireAt: number;
+    dueAt?: number;
+    repeatEverySeconds?: number;
     sourceKey: string;
     reminderId: string;
     sourcePath?: string;
     completionTarget?: OverdueItem;
+}
+
+interface NativeNotificationPublication {
+    items: TishOSNativeNotificationItem[];
+    series: TishOSNativeNotificationSeriesAuditItem[];
 }
 
 interface PairingRequest {
@@ -693,13 +705,19 @@ export class TishOSCommandBridgeService {
                 });
             } else {
                 try {
-                    const notificationItems = await this.buildNativeNotificationItems(
-                        await this.notificationScheduleProvider(),
-                    );
+                    const notificationValues = await this.notificationScheduleProvider();
+                    const notificationItems = await this.buildNativeNotificationItems(notificationValues);
+                    const notificationPublication: NativeNotificationPublication = {
+                        items: notificationItems,
+                        series: await this.buildNativeNotificationSeriesAuditItems(
+                            notificationValues,
+                            notificationItems,
+                        ),
+                    };
                     const notificationRefresh = await this.refreshNativeNotificationSchedules(
                         state.vaultName,
                         clients,
-                        notificationItems,
+                        notificationPublication,
                         reason,
                     );
                     nativeNotificationReadyClientIDs = notificationRefresh.readyClientIDs;
@@ -936,7 +954,8 @@ export class TishOSCommandBridgeService {
             const group = seriesValues.get(key) ?? [];
             group.push(value);
             seriesValues.set(key, group);
-            if (Number.isSafeInteger(value.fireAt) && value.fireAt <= now) {
+            const dueAt = Number.isSafeInteger(value.dueAt) ? Number(value.dueAt) : value.fireAt;
+            if (Number.isSafeInteger(dueAt) && dueAt <= now) {
                 liveSeriesKeys.add(key);
             }
         }
@@ -975,9 +994,78 @@ export class TishOSCommandBridgeService {
         return items;
     }
 
+    private async buildNativeNotificationSeriesAuditItems(
+        values: readonly NativeNotificationProjectionValue[],
+        items: readonly TishOSNativeNotificationItem[],
+    ): Promise<TishOSNativeNotificationSeriesAuditItem[]> {
+        const selectedSeries = new Set(items.map((item) => item.seriesID));
+        const valuesBySeries = new Map<string, NativeNotificationProjectionValue[]>();
+        for (const value of values) {
+            const seriesID = await sha256Base64URL(canonicalNotificationSeries(
+                value.sourceKey,
+                value.reminderId,
+            ));
+            if (!selectedSeries.has(seriesID)) continue;
+            const group = valuesBySeries.get(seriesID) ?? [];
+            group.push(value);
+            valuesBySeries.set(seriesID, group);
+        }
+        const bySeries = new Map<string, TishOSNativeNotificationSeriesAuditItem>();
+        for (const [seriesID, group] of valuesBySeries) {
+            const explicitDueTimes = new Set(group
+                .filter((value) => Number.isSafeInteger(value.dueAt))
+                .map((value) => Number(value.dueAt)));
+            if (explicitDueTimes.size > 1) {
+                throw new Error("Native notification series due time is inconsistent.");
+            }
+            const fallbackDueAt = Math.min(...group.map((value) => value.fireAt));
+            const dueAt = explicitDueTimes.values().next().value ?? fallbackDueAt;
+            if (!Number.isSafeInteger(dueAt)) {
+                throw new Error("Native notification series due time is invalid.");
+            }
+            const explicitRepeatIntervals = new Set(group
+                .filter((value) => value.repeatEverySeconds !== undefined)
+                .map((value) => value.repeatEverySeconds));
+            if (explicitRepeatIntervals.size > 1) {
+                throw new Error("Native notification series cadence is inconsistent.");
+            }
+            const explicitRepeatEverySeconds = explicitRepeatIntervals.values().next().value;
+            const repeatEverySeconds = explicitRepeatEverySeconds === undefined
+                ? null
+                : Number.isSafeInteger(explicitRepeatEverySeconds)
+                    && Number(explicitRepeatEverySeconds) > 0
+                    && Number(explicitRepeatEverySeconds) <= TISHOS_NATIVE_NOTIFICATION_MAX_REPEAT_SECONDS
+                    ? Number(explicitRepeatEverySeconds)
+                    : null;
+            if (explicitRepeatEverySeconds !== undefined && repeatEverySeconds === null) {
+                throw new Error("Native notification series cadence is invalid.");
+            }
+            bySeries.set(seriesID, {
+                seriesID,
+                dueAt: new Date(dueAt).toISOString(),
+                repeatEverySeconds,
+            });
+        }
+        const ordered: TishOSNativeNotificationSeriesAuditItem[] = [];
+        const seen = new Set<string>();
+        for (const item of items) {
+            if (seen.has(item.seriesID)) continue;
+            seen.add(item.seriesID);
+            const audit = bySeries.get(item.seriesID);
+            if (!audit) throw new Error("Native notification series metadata is missing.");
+            ordered.push(audit);
+        }
+        if (validateNotificationSeriesAuditItems(ordered) === null) {
+            throw new Error("Native notification series audit failed validation.");
+        }
+        return ordered;
+    }
+
     private nativeNotificationCandidateKey(value: NativeNotificationProjectionValue): string {
         return JSON.stringify([
             value.fireAt,
+            value.dueAt,
+            value.repeatEverySeconds,
             value.sourceKey,
             value.reminderId,
             value.title,
@@ -1042,9 +1130,10 @@ export class TishOSCommandBridgeService {
     private async refreshNativeNotificationSchedules(
         vaultName: string,
         clients: readonly StoredPairing[],
-        items: readonly TishOSNativeNotificationItem[],
+        publication: NativeNotificationPublication,
         reason: string,
     ): Promise<NativeNotificationRefreshOutcome> {
+        const { items, series } = publication;
         let published = 0;
         let unchanged = 0;
         const readyClientIDs = new Set<string>();
@@ -1068,6 +1157,20 @@ export class TishOSCommandBridgeService {
                     secret,
                 );
                 if (existingGeneratedAt) {
+                    const existingSchedule = await this.readVerifiedNativeNotificationSchedule(
+                        path,
+                        pairing,
+                        secret,
+                    );
+                    if (!existingSchedule) {
+                        throw new Error("Verified native notification schedule disappeared.");
+                    }
+                    await this.publishNativeNotificationSeriesAudit(
+                        pairing,
+                        existingSchedule,
+                        series,
+                        secret,
+                    );
                     unchanged += 1;
                     readyClientIDs.add(pairing.clientID);
                     this.setNativeNotificationReady(pairing.clientID, items.length, existingGeneratedAt);
@@ -1097,6 +1200,12 @@ export class TishOSCommandBridgeService {
                     secret,
                     serialized,
                     generatedAt,
+                );
+                await this.publishNativeNotificationSeriesAudit(
+                    pairing,
+                    schedule,
+                    series,
+                    secret,
                 );
                 if (
                     (pairing.platform === "ios" || pairing.platform === "ipados")
@@ -1801,6 +1910,8 @@ export class TishOSCommandBridgeService {
             this.nativeNotificationPath(revocation.clientID),
             this.nativeNotificationStagingPath(revocation.clientID),
             this.nativeNotificationBackupPath(revocation.clientID),
+            this.nativeNotificationSeriesAuditPath(revocation.clientID),
+            this.nativeNotificationSeriesAuditStagingPath(revocation.clientID),
         ];
         for (const path of artifactPaths) {
             try {
@@ -1815,6 +1926,7 @@ export class TishOSCommandBridgeService {
                 if (
                     path === this.catalogPath(revocation.clientID)
                     || path === this.nativeNotificationPath(revocation.clientID)
+                    || path === this.nativeNotificationSeriesAuditPath(revocation.clientID)
                 ) {
                     try {
                         await this.app.vault.adapter.write(path, "{}\n");
@@ -1929,6 +2041,14 @@ export class TishOSCommandBridgeService {
         return `${TISHOS_NATIVE_NOTIFICATION_ROOT}/.${clientID}.backup`;
     }
 
+    private nativeNotificationSeriesAuditPath(clientID: string): string {
+        return `${TISHOS_NATIVE_NOTIFICATION_ROOT}/${clientID}.audit.json`;
+    }
+
+    private nativeNotificationSeriesAuditStagingPath(clientID: string): string {
+        return `${TISHOS_NATIVE_NOTIFICATION_ROOT}/.${clientID}.audit.pending`;
+    }
+
     private async ensureCatalogDirectory(): Promise<void> {
         for (const path of [".tishos", ".tishos/command-bridge", TISHOS_COMMAND_BRIDGE_CATALOG_ROOT]) {
             if (await this.app.vault.adapter.exists(path)) continue;
@@ -1996,6 +2116,83 @@ export class TishOSCommandBridgeService {
                     logger.flowWarn("TishOSCommandBridge", "native-notification-refresh:staging-cleanup-failed", {
                         errorType: this.errorType(error),
                     });
+                }
+            }
+        }
+    }
+
+    private async publishNativeNotificationSeriesAudit(
+        pairing: StoredPairing,
+        schedule: TishOSNativeNotificationSchedule,
+        series: readonly TishOSNativeNotificationSeriesAuditItem[],
+        secret: Uint8Array,
+    ): Promise<void> {
+        const unsigned: Omit<TishOSNativeNotificationSeriesAudit, "mac"> = {
+            schemaVersion: 1,
+            clientID: pairing.clientID,
+            vaultName: schedule.vaultName,
+            generatedAt: schedule.generatedAt,
+            publisher: { ...schedule.publisher },
+            scheduleMAC: schedule.mac,
+            series: [...series],
+        };
+        const audit: TishOSNativeNotificationSeriesAudit = {
+            ...unsigned,
+            mac: await hmacSHA256Base64URL(
+                secret,
+                canonicalNotificationSeriesAudit(unsigned),
+            ),
+        };
+        const path = this.nativeNotificationSeriesAuditPath(pairing.clientID);
+        const existing = await this.readVerifiedNativeNotificationSeriesAudit(
+            path,
+            pairing,
+            schedule,
+            secret,
+        );
+        if (existing && JSON.stringify(existing) === JSON.stringify(audit)) return;
+
+        const serialized = `${JSON.stringify(audit)}\n`;
+        if (utf8ByteCount(serialized) > TISHOS_NATIVE_NOTIFICATION_MAX_FILE_BYTES) {
+            throw new Error("Native notification series audit exceeds its file bound.");
+        }
+        await this.ensureNativeNotificationDirectory();
+        const stagingPath = this.nativeNotificationSeriesAuditStagingPath(pairing.clientID);
+        try {
+            if (await this.app.vault.adapter.exists(stagingPath)) {
+                await this.app.vault.adapter.remove(stagingPath);
+            }
+            await this.app.vault.adapter.write(stagingPath, serialized);
+            if (!await this.readVerifiedNativeNotificationSeriesAudit(
+                stagingPath,
+                pairing,
+                schedule,
+                secret,
+            )) {
+                throw new Error("Staged native notification series audit verification failed.");
+            }
+            if (await this.app.vault.adapter.exists(path)) {
+                await this.app.vault.adapter.remove(path);
+            }
+            await this.app.vault.adapter.rename(stagingPath, path);
+            if (!await this.readVerifiedNativeNotificationSeriesAudit(
+                path,
+                pairing,
+                schedule,
+                secret,
+            )) {
+                throw new Error("Published native notification series audit verification failed.");
+            }
+        } finally {
+            if (await this.app.vault.adapter.exists(stagingPath)) {
+                try {
+                    await this.app.vault.adapter.remove(stagingPath);
+                } catch (error) {
+                    logger.flowWarn(
+                        "TishOSCommandBridge",
+                        "native-notification-audit:staging-cleanup-failed",
+                        { errorType: this.errorType(error) },
+                    );
                 }
             }
         }
@@ -2121,6 +2318,60 @@ export class TishOSCommandBridgeService {
             if (!await verifyHmacSHA256Base64URL(
                 secret,
                 canonicalNotificationSchedule(unsigned),
+                String(value.mac),
+            )) return null;
+            return { ...unsigned, mac: String(value.mac) };
+        } catch {
+            return null;
+        }
+    }
+
+    private async readVerifiedNativeNotificationSeriesAudit(
+        path: string,
+        pairing: StoredPairing,
+        schedule: TishOSNativeNotificationSchedule,
+        secret: Uint8Array,
+    ): Promise<TishOSNativeNotificationSeriesAudit | null> {
+        try {
+            const content = await this.readBoundedNativeNotificationFile(path);
+            if (content === null) return null;
+            const value = JSON.parse(content);
+            if (!isRecord(value) || !hasExactKeys(value, [
+                "schemaVersion", "clientID", "vaultName", "generatedAt",
+                "publisher", "scheduleMAC", "series", "mac",
+            ])) return null;
+            if (
+                value.schemaVersion !== 1
+                || value.clientID !== pairing.clientID
+                || value.vaultName !== schedule.vaultName
+                || value.generatedAt !== schedule.generatedAt
+                || value.scheduleMAC !== schedule.mac
+                || !isRecord(value.publisher)
+                || !hasExactKeys(value.publisher, ["id", "version"])
+                || value.publisher.id !== schedule.publisher.id
+                || value.publisher.version !== schedule.publisher.version
+                || !Array.isArray(value.series)
+                || !isCanonicalBase64URLSHA256(String(value.mac || ""))
+            ) return null;
+            const series = validateNotificationSeriesAuditItems(
+                value.series as TishOSNativeNotificationSeriesAuditItem[],
+            );
+            if (series === null) return null;
+            const unsigned: Omit<TishOSNativeNotificationSeriesAudit, "mac"> = {
+                schemaVersion: 1,
+                clientID: value.clientID as string,
+                vaultName: value.vaultName as string,
+                generatedAt: value.generatedAt as string,
+                publisher: {
+                    id: value.publisher.id as string,
+                    version: value.publisher.version as string,
+                },
+                scheduleMAC: value.scheduleMAC as string,
+                series,
+            };
+            if (!await verifyHmacSHA256Base64URL(
+                secret,
+                canonicalNotificationSeriesAudit(unsigned),
                 String(value.mac),
             )) return null;
             return { ...unsigned, mac: String(value.mac) };

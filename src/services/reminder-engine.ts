@@ -45,6 +45,8 @@ export interface ScheduledNativeNotification {
     title: string;
     body: string;
     fireAt: number;
+    dueAt: number;
+    repeatEverySeconds?: number;
     sourcePath?: string;
     reminderId: string;
     sourceKey: string;
@@ -433,6 +435,10 @@ export class ReminderEngine {
                     title: formatTemplate(reminder.title, { filename: displayName, time, remaining }),
                     body: formatTemplate(reminder.body, { filename: displayName, time, remaining }),
                     fireAt,
+                    dueAt: propTime,
+                    ...(reminder.repeatUntilComplete ? {
+                        repeatEverySeconds: Math.max(1, reminder.repeatIntervalMinutes) * 60,
+                    } : {}),
                     sourcePath: fileRef instanceof TFile ? fileRef.path : undefined,
                     reminderId: reminder.id,
                     sourceKey: target.sourceKey,

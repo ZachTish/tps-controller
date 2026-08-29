@@ -435,7 +435,8 @@ async function pairAndPublish(harness, client = CLIENT, secret = SECRET) {
   assert.equal(result.accepted, true);
   harness.service.start();
   harness.fireLayout();
-  await harness.service.refreshCatalogs("test");
+  const refresh = await harness.service.refreshCatalogs("test");
+  assert.equal(refresh.failedClients, 0, JSON.stringify(refresh));
   return `${contract.TISHOS_COMMAND_BRIDGE_CATALOG_ROOT}/${client}.json`;
 }
 
@@ -1057,19 +1058,72 @@ test("repeat occurrences share one stable series identity while distinct reminde
 
   const path = `${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.json`;
   const published = JSON.parse(harness.files.get(path));
+  const audit = JSON.parse(harness.files.get(
+    `${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.audit.json`,
+  ));
   assert.equal(published.items.length, 3);
   assert.equal(published.items[0].seriesID, published.items[1].seriesID);
   assert.notEqual(published.items[0].id, published.items[1].id);
   assert.notEqual(published.items[1].seriesID, published.items[2].seriesID);
+  assert.equal(audit.series.length, 2, "the audit keeps exactly one record per series");
+  assert.deepEqual(
+    audit.series.map((item) => item.seriesID),
+    [published.items[0].seriesID, published.items[2].seriesID],
+  );
+});
+
+test("signed series audit carries original due time and cadence without changing schedule v2", async (t) => {
+  const dueAt = NOW - 60 * 60 * 1000;
+  const schedule = [{
+    title: "Overdue standup",
+    body: "Repeat until complete",
+    fireAt: NOW + 2 * 60_000,
+    dueAt,
+    repeatEverySeconds: 120,
+    sourcePath: "Calendar/Standup.md",
+    sourceKey: "Calendar/Standup.md::event",
+    reminderId: "calendar-reminder",
+  }];
+  const harness = createHarness({ notificationScheduleProvider: async () => schedule });
+  t.after(() => harness.service.stop());
+  await pairAndPublish(harness);
+
+  const schedulePath = `${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.json`;
+  const auditPath = `${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.audit.json`;
+  const published = JSON.parse(harness.files.get(schedulePath));
+  const audit = JSON.parse(harness.files.get(auditPath));
+  assert.equal(published.schemaVersion, 2);
+  assert.deepEqual(Object.keys(published.items[0]).sort(), [
+    "body", "fireAt", "id", "seriesID", "sourcePath", "title",
+  ]);
+  assert.equal(audit.schemaVersion, 1);
+  assert.equal(audit.scheduleMAC, published.mac);
+  assert.equal(audit.generatedAt, published.generatedAt);
+  assert.deepEqual(audit.series, [{
+    seriesID: published.items[0].seriesID,
+    dueAt: new Date(dueAt).toISOString(),
+    repeatEverySeconds: 120,
+  }]);
+  const { mac, ...unsigned } = audit;
+  assert.equal(
+    await contract.verifyHmacSHA256Base64URL(
+      SECRET_BYTES,
+      notificationContract.canonicalNotificationSeriesAudit(unsigned),
+      mac,
+    ),
+    true,
+  );
 });
 
 test("bounded schedules cover every live reminder series before repeat extras", async (t) => {
   const seriesCount = 70;
   const schedule = Array.from({ length: seriesCount }, (_, seriesIndex) =>
-    [-60_000, 60_000, 180_000].map((offset, occurrenceIndex) => ({
+    [60_000, 180_000, 300_000].map((offset, occurrenceIndex) => ({
       title: `Overdue event ${seriesIndex}`,
       body: `Occurrence ${occurrenceIndex}`,
       fireAt: NOW + offset,
+      dueAt: NOW - 60 * 60 * 1000,
+      repeatEverySeconds: 120,
       sourcePath: `Calendar/Event ${seriesIndex}.md`,
       sourceKey: `Calendar/Event ${seriesIndex}.md::event`,
       reminderId: "calendar-reminder",
