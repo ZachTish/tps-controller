@@ -1063,6 +1063,45 @@ test("repeat occurrences share one stable series identity while distinct reminde
   assert.notEqual(published.items[1].seriesID, published.items[2].seriesID);
 });
 
+test("bounded schedules cover every live reminder series before repeat extras", async (t) => {
+  const seriesCount = 70;
+  const schedule = Array.from({ length: seriesCount }, (_, seriesIndex) =>
+    [-60_000, 60_000, 180_000].map((offset, occurrenceIndex) => ({
+      title: `Overdue event ${seriesIndex}`,
+      body: `Occurrence ${occurrenceIndex}`,
+      fireAt: NOW + offset,
+      sourcePath: `Calendar/Event ${seriesIndex}.md`,
+      sourceKey: `Calendar/Event ${seriesIndex}.md::event`,
+      reminderId: "calendar-reminder",
+    })),
+  ).flat();
+  const harness = createHarness({ notificationScheduleProvider: async () => schedule });
+  t.after(() => harness.service.stop());
+
+  await pairAndPublish(harness);
+
+  const path = `${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.json`;
+  const published = JSON.parse(harness.files.get(path));
+  const countsBySeries = new Map();
+  for (const item of published.items) {
+    countsBySeries.set(item.seriesID, (countsBySeries.get(item.seriesID) || 0) + 1);
+  }
+  assert.equal(published.items.length, notificationContract.TISHOS_NATIVE_NOTIFICATION_MAX_ITEMS);
+  assert.equal(countsBySeries.size, seriesCount);
+  assert.equal([...countsBySeries.values()].filter((count) => count === 2).length, 58);
+  assert.equal([...countsBySeries.values()].filter((count) => count === 1).length, 12);
+  for (let index = 1; index < published.items.length; index += 1) {
+    const previous = published.items[index - 1];
+    const current = published.items[index];
+    assert.ok(
+      previous.fireAt < current.fireAt
+        || (previous.fireAt === current.fireAt
+          && Buffer.from(previous.id, "utf8").compare(Buffer.from(current.id, "utf8")) <= 0),
+      "the fair bounded selection remains in canonical time/UTF-8 ID order",
+    );
+  }
+});
+
 test("signed notification completion re-resolves one current Controller item and consumes replay", async (t) => {
   const completionTarget = { targetKind: "task", taskLine: 7 };
   const schedule = [{

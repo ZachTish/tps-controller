@@ -1,5 +1,12 @@
 # TPS Controller
 
+## 0.11.7 fair bounded reminder coverage
+
+- Signed TishOS schedules now give every exact reminder series with a currently due occurrence one position before repeat extras consume the 128-item transport bound. Additional occurrences are selected round by round across those live series, then remaining capacity follows the existing chronological candidate order.
+- The final signed schedule remains in canonical fire-time and raw UTF-8 identifier order. This changes no reminder time, occurrence identifier, series identifier, action authority, pairing credential, or wire schema.
+- The policy prevents a dense repeating event from hiding other live overdue events at the transport boundary. If more than 128 exact live series exist simultaneously, the existing hard bound still applies deterministically and TishOS reports its separate Apple queue capacity.
+- This backward-compatible patch adds no setting or data migration. Minimum supported Obsidian remains 1.12.0.
+
 ## 0.11.6 deterministic bounded reminder repeats
 
 - **Repeat until scheduled time** now projects the rule's finite cadence into signed TishOS schedules. A reminder beginning 15 minutes early and repeating every five minutes produces exact one-shot occurrences at −15, −10, and −5 minutes, never an accidental at-time or post-event alert.

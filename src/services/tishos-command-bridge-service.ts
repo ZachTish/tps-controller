@@ -923,10 +923,45 @@ export class TishOSCommandBridgeService {
                 this.nativeNotificationCandidateKey(right),
             );
         });
-        for (const value of orderedValues) {
+        const uniqueValues = orderedValues.filter((value) => {
             const candidateKey = this.nativeNotificationCandidateKey(value);
-            if (exactCandidates.has(candidateKey)) continue;
+            if (exactCandidates.has(candidateKey)) return false;
             exactCandidates.add(candidateKey);
+            return true;
+        });
+        const seriesValues = new Map<string, NativeNotificationProjectionValue[]>();
+        const liveSeriesKeys = new Set<string>();
+        for (const value of uniqueValues) {
+            const key = JSON.stringify([value.sourceKey, value.reminderId]);
+            const group = seriesValues.get(key) ?? [];
+            group.push(value);
+            seriesValues.set(key, group);
+            if (Number.isSafeInteger(value.fireAt) && value.fireAt <= now) {
+                liveSeriesKeys.add(key);
+            }
+        }
+        const liveSeries = [...seriesValues].filter(([key]) => liveSeriesKeys.has(key));
+        const prioritizedValues: NativeNotificationProjectionValue[] = [];
+        const prioritizedKeys = new Set<string>();
+        let round = 0;
+        while (true) {
+            let appended = false;
+            for (const [, valuesForSeries] of liveSeries) {
+                const value = valuesForSeries[round];
+                if (!value) continue;
+                prioritizedValues.push(value);
+                prioritizedKeys.add(this.nativeNotificationCandidateKey(value));
+                appended = true;
+            }
+            if (!appended) break;
+            round += 1;
+        }
+        for (const value of uniqueValues) {
+            const candidateKey = this.nativeNotificationCandidateKey(value);
+            if (prioritizedKeys.has(candidateKey)) continue;
+            prioritizedValues.push(value);
+        }
+        for (const value of prioritizedValues) {
             const item = await this.buildNativeNotificationItem(value, now, maximumFireAt);
             if (item && !unique.has(item.id)) unique.set(item.id, item);
             if (unique.size >= TISHOS_NATIVE_NOTIFICATION_MAX_ITEMS) break;
