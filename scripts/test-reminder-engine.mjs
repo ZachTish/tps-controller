@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import moment from 'moment';
@@ -361,11 +362,29 @@ function loadCompiledReminderEngineHarness(options = {}) {
         shouldSkipStaleOneShotReminder: () => false,
       };
     }
+    if (id === './calendar-record-identity') {
+      return {
+        calendarEventOccurrenceIdentity: (event) => event.occurrenceIdentity || event.id || event.uid,
+        deriveCalendarRecordId: async (calendarId, occurrenceIdentity) => buildCanonicalCalendarRecordId(calendarId, occurrenceIdentity),
+      };
+    }
+    if (id === '../tps-gcm-api') {
+      return { getGcmApi: () => options.gcmApi || null };
+    }
     throw new Error(`Unexpected require: ${id}`);
   };
   const load = new Function('module', 'exports', 'require', compiled.outputText);
   load(module, module.exports, requireStub);
   return { ReminderEngine: module.exports.ReminderEngine, TFile: TestTFile };
+}
+
+function buildCanonicalCalendarRecordId(calendarId, occurrenceIdentity) {
+  const digest = (value, bytes) => createHash('sha256')
+    .update(String(value), 'utf8')
+    .digest()
+    .subarray(0, bytes)
+    .toString('base64url');
+  return `calendar:v1:${digest(calendarId, 12)}:${digest(`${calendarId}\0${occurrenceIdentity}`, 20)}`;
 }
 
 function beginCompiledReminderMove(harness) {
@@ -624,6 +643,7 @@ test('native schedule projection is Controller-rule-owned and read-only', async 
 test('native calendar records suppress matched pathless external alerts while retaining truly unmatched events', async (t) => {
   const now = Date.parse('2026-08-25T12:00:00.000Z');
   const sourceUrl = 'https://calendar.invalid/native-records.ics';
+  const calendarId = 'calendar-regression';
   const matchingEvent = {
     id: 'series-native-20260827T090000',
     uid: 'series-native',
@@ -645,19 +665,15 @@ test('native calendar records suppress matched pathless external alerts while re
     startDate: new Date('2026-08-28T15:00:00.000Z'),
     endDate: new Date('2026-08-28T15:30:00.000Z'),
   };
+  const canonicalRecordId = buildCanonicalCalendarRecordId(calendarId, matchingEvent.occurrenceIdentity);
   const nativeRecord = {
-    tpsId: 'calendar-native-regression',
+    tpsId: canonicalRecordId,
     tpsSchemaVersion: 1,
     kind: 'calendar-event',
     title: '[[Calendar Events/2026-08-27/Event note|Linked display title]]',
     eventTitle: matchingEvent.title,
     status: 'scheduled',
     scheduled: matchingEvent.startDate.toISOString(),
-    calendarId: 'calendar-regression',
-    calendarUid: matchingEvent.uid,
-    calendarOccurrenceId: matchingEvent.id,
-    calendarOccurrenceIdentity: matchingEvent.occurrenceIdentity,
-    calendarOccurrenceKey: `calendar-regression:source:${matchingEvent.occurrenceIdentity}`,
   };
   const settings = {
     calendarStorageMode: 'native-records',
@@ -693,9 +709,10 @@ test('native calendar records suppress matched pathless external alerts while re
     startProperty: 'scheduled',
     endProperty: 'timeEstimate',
     titleKey: 'title',
-    externalCalendars: [{ enabled: true, url: sourceUrl }],
+    externalCalendars: [{ id: calendarId, enabled: true, url: sourceUrl }],
   };
   let currentFrontmatter = nativeRecord;
+  let authoritativeRecords = [];
   const candidateFiles = [];
   const engineHarness = loadCompiledReminderEngineHarness({
     candidateFiles,
@@ -719,6 +736,14 @@ test('native calendar records suppress matched pathless external alerts while re
         };
       }
       return { frontmatter, propertyValue: frontmatter[property] };
+    },
+    gcmApi: {
+      nativeRecords: {
+        inspect: (frontmatter) => frontmatter.__inspectedId
+          ? { id: frontmatter.__inspectedId }
+          : null,
+        snapshot: async () => ({ token: 1, records: authoritativeRecords }),
+      },
     },
   });
   const nativeFile = new engineHarness.TFile('_records/calendar-events/calendar-native-regression.md');
@@ -748,25 +773,25 @@ test('native calendar records suppress matched pathless external alerts while re
   assert.equal(schedule[1].fireAt, unmatchedEvent.startDate.getTime() - 15 * 60_000);
 
   const identityVariants = [{
-    label: 'calendarOccurrenceId',
+    label: 'canonical tpsId property',
     frontmatter: {
       scheduled: nativeRecord.scheduled,
-      calendarOccurrenceId: nativeRecord.calendarOccurrenceId,
+      tpsId: canonicalRecordId,
     },
   }, {
-    label: 'calendarOccurrenceIdentity',
+    label: 'canonical GCM-inspected tag identity',
     frontmatter: {
       scheduled: nativeRecord.scheduled,
-      calendarOccurrenceIdentity: nativeRecord.calendarOccurrenceIdentity,
+      __inspectedId: canonicalRecordId,
     },
   }, {
-    label: 'calendarUid plus scheduled',
+    label: 'legacy occurrence identity during migration',
     frontmatter: {
       scheduled: nativeRecord.scheduled,
-      calendarUid: nativeRecord.calendarUid,
+      calendarOccurrenceIdentity: matchingEvent.occurrenceIdentity,
     },
   }, {
-    label: 'eventTitle plus scheduled',
+    label: 'legacy event title plus scheduled during migration',
     frontmatter: {
       scheduled: nativeRecord.scheduled,
       title: nativeRecord.title,
@@ -784,6 +809,24 @@ test('native calendar records suppress matched pathless external alerts while re
       );
     });
   }
+
+  await t.test('cache-null authoritative canonical identity remains one file-backed source', async () => {
+    currentFrontmatter = null;
+    authoritativeRecords = [{
+      file: nativeFile,
+      path: nativeFile.path,
+      id: canonicalRecordId.toLocaleUpperCase(),
+      kind: 'calendar-event',
+      frontmatter: nativeRecord,
+    }];
+    const unmatched = await engine.buildUnmatchedExternalReminderTargets([], settings);
+    assert.deepEqual(
+      unmatched.map((target) => target.externalEvent.id),
+      [unmatchedEvent.id],
+      'authoritative GCM identity suppresses the matching feed fallback even before MetadataCache arrives',
+    );
+    authoritativeRecords = [];
+  });
 });
 
 test('configured cancellation status globally suppresses native calendar records for recommended rules', async () => {
@@ -797,7 +840,6 @@ test('configured cancellation status globally suppresses native calendar records
     scheduled: '2026-09-25T15:00:00.000Z',
     status: 'cancelled',
     allDay: false,
-    calendarSyncState: 'cancelled',
     kind: 'calendar-event',
   };
   const recommendedRule = {

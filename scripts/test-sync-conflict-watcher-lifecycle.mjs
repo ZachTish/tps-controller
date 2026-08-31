@@ -132,6 +132,24 @@ function loadWatcherClass() {
         flowError() {},
       };
     }
+    if (id === "../tps-gcm-api") {
+      return {
+        getGcmApi: () => ({
+          nativeRecords: {
+            inspect: (frontmatter) => frontmatter?.gcmCalendarId
+              ? { id: frontmatter.gcmCalendarId, kind: "calendar-event" }
+              : null,
+          },
+        }),
+      };
+    }
+    if (id === "./calendar-record-identity") {
+      return {
+        parseCalendarRecordId: (value) => /^calendar:v1:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]{27}$/u.test(String(value || ""))
+          ? { version: 1 }
+          : null,
+      };
+    }
     throw new Error(`Unexpected require: ${id}`);
   };
   const load = new Function("module", "exports", "require", compiled.outputText);
@@ -197,7 +215,8 @@ function createHarness(files, options = {}) {
   const metadataCache = Object.assign(metadataEvents, {
     getFileCache(file) {
       ops.metadataReads++;
-      return file.frontmatter ? { frontmatter: file.frontmatter } : null;
+      if (options.metadataUnavailablePaths?.has(file.path)) return null;
+      return { frontmatter: file.frontmatter };
     },
   });
   const app = { vault, metadataCache };
@@ -239,6 +258,14 @@ function conflictFixture() {
     new FakeTFile("Inbox/Meeting duplicate.md"),
     new FakeTFile("Inbox/Protected.md"),
     new FakeTFile("Inbox/Protected duplicate.md", { externalEventId: "calendar:test" }),
+    new FakeTFile("Inbox/Canonical.md"),
+    new FakeTFile("Inbox/Canonical duplicate.md", { tpsId: "calendar:v1:AAAAAAAAAAAAAAAA:BBBBBBBBBBBBBBBBBBBBBBBBBBB" }),
+    new FakeTFile("Inbox/Tagged.md"),
+    new FakeTFile("Inbox/Tagged duplicate.md", { gcmCalendarId: "calendar-tagged" }),
+    new FakeTFile("Inbox/Legacy.md"),
+    new FakeTFile("Inbox/Legacy duplicate.md", { tpsId: "item-random", externalId: "calendar:https://example.invalid#event" }),
+    new FakeTFile("Inbox/Ordinary task.md"),
+    new FakeTFile("Inbox/Ordinary task duplicate.md", { tpsId: "task-ordinary" }),
     new FakeTFile("Inbox/Orphan duplicate.md"),
   ];
 }
@@ -253,6 +280,7 @@ test("SyncConflictWatcher lifecycle binds listeners and its startup fallback", a
       assert.equal(harness.vaultEvents.count("create"), 1);
       assert.equal(harness.vaultEvents.count("rename"), 1);
       assert.equal(harness.metadataEvents.count("resolved"), 1);
+      assert.equal(harness.metadataEvents.count("changed"), 1);
       assert.equal(harness.timers.active.size, 1);
 
       harness.metadataEvents.emit("resolved");
@@ -262,6 +290,9 @@ test("SyncConflictWatcher lifecycle binds listeners and its startup fallback", a
       assert.deepEqual(harness.ops.renames, [[
         "Inbox/Meeting duplicate.md",
         "System/Archive/Duplicates/Meeting duplicate.md",
+      ], [
+        "Inbox/Ordinary task duplicate.md",
+        "System/Archive/Duplicates/Ordinary task duplicate.md",
       ]]);
       assert.equal(harness.timers.active.size, 0);
       assert.equal(harness.timers.cleared, 1);
@@ -285,8 +316,38 @@ test("SyncConflictWatcher lifecycle binds listeners and its startup fallback", a
       await waitForSweepToSettle(harness.watcher);
 
       assert.equal(harness.ops.enumerations, 1);
-      assert.equal(harness.ops.renames.length, 1);
+      assert.equal(harness.ops.renames.length, 2);
       assert.equal(harness.timers.active.size, 0);
+      harness.watcher.stop();
+    });
+
+    await t.test("create waits for metadata before judging a conflict-style calendar filename", async () => {
+      const canonical = new FakeTFile("Inbox/Standup.md");
+      const conflictCanonical = new FakeTFile("Inbox/Meeting.md");
+      const delayedCalendar = new FakeTFile("Inbox/Standup (2).md", {
+        tpsId: "calendar:v1:AAAAAAAAAAAAAAAA:BBBBBBBBBBBBBBBBBBBBBBBBBBB",
+      });
+      const delayedConflict = new FakeTFile("Inbox/Meeting duplicate.md");
+      const unavailable = new Set([delayedCalendar.path, delayedConflict.path]);
+      const harness = createHarness([canonical, conflictCanonical, delayedCalendar, delayedConflict], {
+        metadataUnavailablePaths: unavailable,
+      });
+      harness.watcher.start();
+
+      harness.vaultEvents.emit("create", delayedCalendar);
+      harness.vaultEvents.emit("create", delayedConflict);
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(harness.ops.renames.length, 0);
+
+      unavailable.clear();
+      harness.metadataEvents.emit("changed", delayedCalendar);
+      harness.metadataEvents.emit("changed", delayedConflict);
+      await waitFor(() => harness.ops.renames.length === 1, "metadata retry conflict rename");
+      assert.deepEqual(harness.ops.renames, [[
+        "Inbox/Meeting duplicate.md",
+        "System/Archive/Duplicates/Meeting duplicate.md",
+      ]]);
+      assert.equal(delayedCalendar.path, "Inbox/Standup (2).md");
       harness.watcher.stop();
     });
 
@@ -333,7 +394,7 @@ test("SyncConflictWatcher lifecycle binds listeners and its startup fallback", a
       assert.equal(await harness.timers.fireNext(), true);
       await waitForSweepToSettle(harness.watcher);
       assert.equal(harness.ops.enumerations, 1);
-      assert.equal(harness.ops.renames.length, 1);
+      assert.equal(harness.ops.renames.length, 2);
       harness.watcher.stop();
     });
 
@@ -349,7 +410,7 @@ test("SyncConflictWatcher lifecycle binds listeners and its startup fallback", a
       await waitForSweepToSettle(harness.watcher);
 
       assert.equal(harness.ops.enumerations, 1);
-      assert.equal(harness.ops.renames.length, 1);
+      assert.equal(harness.ops.renames.length, 2);
       assert.equal(harness.timers.active.size, 0);
     });
   } finally {

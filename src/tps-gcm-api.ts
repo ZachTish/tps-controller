@@ -53,9 +53,132 @@ export interface GcmTasksApi {
   ) => Promise<GcmTaskMutationResult>;
 }
 
+export interface GcmNativeRecordHandle {
+  file: TFile;
+  path: string;
+  id: string;
+  kind: string;
+  frontmatter: Record<string, unknown>;
+}
+
+export interface GcmNativeRecordInspection {
+  id: string;
+  kind: string;
+  schemaVersion: number;
+  frontmatter: Record<string, unknown>;
+  profile?: {
+    identityTagPrefix?: string;
+  };
+}
+
+export interface GcmNativeRecordSnapshot {
+  token: number;
+  revision: number;
+  records: GcmNativeRecordHandle[];
+}
+
+export interface GcmNativeRecordsApi {
+  version?: number;
+  isEnabled?: () => boolean;
+  create?: (
+    kind: 'calendar-event',
+    properties: Record<string, unknown>,
+    options?: Record<string, unknown>,
+  ) => Promise<GcmNativeRecordHandle>;
+  update?: (
+    reference: TFile | string,
+    updates: Record<string, unknown>,
+    cause?: Record<string, unknown>,
+  ) => Promise<GcmNativeRecordHandle | null>;
+  rename?: (
+    reference: TFile | string,
+    fileName: string,
+    cause?: Record<string, unknown>,
+  ) => Promise<GcmNativeRecordHandle | null>;
+  archive?: (
+    reference: TFile | string,
+    cause?: Record<string, unknown>,
+  ) => Promise<GcmNativeRecordHandle | null>;
+  inspect?: (frontmatter: unknown) => GcmNativeRecordInspection | null;
+  /** API v5: authoritative on-disk enumeration; omit kind to include every native-record kind. */
+  list?: (kind?: string) => Promise<GcmNativeRecordHandle[]>;
+  /** API v5: authoritative records plus identity and mutation revisions for plan validation. */
+  snapshot?: (kind?: string) => Promise<GcmNativeRecordSnapshot>;
+  resolve?: (reference: TFile | string) => Promise<GcmNativeRecordHandle | null>;
+  /** API v5: preflight exact ordered payloads against one authoritative index. */
+  canApplyIdentityPlan?: (entries: Array<{
+    operation: 'create';
+    nextId: string;
+    kind: 'calendar-event';
+    properties: Record<string, unknown>;
+    fileName?: string;
+  } | {
+    operation: 'reidentify';
+    nextId: string;
+    reference: TFile | string;
+    updates: Array<Record<string, unknown>>;
+    fileName?: string;
+  }>, snapshotToken?: number) => Promise<boolean>;
+  /** API v5: exact payload plus ordered virtual path allocation, bound by the returned token. */
+  planIdentityChanges?: (entries: Array<{
+    operation: 'create';
+    nextId: string;
+    kind: 'calendar-event';
+    properties: Record<string, unknown>;
+    fileName?: string;
+  } | {
+    operation: 'reidentify';
+    nextId: string;
+    reference: TFile | string;
+    updates: Array<Record<string, unknown>>;
+    fileName?: string;
+  }>, snapshot: Pick<GcmNativeRecordSnapshot, 'token' | 'revision'>) => Promise<{
+    token: number;
+    revision: number;
+    entries: Array<{ operation: 'create' | 'reidentify'; nextId: string; expectedPath: string | null }>;
+  } | null>;
+  /** API v5: applies one previously planned exact identity/property/path batch. */
+  applyIdentityChanges?: (
+    plannedBatch: {
+      token: number;
+      revision: number;
+      entries: Array<{ operation: 'create' | 'reidentify'; nextId: string; expectedPath: string | null }>;
+    },
+    entries: Array<{
+      operation: 'create';
+      nextId: string;
+      kind: 'calendar-event';
+      properties: Record<string, unknown>;
+      fileName?: string;
+    } | {
+      operation: 'reidentify';
+      nextId: string;
+      reference: TFile | string;
+      updates: Array<Record<string, unknown>>;
+      fileName?: string;
+    }>,
+    cause?: Record<string, unknown>,
+  ) => Promise<{
+    ok: boolean;
+    handles: GcmNativeRecordHandle[];
+    failedIndex: number | null;
+    error?: string;
+  }>;
+  /** API v5: non-mutating authoritative ownership/reservation preflight. */
+  canReidentify?: (reference: TFile | string, newId: string) => Promise<boolean>;
+  /** API v5: compare-and-swap the canonical identity without changing path/body/business fields. */
+  reidentify?: (
+    reference: TFile | string,
+    newId: string,
+    cause?: Record<string, unknown>,
+    options?: { fileName?: string; expectedPath?: string; planToken?: number },
+  ) => Promise<GcmNativeRecordHandle | null>;
+}
+
 export interface GcmApi {
   events?: GcmEventsApi;
   tasks?: GcmTasksApi;
+  nativeRecords?: GcmNativeRecordsApi;
   dailyNotes?: {
     version?: number;
     ensureForIsoDate?: (isoDate: string) => Promise<TFile | null>;

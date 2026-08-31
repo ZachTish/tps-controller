@@ -1,5 +1,7 @@
 import { App, TFile, Notice, normalizePath } from "obsidian";
 import * as logger from "../logger";
+import { getGcmApi } from "../tps-gcm-api";
+import { parseCalendarRecordId } from "./calendar-record-identity";
 
 export class SyncConflictWatcher {
     private app: App;
@@ -58,6 +60,12 @@ export class SyncConflictWatcher {
             }
         });
         this.eventDisposers.push(() => this.app.vault.offref(renameRef));
+        const metadataChangedRef = this.app.metadataCache.on("changed", async (file) => {
+            if (file instanceof TFile && file.extension === "md") {
+                await this.checkAndArchiveIfConflict(file, "metadata-changed");
+            }
+        });
+        this.eventDisposers.push(() => this.app.metadataCache.offref(metadataChangedRef));
 
         // 2. Do an initial sweep to catch any created while Obsidian was closed.
         // Must wait for metadataCache to be fully populated: hasCalendarIdentity()
@@ -143,7 +151,7 @@ export class SyncConflictWatcher {
      * Checks if a file has a conflict-style name and if its canonical parent exists.
      * If so, safely archives it.
      */
-    private async checkAndArchiveIfConflict(file: TFile, cause: "vault-create" | "vault-rename" | "startup-sweep"): Promise<boolean> {
+    private async checkAndArchiveIfConflict(file: TFile, cause: "vault-create" | "vault-rename" | "metadata-changed" | "startup-sweep"): Promise<boolean> {
         // Must match standard Sync conflict patterns
         if (!this.isConflictName(file.basename)) return false;
         logger.flow("SyncConflictWatcher", "check:start", {
@@ -158,10 +166,17 @@ export class SyncConflictWatcher {
             return false;
         }
 
-        // Skip files that have a calendar event identity key in frontmatter.
+        // Skip files that have a TPS identity in frontmatter. Calendar records
+        // now use only tpsId; the configured event-id key remains a read-only
+        // compatibility fallback for older meeting notes.
         // These are auto-created meeting notes — let AutoCreateService manage them.
         // Archiving them here would cause delete+recreate loops.
-        if (this.hasCalendarIdentity(file)) {
+        const calendarIdentity = this.hasCalendarIdentity(file);
+        if (calendarIdentity === null) {
+            logger.flow("SyncConflictWatcher", "check:defer-metadata", { cause, path: file.path });
+            return false;
+        }
+        if (calendarIdentity) {
             logger.flow("SyncConflictWatcher", "check:skip-calendar-identity", {
                 cause,
                 path: file.path,
@@ -200,14 +215,24 @@ export class SyncConflictWatcher {
         return false;
     }
 
-    /** Check if a file has a calendar event identity key in its frontmatter. */
-    private hasCalendarIdentity(file: TFile): boolean {
+    /** Check if a file has a canonical or legacy calendar identity. */
+    private hasCalendarIdentity(file: TFile): boolean | null {
         const cache = this.app.metadataCache.getFileCache(file);
-        const fm = cache?.frontmatter;
+        if (!cache) return null;
+        const fm = cache.frontmatter;
         if (!fm) return false;
 
-        const key = this.eventIdKey.toLowerCase();
-        return Object.keys(fm).some(k => k.toLowerCase() === key && fm[k]);
+        const inspected = getGcmApi(this.app)?.nativeRecords?.inspect?.(fm);
+        if (inspected?.kind === "calendar-event" && !!inspected.id) return true;
+
+        const read = (key: string): string => {
+            const normalized = key.trim().toLowerCase();
+            const actual = Object.keys(fm).find((candidate) => candidate.trim().toLowerCase() === normalized);
+            return actual ? String(fm[actual] ?? "").trim() : "";
+        };
+        if (parseCalendarRecordId(read("tpsId"))) return true;
+        if (read(this.eventIdKey)) return true;
+        return read("externalId").startsWith("calendar:");
     }
 
     private isConflictName(basename: string): boolean {
@@ -228,7 +253,7 @@ export class SyncConflictWatcher {
 
     private async archiveDuplicate(
         file: TFile,
-        cause: "vault-create" | "vault-rename" | "startup-sweep",
+        cause: "vault-create" | "vault-rename" | "metadata-changed" | "startup-sweep",
         expectedCanonicalPath: string,
     ): Promise<boolean> {
         const dupFolder = this.getDuplicateArchiveFolder();

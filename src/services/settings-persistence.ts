@@ -3,6 +3,7 @@ import {
     normalizeExternalCalendarTaskNoteFolder,
     normalizeExternalCalendarTaskNoteStrategy,
 } from "./external-calendar-task-note";
+import { normalizeCalendarUrl } from "../utils";
 
 type SettingsRecord = Record<string, unknown>;
 
@@ -14,6 +15,20 @@ const cloneSettingValue = <T>(value: T): T => {
     return JSON.parse(JSON.stringify(value)) as T;
 };
 
+export function countExternalCalendarsMissingId(value: unknown): number {
+    if (!Array.isArray(value)) return 0;
+    return value.filter((candidate) => {
+        if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return true;
+        return !String((candidate as SettingsRecord).id || "").trim();
+    }).length;
+}
+
+/** Reproduce Controller's pre-canonical-ID fallback so existing records migrate. */
+export function legacyCalendarConfigIdForUrl(value: unknown): string {
+    const normalizedUrl = normalizeCalendarUrl(String(value || ""));
+    return normalizedUrl ? `calendar-${legacyCalendarHash(normalizedUrl)}` : "";
+}
+
 /**
  * Normalize legacy calendar fields without replacing the array or valid calendar
  * objects. Settings controls retain these references while the panel is open.
@@ -24,11 +39,30 @@ export function normalizeExternalCalendarsInPlace(
 ): ExternalCalendarConfig[] {
     if (!Array.isArray(value)) return [];
 
+    const claimedIds = new Set(value
+        .map((candidate) => candidate && typeof candidate === "object" && !Array.isArray(candidate)
+            ? String((candidate as SettingsRecord).id || "").trim()
+            : "")
+        .filter(Boolean));
+
     value.forEach((candidate, index) => {
         const calendar = candidate && typeof candidate === "object" && !Array.isArray(candidate)
             ? candidate as ExternalCalendarConfig & SettingsRecord
             : {} as ExternalCalendarConfig & SettingsRecord;
         if (calendar !== candidate) value[index] = calendar;
+
+        const existingId = String(calendar.id || "").trim();
+        if (existingId) {
+            calendar.id = existingId;
+        } else {
+            const historicalId = legacyCalendarConfigIdForUrl(calendar.url);
+            const base = historicalId || `calendar-legacy-${stableSettingsHexHash(`empty\u0000${index}`)}`;
+            let id = base;
+            let suffix = 2;
+            while (claimedIds.has(id)) id = `${base}-${suffix++}`;
+            calendar.id = id;
+            claimedIds.add(id);
+        }
 
         const rawModeValue = (calendar as SettingsRecord).autoCreateMode;
         const rawMode = typeof rawModeValue === "string" ? rawModeValue : "";
@@ -57,6 +91,23 @@ export function normalizeExternalCalendarsInPlace(
     });
 
     return value as ExternalCalendarConfig[];
+}
+
+function legacyCalendarHash(value: string): string {
+    let hash = 2166136261;
+    for (let index = 0; index < value.length; index += 1) {
+        hash = Math.imul(hash ^ value.charCodeAt(index), 16777619);
+    }
+    return (hash >>> 0).toString(36);
+}
+
+function stableSettingsHexHash(value: string): string {
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < value.length; index += 1) {
+        hash ^= value.charCodeAt(index);
+        hash = Math.imul(hash, 0x01000193);
+    }
+    return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 /**

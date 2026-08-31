@@ -25,6 +25,11 @@ import {
     getFileReminderLiveWindowMs,
     shouldSkipStaleOneShotReminder,
 } from "./reminder-delivery-window";
+import {
+    calendarEventOccurrenceIdentity,
+    deriveCalendarRecordId,
+} from "./calendar-record-identity";
+import { getGcmApi } from "../tps-gcm-api";
 
 export interface PendingNotification {
     title: string;
@@ -59,6 +64,7 @@ interface ReminderFileLike {
 }
 
 interface LocalEventMatchIndex {
+    recordIds: Set<string>;
     eventIds: Set<string>;
     uidStartKeys: Set<string>;
     titleDayKeys: Set<string>;
@@ -864,6 +870,15 @@ export class ReminderEngine {
     ): Promise<ReminderEvaluationTarget[]> {
         const calendars = (settings.externalCalendars || []).filter((calendar) => calendar.enabled !== false);
         const urls = Array.from(new Set(calendars.map((calendar) => normalizeCalendarUrl(calendar.url)).filter(Boolean)));
+        const calendarIdsByUrl = new Map<string, string[]>();
+        for (const calendar of calendars) {
+            const url = normalizeCalendarUrl(calendar.url);
+            const id = String(calendar.id || "").trim();
+            if (!url || !id) continue;
+            const ids = calendarIdsByUrl.get(url) || [];
+            if (!ids.includes(id)) ids.push(id);
+            calendarIdsByUrl.set(url, ids);
+        }
         if (stats) stats.externalUrls = urls.length;
         if (!urls.length) return [];
 
@@ -889,7 +904,12 @@ export class ReminderEngine {
                         if (stats) stats.externalHidden++;
                         continue;
                     }
-                    if (this.matchesLocalEvent(localIndex, event)) {
+                    const canonicalRecordIds = await Promise.all(
+                        (calendarIdsByUrl.get(url) || []).map((calendarId) =>
+                            deriveCalendarRecordId(calendarId, calendarEventOccurrenceIdentity(event)),
+                        ),
+                    );
+                    if (this.matchesLocalEvent(localIndex, event, canonicalRecordIds)) {
                         if (stats) stats.externalMatchedLocal++;
                         continue;
                     }
@@ -969,14 +989,44 @@ export class ReminderEngine {
         files: TFile[],
         settings: TPSControllerSettings,
     ): Promise<LocalEventMatchIndex> {
+        const recordIds = new Set<string>();
         const eventIds = new Set<string>();
         const uidStartKeys = new Set<string>();
         const titleDayKeys = new Set<string>();
         const terminalTitleKeys = new Set<string>();
+        const authoritativeFrontmatterByPath = new Map<string, Record<string, unknown>>();
+        const nativeRecords = getGcmApi(this.app)?.nativeRecords;
+        try {
+            const handles = typeof nativeRecords?.snapshot === "function"
+                ? (await nativeRecords.snapshot()).records
+                : typeof nativeRecords?.list === "function"
+                    ? await nativeRecords.list("calendar-event")
+                    : [];
+            for (const handle of handles) {
+                if (String(handle.kind || "") !== "calendar-event") continue;
+                const identity = this.normalizeRecordIdentity(handle.id);
+                if (identity) recordIds.add(identity);
+                authoritativeFrontmatterByPath.set(handle.path, handle.frontmatter);
+            }
+        } catch (error) {
+            // Reminder matching remains best-effort when GCM detects blocked
+            // identity evidence. Do not turn an optional external source into
+            // a failure of already-discovered file reminders.
+            logger.flowWarn("ReminderEngine", "native-record-index:failed", {
+                error: logger.errorSummary(error),
+            });
+        }
 
         for (const file of files) {
             const cache = this.app.metadataCache.getFileCache(file);
-            const fm = (cache?.frontmatter || {}) as Record<string, unknown>;
+            const fm = authoritativeFrontmatterByPath.get(file.path)
+                || (cache?.frontmatter || {}) as Record<string, unknown>;
+            const inspectedId = this.normalizeRecordIdentity(
+                getGcmApi(this.app)?.nativeRecords?.inspect?.(fm)?.id,
+            );
+            const propertyId = this.normalizeRecordIdentity(this.findKeyInsensitive(fm, "tpsId"));
+            if (inspectedId) recordIds.add(inspectedId);
+            if (propertyId) recordIds.add(propertyId);
             const fileEventIds = this.findIdentityValues(fm, [
                 settings.eventIdKey,
                 "externalEventId",
@@ -1034,7 +1084,7 @@ export class ReminderEngine {
             }
         }
 
-        return { eventIds, uidStartKeys, titleDayKeys, terminalTitleKeys };
+        return { recordIds, eventIds, uidStartKeys, titleDayKeys, terminalTitleKeys };
     }
 
     private extractInlineCalendarIdentity(
@@ -1119,7 +1169,18 @@ export class ReminderEngine {
             .trim();
     }
 
-    private matchesLocalEvent(index: LocalEventMatchIndex, event: ExternalCalendarEvent): boolean {
+    private matchesLocalEvent(
+        index: LocalEventMatchIndex,
+        event: ExternalCalendarEvent,
+        canonicalRecordIds: string[] = [],
+    ): boolean {
+        if (canonicalRecordIds.some((identity) => {
+            const key = this.normalizeRecordIdentity(identity);
+            return !!key && index.recordIds.has(key);
+        })) return true;
+
+        // Legacy identity fields remain read-only fallbacks while older notes
+        // are migrating. New native records persist only their canonical tpsId.
         const externalIdentities = [event.id, event.occurrenceIdentity]
             .map((value) => this.normalizeIdentityValue(value))
             .filter((value): value is string => !!value);
@@ -1175,6 +1236,10 @@ export class ReminderEngine {
             return null;
         }
         return normalized;
+    }
+
+    private normalizeRecordIdentity(value: unknown): string | null {
+        return this.normalizeIdentityValue(value)?.toLocaleLowerCase() || null;
     }
 
     private extractUid(id: string): string | null {

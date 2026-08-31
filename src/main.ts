@@ -29,6 +29,7 @@ import {
 } from "./services/s3-credential-service";
 import {
     CoalescedSettingsSaveQueue,
+    countExternalCalendarsMissingId,
     mergeSettingsChangeSet,
     normalizeExternalCalendarsInPlace,
 } from "./services/settings-persistence";
@@ -596,6 +597,10 @@ export default class TPSControllerPlugin extends Plugin {
         const data = loaded && typeof loaded === "object" && !Array.isArray(loaded)
             ? loaded as Record<string, unknown>
             : {};
+        const calendarIdMigrationChanged = countExternalCalendarsMissingId(data.externalCalendars) > 0;
+        const externalCalendarsBeforeIdMigration = calendarIdMigrationChanged
+            ? JSON.parse(JSON.stringify(data.externalCalendars || []))
+            : null;
         this.settings = {
             ...DEFAULT_CONTROLLER_SETTINGS,
             ...data,
@@ -604,6 +609,9 @@ export default class TPSControllerPlugin extends Plugin {
         // Establish local intent before any migration mutates settings. Migration
         // saves can then merge only their changed fields into the latest data.
         this.persistedSettingsSnapshot = this.snapshotSettingsForDiff();
+        if (externalCalendarsBeforeIdMigration) {
+            this.persistedSettingsSnapshot.externalCalendars = externalCalendarsBeforeIdMigration;
+        }
         const resolvedNotificationProvider = resolveNotificationDeliveryProvider(
             data.notificationDeliveryProvider,
             Object.keys(data).length > 0,
@@ -641,7 +649,10 @@ export default class TPSControllerPlugin extends Plugin {
         this.sanitizeS3agleAttachmentAutomationSettings();
         logger.setLoggingEnabled(this.settings.enableLogging);
         let finalMigrationSaveSucceeded = true;
-        if (importedS3agleSettings || s3CredentialMigration.changed || notificationProviderMigrationChanged) {
+        if (importedS3agleSettings
+            || s3CredentialMigration.changed
+            || notificationProviderMigrationChanged
+            || calendarIdMigrationChanged) {
             try {
                 await this.saveSettings();
             } catch (error) {
@@ -655,6 +666,10 @@ export default class TPSControllerPlugin extends Plugin {
                 if (notificationProviderMigrationChanged) {
                     logger.flowError("NotificationDelivery", "provider:migration-save-failed", error);
                     new Notice("TPS Controller could not save the notification service migration. Existing settings were left available for retry.", 12000);
+                }
+                if (calendarIdMigrationChanged) {
+                    logger.flowError("CalendarIdentity", "configuration-id-migration-save-failed", error);
+                    new Notice("TPS Controller could not save stable calendar configuration IDs. Calendar record sync will retry after settings can be saved.", 12000);
                 }
             }
         }

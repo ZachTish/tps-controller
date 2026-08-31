@@ -79,10 +79,29 @@ const settingsPersistenceBundle = await build({
 });
 const {
   CoalescedSettingsSaveQueue,
+  countExternalCalendarsMissingId,
   fillMissingLegacyPluginSettings,
+  legacyCalendarConfigIdForUrl,
   mergeSettingsChangeSet,
   normalizeExternalCalendarsInPlace,
 } = await import(`data:text/javascript;base64,${Buffer.from(settingsPersistenceBundle.outputFiles[0].text).toString("base64")}`);
+
+test("external calendar normalization backfills one stable unique ID without replacing editor objects", () => {
+  const missing = { url: "https://calendar.example/legacy.ics", enabled: true };
+  const duplicateUrl = { url: "https://calendar.example/legacy.ics", enabled: false };
+  const calendars = [missing, duplicateUrl];
+  assert.equal(countExternalCalendarsMissingId(calendars), 2);
+  const normalized = normalizeExternalCalendarsInPlace(calendars, (path) => path);
+  assert.strictEqual(normalized[0], missing);
+  assert.strictEqual(normalized[1], duplicateUrl);
+  assert.equal(missing.id, legacyCalendarConfigIdForUrl(missing.url));
+  assert.equal(duplicateUrl.id, `${legacyCalendarConfigIdForUrl(duplicateUrl.url)}-2`);
+  assert.notEqual(missing.id, duplicateUrl.id);
+  assert.equal(countExternalCalendarsMissingId(calendars), 0);
+  const firstIds = calendars.map((calendar) => calendar.id);
+  normalizeExternalCalendarsInPlace(calendars, (path) => path);
+  assert.deepEqual(calendars.map((calendar) => calendar.id), firstIds);
+});
 
 test("external calendar normalization preserves live settings-editor references across every keystroke", () => {
   const capturedCalendar = { id: "calendar-a", url: "", enabled: true };
