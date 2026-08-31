@@ -102,7 +102,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     ${isCtrl ? '🟢 Controller (Background Automation)' : '⚪ User (Normal Use)'}
                 </span>
                 <br><small class="tps-role-hint">
-                    ${isCtrl ? 'This device runs automation (calendar sync, reminders, and maintenance) while keeping the normal Obsidian UI available.' : 'This device is in normal user mode — Controller automation stays off while paired TishOS schedule publication remains role-agnostic.'}
+                    ${isCtrl ? 'This device runs automation (calendar sync, reminders, and maintenance) while keeping the normal Obsidian UI available.' : 'This device is in normal user mode — Controller automation stays off. Paired Apple devices may publish TishOS schedules; Windows, Linux, and Android may run the local Obsidian fallback.'}
                 </small>
             `;
         };
@@ -1142,11 +1142,19 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             });
 
         if (selectedProvider.id === 'tishos') {
-            providerSetting.addButton(button => button
-                .setButtonText('Open TishOS')
-                .onClick(() => this.plugin.openTishOSNativeNotificationSettings()));
+            const deliveryAuditStatus = this.plugin.getReminderDeliveryAuditStatus();
+            const localObsidianFallback = deliveryAuditStatus.tishOSNativeNotificationsSupported === false;
+            if (!localObsidianFallback) {
+                providerSetting.addButton(button => button
+                    .setButtonText('Open TishOS')
+                    .onClick(() => this.plugin.openTishOSNativeNotificationSettings()));
+            }
             const bridgeStatus = this.plugin.getTishOSCommandBridgeStatus();
-            const scheduleDescription = this.plugin.settings.enableReminders !== true
+            const scheduleDescription = localObsidianFallback
+                ? this.plugin.settings.enableReminders !== true
+                    ? 'Local Obsidian fallback is blocked because Enable Reminders is off.'
+                    : 'TishOS is unavailable on this platform. Reminder rules produce local Obsidian notices while Obsidian is open; a closed or suspended app cannot be notified.'
+                : this.plugin.settings.enableReminders !== true
                 ? 'Blocked because Enable Reminders is off.'
                 : !bridgeStatus.available
                     ? 'Device-local pairing state is unavailable.'
@@ -1156,18 +1164,21 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                             .map((client) => `${client.device}: ${this.describeNativeNotificationStatus(client)}`)
                             .join(' · ');
             new Setting(deliverySection)
-                .setName('Local TishOS schedule')
+                .setName(localObsidianFallback ? 'Local Obsidian fallback' : 'Local TishOS schedule')
                 .setDesc(scheduleDescription)
-                .addButton(button => button
-                    .setButtonText('Refresh Schedule')
-                    .onClick(async () => {
-                        button.setDisabled(true);
-                        try {
-                            await this.plugin.refreshTishOSCommandBridgeCatalogs();
-                        } finally {
-                            this.redisplayPreservingScroll();
-                        }
-                    }));
+                .then(setting => {
+                    if (localObsidianFallback) return;
+                    setting.addButton(button => button
+                        .setButtonText('Refresh Schedule')
+                        .onClick(async () => {
+                            button.setDisabled(true);
+                            try {
+                                await this.plugin.refreshTishOSCommandBridgeCatalogs();
+                            } finally {
+                                this.redisplayPreservingScroll();
+                            }
+                        }));
+                });
         } else if (selectedProvider.id === 'ntfy') {
             providerSetting.addButton(button => button
                 .setButtonText('Open ntfy Settings')

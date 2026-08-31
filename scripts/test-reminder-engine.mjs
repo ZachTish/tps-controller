@@ -964,9 +964,10 @@ test('master reminder switch keeps the audit list and native schedule projection
   assert.deepEqual(await engine.projectScheduledNotifications(disabledSettings), []);
 });
 
-test('reminder audit surfaces report master, provider, and per-device publication truth', () => {
-  assert.match(mainSource, /getReminderDeliveryAuditStatus\(\)[\s\S]*remindersEnabled:[\s\S]*notificationDeliveryProvider:[\s\S]*localDeliveryMode:[\s\S]*commandBridge:/);
+test('reminder audit surfaces report master, provider, platform, and per-device publication truth', () => {
+  assert.match(mainSource, /getReminderDeliveryAuditStatus\(\)[\s\S]*remindersEnabled:[\s\S]*notificationDeliveryProvider:[\s\S]*localDeliveryMode:[\s\S]*tishOSNativeNotificationsSupported:[\s\S]*commandBridge:/);
   assert.match(notificationViewSource, /Reminder delivery is off\. No reminder is being published\./);
+  assert.match(notificationViewSource, /Local Obsidian notices are active while Obsidian is open/);
   assert.match(notificationViewSource, /ntfy delivery does not run on this mobile\/User device/);
   assert.match(notificationViewSource, /nativeNotificationState === 'pending'/);
   assert.match(notificationViewSource, /nativeNotificationReason/);
@@ -978,7 +979,10 @@ test('reminder audit surfaces report master, provider, and per-device publicatio
   assert.match(settingsTabSource, /ntfy is selected/);
   assert.match(settingsTabSource, /nativeNotificationReason/);
   assert.match(settingsTabSource, /nativeNotificationPublishedAt/);
-  assert.match(settingsTabSource, /\.setName\('Local TishOS schedule'\)/);
+  assert.match(settingsTabSource, /\.setName\(localObsidianFallback \? 'Local Obsidian fallback' : 'Local TishOS schedule'\)/);
+  assert.match(settingsTabSource, /tishOSNativeNotificationsSupported === false/);
+  assert.match(settingsTabSource, /Local Obsidian fallback is blocked because Enable Reminders is off/);
+  assert.match(settingsTabSource, /a closed or suspended app cannot be notified/);
 });
 
 test('native schedule retains the modal-visible due occurrence with its stable fire time', async () => {
@@ -1682,18 +1686,30 @@ test('ignore-path edits invalidate every reminder run and refresh open notificat
   assert.equal((settingsTabSource.match(/this\.plugin\.refreshReminderPolicy\(\);/g) || []).length, 8);
 });
 
-test('direct reminder delivery runs only for ntfy on the desktop Controller', () => {
+test('direct reminder delivery preserves ntfy ownership and adds role-agnostic local fallback', () => {
   const { resolveReminderDeliveryMode } = loadReminderRuntimePolicyModule();
   const resolve = (overrides = {}) => resolveReminderDeliveryMode({
     enableReminders: true,
     notificationDeliveryProvider: 'ntfy',
     isController: true,
     isMobile: false,
+    supportsTishOSNativeNotifications: true,
     ...overrides,
   });
 
   assert.equal(resolve(), 'ntfy');
   assert.equal(resolve({ notificationDeliveryProvider: 'tishos' }), null);
+  assert.equal(resolve({
+    notificationDeliveryProvider: 'tishos',
+    supportsTishOSNativeNotifications: false,
+    isController: false,
+  }), 'local-obsidian');
+  assert.equal(resolve({
+    notificationDeliveryProvider: 'tishos',
+    supportsTishOSNativeNotifications: false,
+    isController: false,
+    isMobile: true,
+  }), 'local-obsidian');
   assert.equal(resolve({ isController: false }), null);
   assert.equal(resolve({ isMobile: true }), null);
   assert.equal(resolve({
@@ -1704,12 +1720,18 @@ test('direct reminder delivery runs only for ntfy on the desktop Controller', ()
   }), null);
 });
 
-test('ntfy checks use one Controller-owned alert state before Messager lookup', () => {
+test('consuming checks reuse device-local alert state and local fallback exits before Messager lookup', () => {
   assert.match(typesSource, /notificationDeliveryProvider: NotificationDeliveryProvider/);
   assert.match(mainSource, /const evaluationAlertState = this\.cloneAlertState\(this\.settings\.alertState\)/);
   assert.match(mainSource, /const evaluationSettings: TPSControllerSettings = \{[\s\S]*alertState: evaluationAlertState/);
   assert.match(mainSource, /this\.settings\.alertState = evaluationAlertState;[\s\S]*this\.scheduleReminderStateSave\(\)/);
+  assert.match(mainSource, /loadAlertStateFromLocalStorage\(\)/);
+  assert.match(mainSource, /persistAlertStateToLocalStorage\(this\.settings\.alertState\)/);
   assert.doesNotMatch(mainSource, /localUserAlertState/);
+  const localFallbackExit = mainSource.indexOf('if (deliveryMode === "local-obsidian")');
+  const notifierLookup = mainSource.indexOf('const notifier = this.getNotifierPlugin();', localFallbackExit);
+  assert.ok(localFallbackExit > 0 && notifierLookup > localFallbackExit);
+  assert.match(mainSource.slice(localFallbackExit, notifierLookup), /return;/);
   assert.match(mainSource, /delivery:messager-skipped-role-change/);
   assert.match(mainSource, /check:join-active/);
   assert.match(mainSource, /check:discarded-stopped-run/);

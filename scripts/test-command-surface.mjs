@@ -454,7 +454,7 @@ test("notification delivery uses one provider selector and restarts the affected
     settingsTabSource,
     /rem\.repeatIntervalMinutes = num;[\s\S]*await this\.plugin\.saveSettings\(\);[\s\S]*this\.plugin\.restartReminderLoop\(\)/,
   );
-  assert.match(settingsTabSource, /paired TishOS schedule publication remains role-agnostic/);
+  assert.match(settingsTabSource, /Paired Apple devices may publish TishOS schedules; Windows, Linux, and Android may run the local Obsidian fallback/);
   assert.match(settingsTabSource, /await this\.plugin\.resetReminderDeliveryState\(\)/);
   assert.doesNotMatch(reminderPageSource, /Local Notices on User Devices/);
 });
@@ -521,7 +521,8 @@ test("controller logging keeps command and mutation flows traceable", () => {
   assert.match(mainSource, /logger\.timeAsync\("Command", commandId/);
   assert.match(mainSource, /force-calendar-sync:controller-run/);
   assert.match(mainSource, /force-calendar-sync:replica-request/);
-  assert.match(mainSource, /force-reminder-check:controller-run/);
+  assert.match(mainSource, /force-reminder-check:current-device-run/);
+  assert.match(mainSource, /deliveryMode === "local-obsidian"[\s\S]*this\.runReminderCheck\(deliveryMode\)/);
   assert.match(mainSource, /force-reminder-check:replica-request/);
   assert.match(mainSource, /two-stage-archive:manual-result/);
 });

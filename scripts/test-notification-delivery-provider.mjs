@@ -23,6 +23,7 @@ const policy = await importBundled("../src/services/reminder-runtime-policy.ts")
 const mainSource = await readFile(new URL("../src/main.ts", import.meta.url), "utf8");
 const settingsSource = await readFile(new URL("../src/settings-tab.ts", import.meta.url), "utf8");
 const typesSource = await readFile(new URL("../src/types.ts", import.meta.url), "utf8");
+const notificationViewSource = await readFile(new URL("../src/views/notification-view.ts", import.meta.url), "utf8");
 
 test("notification provider registry is explicit and extensible", () => {
   assert.deepEqual(
@@ -87,30 +88,65 @@ test("layout readiness cannot substitute for a resolved or complete metadata sna
   );
 });
 
-test("only the selected direct provider can consume reminder state", () => {
+test("TishOS support and local Obsidian fallback follow the host platform", () => {
+  const platforms = {
+    macos: { isDesktopApp: true, isIosApp: false, isMacOS: true },
+    ios: { isDesktopApp: false, isIosApp: true, isMacOS: true },
+    ipados: { isDesktopApp: false, isIosApp: true, isMacOS: true },
+    windows: { isDesktopApp: true, isIosApp: false, isMacOS: false },
+    linux: { isDesktopApp: true, isIosApp: false, isMacOS: false },
+    android: { isDesktopApp: false, isIosApp: false, isMacOS: false },
+  };
+
+  for (const name of ["macos", "ios", "ipados"]) {
+    assert.equal(policy.supportsTishOSNotificationDelivery(platforms[name]), true, name);
+  }
+  for (const name of ["windows", "linux", "android"]) {
+    assert.equal(policy.supportsTishOSNotificationDelivery(platforms[name]), false, name);
+  }
+
   const resolve = (overrides = {}) => policy.resolveReminderDeliveryMode({
     enableReminders: true,
-    notificationDeliveryProvider: "ntfy",
-    isController: true,
+    notificationDeliveryProvider: "tishos",
+    isController: false,
     isMobile: false,
+    supportsTishOSNativeNotifications: true,
     ...overrides,
   });
 
-  assert.equal(resolve(), "ntfy");
-  assert.equal(resolve({ notificationDeliveryProvider: "tishos" }), null);
-  assert.equal(resolve({ isController: false }), null);
-  assert.equal(resolve({ isMobile: true }), null);
+  assert.equal(resolve(), null, "macOS/iOS/iPadOS keep TishOS publication without a consuming loop");
+  assert.equal(resolve({ supportsTishOSNativeNotifications: false }), "local-obsidian");
+  assert.equal(resolve({ supportsTishOSNativeNotifications: false, isController: true }), "local-obsidian");
+  assert.equal(resolve({ supportsTishOSNativeNotifications: false, isMobile: true }), "local-obsidian");
+  assert.equal(resolve({
+    notificationDeliveryProvider: "ntfy",
+    isController: true,
+  }), "ntfy");
+  assert.equal(resolve({ notificationDeliveryProvider: "ntfy" }), null);
+  assert.equal(resolve({
+    notificationDeliveryProvider: "ntfy",
+    isController: true,
+    isMobile: true,
+  }), null);
   assert.equal(resolve({ enableReminders: false }), null);
   assert.equal(resolve({ enableReminders: "true" }), null);
 });
 
-test("Controller persists one provider, gates both routes, and clears the retired TishOS schedule", () => {
+test("Controller persists one provider, gates all routes, and isolates local fallback from Messager", () => {
   assert.match(typesSource, /notificationDeliveryProvider: NotificationDeliveryProvider/);
   assert.match(typesSource, /notificationDeliveryProvider: "tishos"/);
   assert.doesNotMatch(typesSource, /enableLocalReminderNoticesOnUserDevices/);
   assert.match(mainSource, /notificationScheduleProvider: \(\) => this\.settings\.notificationDeliveryProvider === "tishos"[\s\S]*Promise\.resolve\(\[\]\)/);
   assert.match(mainSource, /notificationDeliveryProvider === "tishos"[\s\S]*refreshCatalogs\("manual-reminder-check"\)/);
   assert.match(mainSource, /this\.settings\.notificationDeliveryProvider !== "ntfy"[\s\S]*TimeTrackingReminder/);
+  assert.match(mainSource, /supportsTishOSNativeNotifications: supportsTishOSNotificationDelivery\(Platform\)/);
+  assert.match(mainSource, /deliveryMode === "local-obsidian"[\s\S]*route: "local-obsidian"[\s\S]*return;/);
+  const localFallbackExit = mainSource.indexOf('if (deliveryMode === "local-obsidian")');
+  const notifierLookup = mainSource.indexOf("const notifier = this.getNotifierPlugin();", localFallbackExit);
+  assert.ok(localFallbackExit > 0 && notifierLookup > localFallbackExit);
+  assert.match(mainSource.slice(localFallbackExit, notifierLookup), /return;/);
+  assert.match(mainSource, /force-reminder-check:current-device-run[\s\S]*this\.runReminderCheck\(deliveryMode\)/);
+  assert.match(mainSource, /tishOSNativeNotificationsSupported: supportsTishOSNotificationDelivery\(Platform\)/);
   assert.match(mainSource, /delete \(this\.settings as unknown as Record<string, unknown>\)\.enableLocalReminderNoticesOnUserDevices/);
   assert.match(mainSource, /!Platform\.isMobile[\s\S]*tps-device-role-[\s\S]*=== "controller"/);
   assert.match(mainSource, /notificationScheduleReadiness:[\s\S]*metadata-index-not-ready/);
@@ -122,6 +158,7 @@ test("Controller persists one provider, gates both routes, and clears the retire
     "metadata readiness must be registered before asynchronous settings migration can yield",
   );
   assert.match(mainSource, /metadata-resolved-post-active/);
+  assert.match(notificationViewSource, /localDeliveryMode === 'local-obsidian'[\s\S]*Local Obsidian notices are active while Obsidian is open/);
 });
 
 test("Reminder settings expose a provider picker rather than competing delivery toggles", () => {
@@ -135,6 +172,10 @@ test("Reminder settings expose a provider picker rather than competing delivery 
   assert.match(page, /await this\.plugin\.saveSettings\(\);[\s\S]*await this\.plugin\.refreshTishOSCommandBridgeCatalogs\(\);[\s\S]*restartReminderLoop\(\)/);
   assert.match(page, /selectedProvider\.id === 'tishos'/);
   assert.match(page, /selectedProvider\.id === 'ntfy'/);
+  assert.match(page, /Local Obsidian fallback/);
+  assert.match(page, /Local Obsidian fallback is blocked because Enable Reminders is off/);
+  assert.match(page, /a closed or suspended app cannot be notified/);
+  assert.match(page, /localObsidianFallback[\s\S]*Open TishOS/);
   assert.doesNotMatch(page, /Local Notices on User Devices/);
   assert.doesNotMatch(page, /enabling both delivery routes/);
 });

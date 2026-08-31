@@ -11,7 +11,8 @@ export const NOTIFICATION_VIEW_TYPE = 'tps-notification-view';
 interface ReminderDeliveryAuditStatus {
     remindersEnabled: boolean;
     notificationDeliveryProvider: 'tishos' | 'ntfy';
-    localDeliveryMode: 'ntfy' | null;
+    localDeliveryMode: 'local-obsidian' | 'ntfy' | null;
+    tishOSNativeNotificationsSupported: boolean;
     commandBridge: {
         available: boolean;
         clients: Array<{
@@ -617,6 +618,9 @@ export class NotificationView extends ItemView {
         if (!status) return '';
         if (!status.remindersEnabled) {
             return 'Reminder delivery is off. No reminder is being published.';
+        }
+        if (status.localDeliveryMode === 'local-obsidian') {
+            return 'TishOS is unavailable on this platform. Local Obsidian notices are active while Obsidian is open.';
         }
         if (status.notificationDeliveryProvider === 'ntfy') {
             return status.localDeliveryMode === 'ntfy'

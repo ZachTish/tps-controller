@@ -10,7 +10,7 @@ export const NOTIFICATION_DELIVERY_PROVIDERS: readonly NotificationDeliveryProvi
     {
         id: "tishos",
         label: "TishOS",
-        description: "Apple native notifications and actions through the paired TishOS app.",
+        description: "Apple native notifications and actions through the paired TishOS app. Windows, Linux, and Android use local Obsidian notices while Obsidian is open.",
     },
     {
         id: "ntfy",

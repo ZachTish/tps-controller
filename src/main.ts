@@ -35,6 +35,7 @@ import {
 } from "./services/settings-persistence";
 import {
     resolveReminderDeliveryMode,
+    supportsTishOSNotificationDelivery,
     type ReminderDeliveryMode,
 } from "./services/reminder-runtime-policy";
 import { resolveNotificationDeliveryProvider } from "./services/notification-delivery-provider";
@@ -341,9 +342,10 @@ export default class TPSControllerPlugin extends Plugin {
             id: "force-reminder-check",
             name: "Run Reminder Check Now",
             callback: () => this.traceCommand("force-reminder-check", async () => {
-                if (this.deviceRoleManager.isController()) {
-                    logger.flow("Command", "force-reminder-check:controller-run");
-                    await this.runReminderCheck();
+                const deliveryMode = this.getReminderDeliveryMode();
+                if (this.deviceRoleManager.isController() || deliveryMode === "local-obsidian") {
+                    logger.flow("Command", "force-reminder-check:current-device-run", { deliveryMode });
+                    await this.runReminderCheck(deliveryMode);
                 } else {
                     logger.flow("Command", "force-reminder-check:replica-request", { scope: ["reminders"] });
                     await this.requestSync(["reminders"]);
@@ -524,12 +526,14 @@ export default class TPSControllerPlugin extends Plugin {
         remindersEnabled: boolean;
         notificationDeliveryProvider: "tishos" | "ntfy";
         localDeliveryMode: ReminderDeliveryMode | null;
+        tishOSNativeNotificationsSupported: boolean;
         commandBridge: TishOSCommandBridgeStatus;
     } {
         return {
             remindersEnabled: this.settings.enableReminders === true,
             notificationDeliveryProvider: this.settings.notificationDeliveryProvider,
             localDeliveryMode: this.getReminderDeliveryMode(),
+            tishOSNativeNotificationsSupported: supportsTishOSNotificationDelivery(Platform),
             commandBridge: this.getTishOSCommandBridgeStatus(),
         };
     }
@@ -1484,6 +1488,7 @@ export default class TPSControllerPlugin extends Plugin {
             notificationDeliveryProvider: this.settings.notificationDeliveryProvider,
             isController: this.deviceRoleManager?.isController?.() === true,
             isMobile: Platform.isMobile,
+            supportsTishOSNativeNotifications: supportsTishOSNotificationDelivery(Platform),
         });
     }
 
@@ -1817,6 +1822,14 @@ export default class TPSControllerPlugin extends Plugin {
         });
 
         this.showLocalReminderNotices(batches);
+
+        if (deliveryMode === "local-obsidian") {
+            logger.flow("ReminderEngine", "delivery:done", {
+                batches: batches.length,
+                route: "local-obsidian",
+            });
+            return;
+        }
 
         if (!this.deviceRoleManager.isController() || Platform.isMobile) {
             logger.flowWarn("ReminderEngine", "delivery:messager-skipped-role-change", {
