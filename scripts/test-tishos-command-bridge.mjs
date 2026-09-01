@@ -708,6 +708,24 @@ test("removing a pending reminder series publishes silently for TishOS's next re
     [],
     "an unchanged follow-up publication must remain passive too",
   );
+
+  schedule = [];
+  const emptied = await harness.service.refreshCatalogs("last-task-completed-or-deleted");
+  const authoritativeEmpty = JSON.parse(harness.files.get(
+    `${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.json`,
+  ));
+  const { mac, ...unsigned } = authoritativeEmpty;
+  assert.deepEqual(authoritativeEmpty.items, []);
+  assert.equal(
+    await contract.verifyHmacSHA256Base64URL(
+      SECRET_BYTES,
+      notificationContract.canonicalNotificationSchedule(unsigned),
+      mac,
+    ),
+    true,
+    "removing the final series must publish a signed empty replacement, not delete the schedule",
+  );
+  assert.deepEqual(emptied.nativeNotificationRemovedSeriesPlatforms, ["ios"]);
 });
 
 test("advancing one series or aging out a delivered item does not foreground TishOS", async (t) => {
