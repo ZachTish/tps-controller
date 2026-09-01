@@ -352,7 +352,7 @@ export function shouldIgnoreForReminder(
     globalIgnoreStatuses: string[],
     globalIgnoreCheckboxStates: string[] = [],
     targetTags?: string[],
-    canceledStatusValue?: unknown,
+    canceledStatusValue?: unknown | unknown[],
 ): boolean {
     // Always merge global paths with per-reminder paths so global protections
     // (vault root, _ folders, etc.) apply even when a reminder overrides the list.
@@ -395,7 +395,10 @@ export function shouldIgnoreForReminder(
     // surface. Treat it as an implicit global ignore so custom and
     // recommended rules cannot accidentally notify for cancelled calendar
     // records merely because their own ignore/stop lists omit that value.
-    const normalizedIgnoreStatuses = [...ignoreStatuses, canceledStatusValue]
+    const cancellationStatuses = Array.isArray(canceledStatusValue)
+        ? canceledStatusValue
+        : [canceledStatusValue];
+    const normalizedIgnoreStatuses = [...ignoreStatuses, ...cancellationStatuses]
         .map(s => normalizeStatus(s))
         .filter(Boolean);
     if (normalizedIgnoreStatuses.some(s => statuses.has(s))) {
@@ -425,6 +428,29 @@ export function shouldIgnoreForReminder(
     }
 
     return false;
+}
+
+/** Resolve only this native record's current and historically applied cancellation labels. */
+export function getReminderCancellationStatuses(
+    frontmatter: Record<string, unknown> | null | undefined,
+    configuredStatus: unknown,
+    cancellationState: unknown,
+): unknown[] {
+    const statuses: unknown[] = [String(configuredStatus ?? "").trim() || "cancelled"];
+    if (!frontmatter || !cancellationState || typeof cancellationState !== "object" || Array.isArray(cancellationState)) {
+        return statuses;
+    }
+    const idKey = Object.keys(frontmatter).find((key) => key.trim().toLocaleLowerCase() === "tpsid");
+    const id = idKey ? String(frontmatter[idKey] || "").trim() : "";
+    if (!id) return statuses;
+    const stateKey = Object.keys(cancellationState as Record<string, unknown>)
+        .find((key) => key.trim().toLocaleLowerCase() === id.toLocaleLowerCase());
+    if (!stateKey) return statuses;
+    const entry = (cancellationState as Record<string, unknown>)[stateKey];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return statuses;
+    const appliedStatus = (entry as Record<string, unknown>).appliedStatus;
+    if (typeof appliedStatus === "string" && appliedStatus) statuses.push(appliedStatus);
+    return statuses;
 }
 
 // ============================================================================

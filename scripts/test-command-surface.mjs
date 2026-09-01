@@ -84,7 +84,33 @@ const {
   legacyCalendarConfigIdForUrl,
   mergeSettingsChangeSet,
   normalizeExternalCalendarsInPlace,
+  normalizeNativeCalendarCancellationState,
 } = await import(`data:text/javascript;base64,${Buffer.from(settingsPersistenceBundle.outputFiles[0].text).toString("base64")}`);
+
+test("private native calendar cancellation state keeps only valid tpsId-keyed entries", () => {
+  const canonicalId = `calendar:v1:${'A'.repeat(16)}:${'B'.repeat(27)}`;
+  assert.deepEqual(normalizeNativeCalendarCancellationState(null), {});
+  assert.deepEqual(normalizeNativeCalendarCancellationState({
+    [` ${canonicalId} `]: {
+      appliedStatus: "called-off",
+      previousStatusPresent: true,
+      previousStatus: "complete",
+      canRestore: true,
+      pendingApplication: true,
+      ignored: "value",
+    },
+    malformed: { appliedStatus: 42 },
+    blank: { appliedStatus: "" },
+  }), {
+    [canonicalId]: {
+      appliedStatus: "called-off",
+      previousStatusPresent: true,
+      previousStatus: "complete",
+      canRestore: true,
+      pendingApplication: true,
+    },
+  });
+});
 
 test("external calendar normalization backfills one stable unique ID without replacing editor objects", () => {
   const missing = { url: "https://calendar.example/legacy.ics", enabled: true };
@@ -203,6 +229,16 @@ test("Controller settings persistence changes only local keys in the newest payl
     enableLogging: false,
   });
   assert.throws(() => mergeSettingsChangeSet([], {}, []), /must be an object/);
+
+  const cancellationState = { "calendar:v1:source:event": { appliedStatus: "cancelled" } };
+  assert.deepEqual(
+    mergeSettingsChangeSet(
+      { synchronized: "newer", nativeCalendarCancellationState: {} },
+      { synchronized: "stale", nativeCalendarCancellationState: cancellationState },
+      ["nativeCalendarCancellationState"],
+    ),
+    { synchronized: "newer", nativeCalendarCancellationState: cancellationState },
+  );
 });
 
 test("an uncertain Controller write forces a same-as-baseline revert on retry", () => {

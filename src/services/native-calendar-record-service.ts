@@ -1,5 +1,10 @@
 import { App, TFile } from "obsidian";
-import type { ExternalCalendarConfig, ExternalCalendarEvent, TPSControllerSettings } from "../types";
+import type {
+    ExternalCalendarConfig,
+    ExternalCalendarEvent,
+    NativeCalendarCancellationState,
+    TPSControllerSettings,
+} from "../types";
 import { getGcmApi } from "../tps-gcm-api";
 import type { GcmNativeRecordHandle, GcmNativeRecordSnapshot, GcmNativeRecordsApi } from "../tps-gcm-api";
 import { normalizeCalendarUrl } from "../utils";
@@ -28,6 +33,8 @@ export const REDUNDANT_CALENDAR_RECORD_PROPERTIES = [
     "calendarMissingAt",
     "associatedNotePath",
     "associatedNoteStrategy",
+    "eventTitle",
+    "durationMinutes",
 ] as const;
 
 const LEGACY_IDENTITY_PROPERTIES = [
@@ -99,8 +106,15 @@ interface PlannedCalendarMutations {
         revision: number;
         entries: Array<{ operation: "create" | "reidentify"; nextId: string; expectedPath: string | null }>;
     };
-    selfLinkUpdatesById: Map<string, Record<string, unknown>>;
     archiveUpdatesById: Map<string, Record<string, unknown>>;
+    preApplyCancellationStateUpdatesById: Map<string, NativeCalendarCancellationState | null>;
+    postApplyCancellationStateUpdatesById: Map<string, NativeCalendarCancellationState | null>;
+}
+
+interface ProjectedCalendarEventProperties {
+    properties: Record<string, unknown>;
+    preApplyCancellationStateUpdate?: NativeCalendarCancellationState | null;
+    postApplyCancellationStateUpdate?: NativeCalendarCancellationState | null;
 }
 
 export interface NativeCalendarSyncResult {
@@ -125,6 +139,7 @@ export class NativeCalendarRecordService {
         private readonly app: App,
         private readonly externalCalendarService: ExternalCalendarService,
         private readonly getSettings: () => TPSControllerSettings,
+        private readonly persistSettings: () => Promise<void> = async () => {},
     ) {}
 
     setup(registerEvent: (event: unknown) => void): void {
@@ -174,7 +189,10 @@ export class NativeCalendarRecordService {
         // One sync uses one missing-event policy from plan through execution.
         // A live settings edit must not introduce archive writes that were not
         // included in the token-bound property/identity preflight.
-        const missingEventPolicy = this.getSettings().syncOnEventDelete;
+        const settings = this.getSettings();
+        const missingEventPolicy = settings.syncOnEventDelete;
+        const cancellationStatus = normalizeCancellationStatus(settings.canceledStatusValue);
+        const cancellationStateSnapshot = cloneCancellationState(settings.nativeCalendarCancellationState);
         const plannedAtIso = new Date().toISOString();
         const result: NativeCalendarSyncResult = {
             fetched: 0,
@@ -216,7 +234,14 @@ export class NativeCalendarRecordService {
             missingEventPolicy,
             plannedAtIso,
             authoritativeSnapshot,
+            cancellationStatus,
+            cancellationStateSnapshot,
         );
+
+        // Persist cancellation ownership before the corresponding frontmatter
+        // write. If the vault batch is rejected or interrupted, the next sync
+        // can distinguish a retry from a later user-owned status override.
+        await this.commitCancellationStateUpdates(mutationPlan.preApplyCancellationStateUpdatesById);
 
         if (mutationPlan.entries.length) {
             const appliedResult = await api.applyIdentityChanges!(
@@ -227,6 +252,13 @@ export class NativeCalendarRecordService {
             if (!appliedResult.ok || appliedResult.handles.length !== mutationPlan.entries.length) {
                 const recoverySnapshot = await api.snapshot!();
                 this.rebuildFromHandles(recoverySnapshot.records);
+                await this.commitCancellationStateUpdates(
+                    cancellationStateUpdatesForAppliedPrefix(
+                        mutationPlan,
+                        appliedResult.handles,
+                        mutationPlan.postApplyCancellationStateUpdatesById,
+                    ),
+                );
                 const possiblyPartial = appliedResult.ok
                     || appliedResult.handles.length > 0
                     || appliedResult.failedIndex !== null;
@@ -261,14 +293,11 @@ export class NativeCalendarRecordService {
                 }
             }
         }
+        await this.commitCancellationStateUpdates(mutationPlan.postApplyCancellationStateUpdatesById);
 
         const preReconciledIds = new Set<string>();
         result.updated += migrationPlan.length;
         for (const migration of migrationPlan) preReconciledIds.add(identityKey(migration.targetId));
-        for (const id of mutationPlan.selfLinkUpdatesById.keys()) {
-            if (!preReconciledIds.has(id)) result.updated += 1;
-            preReconciledIds.add(id);
-        }
 
         for (const occurrence of prepared.occurrences) {
             const { event, id } = occurrence;
@@ -473,6 +502,8 @@ export class NativeCalendarRecordService {
         missingPolicy: TPSControllerSettings["syncOnEventDelete"],
         plannedAtIso: string,
         snapshot: Pick<GcmNativeRecordSnapshot, "token" | "revision">,
+        cancellationStatus: string,
+        cancellationState: Record<string, NativeCalendarCancellationState>,
     ): Promise<PlannedCalendarMutations> {
         const migrationsByTarget = new Map<string, PlannedLegacyMigration>();
         const migrationsByPath = new Map<string, PlannedLegacyMigration>();
@@ -488,12 +519,14 @@ export class NativeCalendarRecordService {
 
         const buildEntries = (expectedPathsById?: Map<string, string>): {
             entries: PlannedGcmIdentityEntry[];
-            selfLinkUpdatesById: Map<string, Record<string, unknown>>;
             archiveUpdatesById: Map<string, Record<string, unknown>>;
+            preApplyCancellationStateUpdatesById: Map<string, NativeCalendarCancellationState | null>;
+            postApplyCancellationStateUpdatesById: Map<string, NativeCalendarCancellationState | null>;
         } => {
             const entriesByDestination = new Map<string, PlannedGcmIdentityEntry>();
-            const selfLinkUpdatesById = new Map<string, Record<string, unknown>>();
             const archiveUpdatesById = new Map<string, Record<string, unknown>>();
+            const preApplyCancellationStateUpdatesById = new Map<string, NativeCalendarCancellationState | null>();
+            const postApplyCancellationStateUpdatesById = new Map<string, NativeCalendarCancellationState | null>();
             const projectedByPath = new Map<string, IndexedCalendarRecord>();
             const addEntry = (entry: PlannedGcmIdentityEntry): void => {
                 const key = identityKey(entry.nextId);
@@ -575,25 +608,6 @@ export class NativeCalendarRecordService {
                         ...(occurrence ? { fileName: buildNativeCalendarRecordFileName(occurrence.event) } : {}),
                     });
                 }
-                if (!occurrence) {
-                    const plannedPath = expectedPathsById?.get(identityKey(targetId)) || projected.file.path;
-                    const linkedTitle = markdownLink(plannedPath, calendarRecordDisplayTitle(projected));
-                    if (String(projected.frontmatter.title || "") !== linkedTitle) {
-                        const updates = { title: linkedTitle };
-                        addEntry({
-                            operation: "reidentify",
-                            reference: record.id,
-                            nextId: targetId,
-                            updates: [updates],
-                        });
-                        selfLinkUpdatesById.set(identityKey(targetId), updates);
-                        projected = {
-                            ...projected,
-                            file: projectedCalendarFile(projected.file, plannedPath),
-                            frontmatter: applyCaseInsensitiveUpdates(projected.frontmatter, updates),
-                        };
-                    }
-                }
                 projectedByPath.set(record.file.path, projected);
             }
 
@@ -612,12 +626,20 @@ export class NativeCalendarRecordService {
                         ...projected,
                         file: projectedCalendarFile(projected.file, recordPath),
                     };
-                    const properties = this.eventProperties(
+                    const projection = this.eventProperties(
                         occurrence.context.calendar,
                         occurrence.event,
                         atPlannedPath,
-                        recordPath,
+                        cancellationStatus,
+                        cancellationStateForId(cancellationState, occurrence.id),
                     );
+                    const properties = projection.properties;
+                    if (projection.preApplyCancellationStateUpdate !== undefined) {
+                        preApplyCancellationStateUpdatesById.set(occurrence.id, projection.preApplyCancellationStateUpdate);
+                    }
+                    if (projection.postApplyCancellationStateUpdate !== undefined) {
+                        postApplyCancellationStateUpdatesById.set(occurrence.id, projection.postApplyCancellationStateUpdate);
+                    }
                     const eventUpdates = clonePropertyPayload(changedProperties(projected.frontmatter, properties));
                     occurrence.plannedCreateProperties = undefined;
                     occurrence.plannedEventUpdates = eventUpdates;
@@ -632,12 +654,20 @@ export class NativeCalendarRecordService {
                     });
                     continue;
                 }
-                const properties = clonePropertyPayload(this.eventProperties(
+                const projection = this.eventProperties(
                     occurrence.context.calendar,
                     occurrence.event,
                     null,
-                    plannedPath,
-                ));
+                    cancellationStatus,
+                    cancellationStateForId(cancellationState, occurrence.id),
+                );
+                const properties = clonePropertyPayload(projection.properties);
+                if (projection.preApplyCancellationStateUpdate !== undefined) {
+                    preApplyCancellationStateUpdatesById.set(occurrence.id, projection.preApplyCancellationStateUpdate);
+                }
+                if (projection.postApplyCancellationStateUpdate !== undefined) {
+                    postApplyCancellationStateUpdatesById.set(occurrence.id, projection.postApplyCancellationStateUpdate);
+                }
                 occurrence.plannedCreateProperties = properties;
                 occurrence.plannedEventUpdates = undefined;
                 occurrence.plannedSourcePath = undefined;
@@ -674,8 +704,9 @@ export class NativeCalendarRecordService {
 
             return {
                 entries: [...entriesByDestination.values()],
-                selfLinkUpdatesById,
                 archiveUpdatesById,
+                preApplyCancellationStateUpdatesById,
+                postApplyCancellationStateUpdatesById,
             };
         };
 
@@ -709,8 +740,9 @@ export class NativeCalendarRecordService {
             entries: exact.entries,
             expectedPathsById,
             plannedBatch,
-            selfLinkUpdatesById: exact.selfLinkUpdatesById,
             archiveUpdatesById: exact.archiveUpdatesById,
+            preApplyCancellationStateUpdatesById: exact.preApplyCancellationStateUpdatesById,
+            postApplyCancellationStateUpdatesById: exact.postApplyCancellationStateUpdatesById,
         };
     }
 
@@ -727,6 +759,30 @@ export class NativeCalendarRecordService {
         const updates: Record<string, unknown> = {};
         for (const key of REDUNDANT_CALENDAR_RECORD_PROPERTIES) {
             if (hasPropertyCaseInsensitive(record.frontmatter, key)) updates[key] = null;
+        }
+        const title = String(readPropertyCaseInsensitive(record.frontmatter, "title") || "");
+        const linkedTitle = markdownLinkAlias(title);
+        if (linkedTitle) updates.title = normalizeCalendarEventTitle(linkedTitle);
+        if (readPropertyCaseInsensitive(record.frontmatter, "allDay") === false) updates.allDay = null;
+        for (const key of ["description", "location", "organizer", "url"] as const) {
+            const value = readPropertyCaseInsensitive(record.frontmatter, key);
+            if (hasPropertyCaseInsensitive(record.frontmatter, key)
+                && (value == null || (typeof value === "string" && !value.trim()))) {
+                updates[key] = null;
+            }
+        }
+        const attendees = readPropertyCaseInsensitive(record.frontmatter, "attendees");
+        if (hasPropertyCaseInsensitive(record.frontmatter, "attendees")
+            && (attendees == null
+                || (Array.isArray(attendees) && attendees.length === 0)
+                || (typeof attendees === "string" && !attendees.trim()))) {
+            updates.attendees = null;
+        }
+        const existingTags = readCalendarTagValues(readPropertyCaseInsensitive(record.frontmatter, "tags"));
+        const businessTags = mergeCalendarRecordTags(existingTags, undefined);
+        if (hasPropertyCaseInsensitive(record.frontmatter, "tags")
+            && JSON.stringify(existingTags) !== JSON.stringify(businessTags)) {
+            updates.tags = businessTags.length ? businessTags : null;
         }
         const associatedNote = this.existingAssociatedNote(record);
         if (associatedNote) {
@@ -785,47 +841,121 @@ export class NativeCalendarRecordService {
         calendar: ExternalCalendarConfig,
         event: ExternalCalendarEvent,
         existing: IndexedCalendarRecord | null,
-        recordPath?: string | null,
-    ): Record<string, unknown> {
+        cancellationStatus: string,
+        cancellationState: NativeCalendarCancellationState | null,
+    ): ProjectedCalendarEventProperties {
         const scheduled = event.isAllDay ? localDateKey(event.startDate) : event.startDate.toISOString();
         const end = event.isAllDay ? localDateKey(event.endDate) : event.endDate.toISOString();
         const displayTitle = normalizeCalendarEventTitle(event.title);
         const associatedNote = existing ? this.existingAssociatedNote(existing) : null;
-        return {
-            title: recordPath ? markdownLink(recordPath, displayTitle) : displayTitle,
-            eventTitle: displayTitle,
-            ...(event.isCancelled
-                ? { status: "cancelled" }
-                : existing
-                    ? {}
-                    : { status: "scheduled" }),
-            scheduled,
-            end,
-            durationMinutes: Math.max(0, Math.round((event.endDate.getTime() - event.startDate.getTime()) / 60_000)),
-            allDay: event.isAllDay,
-            description: event.description,
-            location: event.location || "",
-            organizer: event.organizer || "",
-            attendees: event.attendees || [],
-            url: event.url || "",
-            ...(associatedNote ? { associatedNote } : {}),
-            tags: mergeCalendarRecordTags(
-                readPropertyCaseInsensitive(existing?.frontmatter || {}, "tags"),
-                calendar.autoCreateTag,
-            ),
+        const tags = mergeCalendarRecordTags(
+            readPropertyCaseInsensitive(existing?.frontmatter || {}, "tags"),
+            calendar.autoCreateTag,
+        );
+        const description = nonBlankText(event.description);
+        const location = nonBlankText(event.location);
+        const organizer = nonBlankText(event.organizer);
+        const url = nonBlankText(event.url);
+        const attendees = (event.attendees || []).map((value) => String(value || "").trim()).filter(Boolean);
+        const projected: ProjectedCalendarEventProperties = {
+            properties: {
+                title: displayTitle,
+                scheduled,
+                end,
+                ...(event.isAllDay
+                    ? { allDay: true }
+                    : existing && hasPropertyCaseInsensitive(existing.frontmatter, "allDay")
+                        ? { allDay: null }
+                        : {}),
+                ...optionalSyncedTextProperty(existing, "description", description),
+                ...optionalSyncedTextProperty(existing, "location", location),
+                ...optionalSyncedTextProperty(existing, "organizer", organizer),
+                ...(attendees.length
+                    ? { attendees }
+                    : existing && hasPropertyCaseInsensitive(existing.frontmatter, "attendees")
+                        ? { attendees: null }
+                        : {}),
+                ...optionalSyncedTextProperty(existing, "url", url),
+                ...(associatedNote ? { associatedNote } : {}),
+                ...(tags.length ? { tags } : {}),
+            },
         };
+
+        const statusPresent = existing
+            ? hasPropertyCaseInsensitive(existing.frontmatter, "status")
+            : false;
+        const statusValue = existing
+            ? normalizeStoredStatus(readPropertyCaseInsensitive(existing.frontmatter, "status"))
+            : null;
+        if (event.isCancelled) {
+            if (!cancellationState) {
+                if (existing && statusPresent && statusValue === cancellationStatus) {
+                    projected.preApplyCancellationStateUpdate = {
+                        appliedStatus: cancellationStatus,
+                        previousStatusPresent: false,
+                        previousStatus: null,
+                        canRestore: false,
+                        pendingApplication: false,
+                    };
+                } else {
+                    projected.properties.status = cancellationStatus;
+                    const pendingState: NativeCalendarCancellationState = {
+                        appliedStatus: cancellationStatus,
+                        previousStatusPresent: existing ? statusPresent : true,
+                        previousStatus: existing ? statusValue : "scheduled",
+                        canRestore: true,
+                        pendingApplication: true,
+                    };
+                    projected.preApplyCancellationStateUpdate = pendingState;
+                    projected.postApplyCancellationStateUpdate = {
+                        ...pendingState,
+                        pendingApplication: false,
+                    };
+                }
+            } else if (!existing) {
+                projected.properties.status = cancellationState.appliedStatus;
+                projected.postApplyCancellationStateUpdate = {
+                    ...cancellationState,
+                    pendingApplication: false,
+                };
+            } else if (cancellationState.pendingApplication) {
+                if (statusMatchesPreviousState(statusPresent, statusValue, cancellationState)) {
+                    // A pending intent whose exact prior value is still present
+                    // is a retry after a rejected/interrupted vault batch.
+                    projected.properties.status = cancellationState.appliedStatus;
+                }
+                projected.postApplyCancellationStateUpdate = {
+                    ...cancellationState,
+                    pendingApplication: false,
+                };
+            }
+            return projected;
+        }
+
+        if (!existing) projected.properties.status = "scheduled";
+        if (cancellationState) {
+            if (cancellationState.canRestore
+                && statusPresent
+                && statusValue === cancellationState.appliedStatus) {
+                projected.properties.status = cancellationState.previousStatusPresent
+                    ? cancellationState.previousStatus ?? ""
+                    : null;
+            }
+            projected.postApplyCancellationStateUpdate = null;
+        }
+        return projected;
     }
 
     private requireApi(): GcmNativeRecordsApi {
         const api = getGcmApi(this.app)?.nativeRecords;
         if (!api
-            || Number(api.version) < 5
+            || Number(api.version) !== 6
             || api.isEnabled?.() !== true
             || typeof api.inspect !== "function"
             || typeof api.snapshot !== "function"
             || typeof api.planIdentityChanges !== "function"
             || typeof api.applyIdentityChanges !== "function") {
-            throw new Error("Canonical calendar records require TPS GCM native-record mode and nativeRecords API v5.");
+            throw new Error("Canonical calendar records require TPS GCM native-record mode and nativeRecords API v6.");
         }
         return api;
     }
@@ -895,6 +1025,43 @@ export class NativeCalendarRecordService {
         return this.recordsByPath.get(paths[0]) || null;
     }
 
+    private async commitCancellationStateUpdates(
+        updates: Map<string, NativeCalendarCancellationState | null>,
+    ): Promise<void> {
+        if (!updates.size) return;
+        const settings = this.getSettings();
+        const current = cloneCancellationState(settings.nativeCalendarCancellationState);
+        const next = cloneCancellationState(current);
+        let changed = false;
+        for (const [id, value] of updates) {
+            const matchingKeys = Object.keys(next).filter((key) => identityKey(key) === identityKey(id));
+            for (const key of matchingKeys) {
+                if (value && key === id && JSON.stringify(next[key]) === JSON.stringify(value)) continue;
+                delete next[key];
+                changed = true;
+            }
+            if (value && JSON.stringify(next[id]) !== JSON.stringify(value)) {
+                next[id] = { ...value };
+                changed = true;
+            }
+        }
+        if (!changed) return;
+        settings.nativeCalendarCancellationState = next;
+        try {
+            await this.persistSettings();
+        } catch (error) {
+            // saveSettings() normalizes this private map before writing and may
+            // therefore replace it with an equivalent object. Roll back that
+            // normalized copy as well, while preserving a genuinely newer
+            // concurrent ledger edit.
+            if (this.getSettings() === settings
+                && cancellationStateEquals(settings.nativeCalendarCancellationState, next)) {
+                settings.nativeCalendarCancellationState = current;
+            }
+            throw error;
+        }
+    }
+
     private cause(surface: string): Record<string, unknown> {
         return { kind: "automation", sourcePluginId: "tps-controller", surface };
     }
@@ -906,6 +1073,96 @@ function isActiveCalendar(calendar: ExternalCalendarConfig): boolean {
 
 function identityKey(value: unknown): string {
     return String(value || "").trim().toLocaleLowerCase();
+}
+
+function normalizeCancellationStatus(value: unknown): string {
+    return String(value ?? "").trim() || "cancelled";
+}
+
+function normalizeStoredStatus(value: unknown): string | null {
+    return value == null ? null : String(value);
+}
+
+function cancellationStateEquals(
+    left: unknown,
+    right: Record<string, NativeCalendarCancellationState>,
+): boolean {
+    return JSON.stringify(cloneCancellationState(left)) === JSON.stringify(right);
+}
+
+function nonBlankText(value: unknown): string {
+    return String(value ?? "").trim();
+}
+
+function optionalSyncedTextProperty(
+    existing: IndexedCalendarRecord | null,
+    key: "description" | "location" | "organizer" | "url",
+    value: string,
+): Record<string, unknown> {
+    if (value) return { [key]: value };
+    return existing && hasPropertyCaseInsensitive(existing.frontmatter, key)
+        ? { [key]: null }
+        : {};
+}
+
+function cloneCancellationState(value: unknown): Record<string, NativeCalendarCancellationState> {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    const cloned: Record<string, NativeCalendarCancellationState> = {};
+    const claimedIds = new Set<string>();
+    for (const [rawId, candidate] of Object.entries(value as Record<string, unknown>)) {
+        const id = rawId.trim();
+        const idKey = identityKey(id);
+        if (!parseCalendarRecordId(id)
+            || claimedIds.has(idKey)
+            || !candidate
+            || typeof candidate !== "object"
+            || Array.isArray(candidate)) continue;
+        const entry = candidate as Record<string, unknown>;
+        if (typeof entry.appliedStatus !== "string" || !entry.appliedStatus) continue;
+        cloned[id] = {
+            appliedStatus: entry.appliedStatus,
+            previousStatusPresent: entry.previousStatusPresent === true,
+            previousStatus: entry.previousStatus === null || typeof entry.previousStatus === "string"
+                ? entry.previousStatus
+                : null,
+            canRestore: entry.canRestore === true,
+            pendingApplication: entry.pendingApplication === true,
+        };
+        claimedIds.add(idKey);
+    }
+    return cloned;
+}
+
+function cancellationStateForId(
+    state: Record<string, NativeCalendarCancellationState>,
+    id: string,
+): NativeCalendarCancellationState | null {
+    const key = Object.keys(state).find((candidate) => identityKey(candidate) === identityKey(id));
+    return key ? { ...state[key] } : null;
+}
+
+function statusMatchesPreviousState(
+    statusPresent: boolean,
+    statusValue: string | null,
+    state: NativeCalendarCancellationState,
+): boolean {
+    if (!state.canRestore || statusPresent !== state.previousStatusPresent) return false;
+    return !statusPresent || statusValue === state.previousStatus;
+}
+
+function cancellationStateUpdatesForAppliedPrefix(
+    plan: PlannedCalendarMutations,
+    handles: GcmNativeRecordHandle[],
+    updates: Map<string, NativeCalendarCancellationState | null>,
+): Map<string, NativeCalendarCancellationState | null> {
+    const completed = new Map<string, NativeCalendarCancellationState | null>();
+    for (let index = 0; index < handles.length && index < plan.entries.length; index += 1) {
+        const entry = plan.entries[index];
+        if (identityKey(handles[index].id) !== identityKey(entry.nextId)) continue;
+        const updateKey = [...updates.keys()].find((id) => identityKey(id) === identityKey(entry.nextId));
+        if (updateKey) completed.set(updateKey, updates.get(updateKey) ?? null);
+    }
+    return completed;
 }
 
 function addOwner(owners: Map<string, Set<string>>, id: string, path: string): void {
@@ -1005,12 +1262,12 @@ function readCalendarTagValues(value: unknown): string[] {
 function mergeCalendarRecordTags(existing: unknown, configuredTag: unknown): string[] {
     const tags = [
         ...readCalendarTagValues(existing),
-        "calendar-event",
         ...readCalendarTagValues(configuredTag),
     ];
     const seen = new Set<string>();
     return tags.filter((tag) => {
         const key = tag.toLocaleLowerCase();
+        if (key === "calendar-event" || key.startsWith("tps/record/v1/")) return false;
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
@@ -1090,23 +1347,9 @@ export function buildNativeCalendarRecordFileName(event: Pick<ExternalCalendarEv
     return `${localDateKey(event.startDate)} - ${title}`;
 }
 
-function markdownLink(path: string, alias: string): string {
-    const target = path.replace(/\.md$/iu, "").replace(/([#^|\]])/gu, "\\$1");
-    const label = alias.replace(/\|/gu, "\\|").replace(/\]/gu, "\\]");
-    return `[[${target}|${label}]]`;
-}
-
 function unresolvedMarkdownLink(path: string): string {
     const target = String(path || "").trim().replace(/\.md$/iu, "").replace(/([#^|\]])/gu, "\\$1");
     return target ? `[[${target}]]` : "";
-}
-
-function calendarRecordDisplayTitle(record: IndexedCalendarRecord): string {
-    const eventTitle = String(record.frontmatter.eventTitle || "").trim();
-    if (eventTitle) return normalizeCalendarEventTitle(eventTitle);
-    const linkedAlias = markdownLinkAlias(String(record.frontmatter.title || ""));
-    if (linkedAlias) return normalizeCalendarEventTitle(linkedAlias);
-    return normalizeCalendarEventTitle(record.file.basename.replace(/^\d{4}-\d{2}-\d{2}\s+-\s+/u, ""));
 }
 
 function markdownLinkAlias(value: string): string {

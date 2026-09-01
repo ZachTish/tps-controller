@@ -32,6 +32,7 @@ import {
     countExternalCalendarsMissingId,
     mergeSettingsChangeSet,
     normalizeExternalCalendarsInPlace,
+    normalizeNativeCalendarCancellationState,
 } from "./services/settings-persistence";
 import {
     resolveReminderDeliveryMode,
@@ -247,6 +248,7 @@ export default class TPSControllerPlugin extends Plugin {
             this.app,
             this.externalCalendarService,
             () => this.settings,
+            () => this.saveSettings(),
         );
         this.nativeCalendarRecordService.setup((event) => this.registerEvent(event as any));
         this.reminderEngine = new ReminderEngine(this.app, this.externalCalendarService);
@@ -714,6 +716,10 @@ export default class TPSControllerPlugin extends Plugin {
         this.settings.externalCalendars = normalizeExternalCalendarsInPlace(
             this.settings.externalCalendars,
             normalizeTaskTargetPathSetting,
+        );
+
+        this.settings.nativeCalendarCancellationState = normalizeNativeCalendarCancellationState(
+            this.settings.nativeCalendarCancellationState,
         );
 
         this.settings.reminders = normalizeReminderSettingsInPlace(this.settings.reminders || []);

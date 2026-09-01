@@ -180,6 +180,8 @@ export interface TPSControllerSettings {
     syncOnEventDelete: "delete" | "archive" | "nothing";
     archiveFolder: string;
     canceledStatusValue: string;
+    /** Controller-owned reconciliation state. Keys are canonical calendar-record tpsIds. */
+    nativeCalendarCancellationState: Record<string, NativeCalendarCancellationState>;
     externalCalendarFilter: string;
     externalCalendars: ExternalCalendarConfig[];
     twoStageArchive: TwoStageArchiveRule;
@@ -219,6 +221,19 @@ export interface TPSControllerSettings {
     _migratedFromPlugins: boolean;
 }
 
+export interface NativeCalendarCancellationState {
+    /** Exact status value written by Controller for the current cancellation episode. */
+    appliedStatus: string;
+    /** Whether a status property existed before Controller applied cancellation. */
+    previousStatusPresent: boolean;
+    /** Status to restore when Controller observed and replaced it. */
+    previousStatus: string | null;
+    /** False when adopting a legacy cancellation whose prior status is unknowable. */
+    canRestore: boolean;
+    /** True only between durable intent and a confirmed GCM status mutation. */
+    pendingApplication: boolean;
+}
+
 export const DEFAULT_CONTROLLER_SETTINGS: TPSControllerSettings = {
     // Calendar Sync
     calendarStorageMode: "legacy",
@@ -227,6 +242,7 @@ export const DEFAULT_CONTROLLER_SETTINGS: TPSControllerSettings = {
     syncOnEventDelete: "nothing",
     archiveFolder: "",
     canceledStatusValue: "cancelled",
+    nativeCalendarCancellationState: {},
     externalCalendarFilter: "",
     externalCalendars: [],
     twoStageArchive: {

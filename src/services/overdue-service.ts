@@ -6,7 +6,7 @@ import {
     parseDate, parseTimeRange, parseDuration, getEffectiveEndTime,
     formatTemplate, checkStopCondition, hasRequiredStatus, hasRequiredCheckboxState,
     shouldIgnoreForReminder, isAllDayEvent, hasExplicitTimeInValue,
-    getReminderTriggerBase,
+    getReminderTriggerBase, getReminderCancellationStatuses,
 } from "../utils/time-calculation-service";
 import {
     buildReminderTargetsForFile,
@@ -100,7 +100,7 @@ export class OverdueService {
                     const effectiveFm = ctx.frontmatter;
                     const propertyValue = ctx.propertyValue;
 
-                    if (shouldIgnoreForReminder(file, cache, effectiveFm, reminder, ignorePaths, ignoreTags, ignoreStatuses, ignoreCheckboxStates, getReminderTagsForTarget(target), settings.canceledStatusValue)) continue;
+                    if (shouldIgnoreForReminder(file, cache, effectiveFm, reminder, ignorePaths, ignoreTags, ignoreStatuses, ignoreCheckboxStates, getReminderTagsForTarget(target), getReminderCancellationStatuses(effectiveFm, settings.canceledStatusValue, settings.nativeCalendarCancellationState))) continue;
                     if (!hasRequiredStatus(effectiveFm, reminder)) continue;
                     if (!hasRequiredCheckboxState(effectiveFm, reminder)) continue;
 
@@ -266,7 +266,7 @@ export class OverdueService {
                 const reminder = currentReminder;
                 const ctx = buildEffectiveReminderContextForTarget(target, fm, reminder.property, settings);
                 if (ctx && 
-                    !shouldIgnoreForReminder(item.file, cache, ctx.frontmatter, reminder, ignorePaths, ignoreTags, ignoreStatuses, ignoreCheckboxStates, getReminderTagsForTarget(target), settings.canceledStatusValue) &&
+                    !shouldIgnoreForReminder(item.file, cache, ctx.frontmatter, reminder, ignorePaths, ignoreTags, ignoreStatuses, ignoreCheckboxStates, getReminderTagsForTarget(target), getReminderCancellationStatuses(ctx.frontmatter, settings.canceledStatusValue, settings.nativeCalendarCancellationState)) &&
                     hasRequiredStatus(ctx.frontmatter, reminder) &&
                     hasRequiredCheckboxState(ctx.frontmatter, reminder) &&
                     !reminder.stopConditions.some((cond) => checkStopCondition(ctx.frontmatter, cond))) {
@@ -376,7 +376,7 @@ export class OverdueService {
                     if (reminder.id === currentReminderId) continue;
                     const ctx = buildEffectiveReminderContextForTarget(target, fm, reminder.property, settings);
                     if (!ctx) continue;
-                    if (shouldIgnoreForReminder(item.file, cache, ctx.frontmatter, reminder, ignorePaths, ignoreTags, ignoreStatuses, ignoreCheckboxStates, getReminderTagsForTarget(target), settings.canceledStatusValue)) continue;
+                    if (shouldIgnoreForReminder(item.file, cache, ctx.frontmatter, reminder, ignorePaths, ignoreTags, ignoreStatuses, ignoreCheckboxStates, getReminderTagsForTarget(target), getReminderCancellationStatuses(ctx.frontmatter, settings.canceledStatusValue, settings.nativeCalendarCancellationState))) continue;
                     if (!hasRequiredStatus(ctx.frontmatter, reminder)) continue;
                     if (!hasRequiredCheckboxState(ctx.frontmatter, reminder)) continue;
                     if (reminder.stopConditions.some((cond) => checkStopCondition(ctx.frontmatter, cond))) continue;

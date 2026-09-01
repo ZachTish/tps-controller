@@ -231,6 +231,7 @@ function loadCompiledOverdueServiceHarness(options = {}) {
         isAllDayEvent: () => false,
         hasExplicitTimeInValue: () => false,
         getReminderTriggerBase: options.getReminderTriggerBase || (() => null),
+        getReminderCancellationStatuses: options.getReminderCancellationStatuses || ((_fm, status) => [status]),
       };
     }
     if (id === './reminder-target-service') {
@@ -343,6 +344,7 @@ function loadCompiledReminderEngineHarness(options = {}) {
         isAllDayEvent: options.isAllDayEvent || (() => false),
         hasExplicitTimeInValue: options.hasExplicitTimeInValue || (() => true),
         getReminderTriggerBase: options.getReminderTriggerBase || ((start) => start),
+        getReminderCancellationStatuses: options.getReminderCancellationStatuses || ((_fm, status) => [status]),
       };
     }
     if (id === './reminder-target-service') {
@@ -668,12 +670,11 @@ test('native calendar records suppress matched pathless external alerts while re
   const canonicalRecordId = buildCanonicalCalendarRecordId(calendarId, matchingEvent.occurrenceIdentity);
   const nativeRecord = {
     tpsId: canonicalRecordId,
-    tpsSchemaVersion: 1,
     kind: 'calendar-event',
-    title: '[[Calendar Events/2026-08-27/Event note|Linked display title]]',
-    eventTitle: matchingEvent.title,
+    title: matchingEvent.title,
     status: 'scheduled',
     scheduled: matchingEvent.startDate.toISOString(),
+    end: matchingEvent.endDate.toISOString(),
   };
   const settings = {
     calendarStorageMode: 'native-records',
@@ -794,8 +795,8 @@ test('native calendar records suppress matched pathless external alerts while re
     label: 'legacy event title plus scheduled during migration',
     frontmatter: {
       scheduled: nativeRecord.scheduled,
-      title: nativeRecord.title,
-      eventTitle: nativeRecord.eventTitle,
+      title: '[[Calendar Events/2026-08-27/Event note|Linked display title]]',
+      eventTitle: matchingEvent.title,
     },
   }];
   for (const variant of identityVariants) {
@@ -831,8 +832,10 @@ test('native calendar records suppress matched pathless external alerts while re
 
 test('configured cancellation status globally suppresses native calendar records for recommended rules', async () => {
   const now = Date.parse('2026-08-25T12:00:00.000Z');
-  const { parseTimeRange, shouldIgnoreForReminder } = loadTimeCalculationModule();
+  const { parseTimeRange, shouldIgnoreForReminder, getReminderCancellationStatuses } = loadTimeCalculationModule();
+  const nativeId = `calendar:v1:${'A'.repeat(16)}:${'B'.repeat(27)}`;
   const cancelledRecord = {
+    tpsId: nativeId,
     tags: [
       'calendar-event',
       'tps/record/v1/calendar-event/calendar-cancelled-poc-shape',
@@ -880,11 +883,13 @@ test('configured cancellation status globally suppresses native calendar records
     defaultAllDayBaseTime: '09:00',
     snoozeProperty: 'reminderSnooze',
     externalCalendars: [],
+    nativeCalendarCancellationState: {},
   };
   const candidateFiles = [];
   const engineHarness = loadCompiledReminderEngineHarness({
     candidateFiles,
     shouldIgnoreForReminder,
+    getReminderCancellationStatuses,
     parseTimeRange,
     buildReminderTargetsForFile: async () => [{
       sourceKey: '2026-09-25 - Canceled event.md',
@@ -916,8 +921,34 @@ test('configured cancellation status globally suppresses native calendar records
     'custom configured cancellation values are terminal and case-insensitive',
   );
 
-  const scheduledRecord = { ...cancelledRecord, status: 'scheduled', calendarSyncState: 'current' };
+  settings.canceledStatusValue = 'called-off';
+  settings.nativeCalendarCancellationState = {
+    [nativeId]: {
+      appliedStatus: 'cancelled',
+      previousStatusPresent: true,
+      previousStatus: 'scheduled',
+      canRestore: true,
+      pendingApplication: false,
+    },
+  };
+  app.metadataCache.getFileCache = () => ({ frontmatter: cancelledRecord });
+  assert.deepEqual(
+    await engine.projectScheduledNotifications(settings, now),
+    [],
+    'the matching ledger-owned prior cancellation label remains terminal after a setting change',
+  );
+
+  const unrelatedRecord = { ...cancelledRecord, tpsId: 'unrelated-native-record' };
+  app.metadataCache.getFileCache = () => ({ frontmatter: unrelatedRecord });
+  assert.equal(
+    (await engine.projectScheduledNotifications(settings, now)).length,
+    1,
+    'another record is not suppressed by an unrelated ledger entry',
+  );
+
+  const scheduledRecord = { ...cancelledRecord, status: 'scheduled' };
   settings.canceledStatusValue = 'cancelled';
+  settings.nativeCalendarCancellationState = {};
   app.metadataCache.getFileCache = () => ({ frontmatter: scheduledRecord });
   const projected = await engine.projectScheduledNotifications(settings, now);
   assert.equal(projected.length, 1, 'the matching recommended rule still projects an active occurrence');

@@ -11,7 +11,7 @@ import {
     parseDate, parseTimeRange, parseDuration, getEffectiveEndTime,
     formatTemplate, formatRemaining, checkStopCondition,
     normalizeStatus, getStatuses, hasRequiredStatus, hasRequiredCheckboxState, shouldIgnoreForReminder,
-    isAllDayEvent, hasExplicitTimeInValue, getReminderTriggerBase,
+    isAllDayEvent, hasExplicitTimeInValue, getReminderTriggerBase, getReminderCancellationStatuses,
 } from "../utils/time-calculation-service";
 import {
     buildReminderTargetsForFile,
@@ -336,7 +336,11 @@ export class ReminderEngine {
                 settings.globalIgnoreStatuses,
                 settings.globalIgnoreCheckboxStates,
                 target.reminderTags,
-                settings.canceledStatusValue,
+                getReminderCancellationStatuses(
+                    effectiveFm,
+                    settings.canceledStatusValue,
+                    settings.nativeCalendarCancellationState,
+                ),
             )) continue;
             const { start: propTime, end: rangeEndTime } = parseTimeRange(propValue);
             if (!propTime || !hasRequiredStatus(effectiveFm, reminder) || !hasRequiredCheckboxState(effectiveFm, reminder)) {
@@ -583,7 +587,11 @@ export class ReminderEngine {
                 settings.globalIgnoreStatuses,
                 settings.globalIgnoreCheckboxStates,
                 target.reminderTags,
-                settings.canceledStatusValue,
+                getReminderCancellationStatuses(
+                    effectiveFm,
+                    settings.canceledStatusValue,
+                    settings.nativeCalendarCancellationState,
+                ),
             )) {
                 this.countSkip(params.stats, "ignored");
                 continue;

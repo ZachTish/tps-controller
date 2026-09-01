@@ -90,7 +90,13 @@ function canonicalId(configId, occurrenceIdentity) {
 
 function makeFile(path) {
   const name = path.split('/').pop();
-  return { path, name, basename: name.replace(/\.md$/u, ''), extension: 'md' };
+  return {
+    path,
+    name,
+    basename: name.replace(/\.md$/u, ''),
+    extension: 'md',
+    stat: { ctime: 1_700_000_000_000, mtime: 1_700_000_001_000 },
+  };
 }
 
 function recordLink(path, alias) {
@@ -116,12 +122,19 @@ function harness(initialEvents = [], options = {}) {
   let afterBatchEntryHook = null;
   let afterAuthoritativeRebuildHook = null;
   let metadataChangedListener = null;
-  const settings = { calendarStorageMode: 'native-records', syncOnEventDelete: 'nothing' };
+  let settingsSaveCount = 0;
+  let failSettingsSave = false;
+  const settings = {
+    calendarStorageMode: 'native-records',
+    syncOnEventDelete: 'nothing',
+    canceledStatusValue: 'cancelled',
+    nativeCalendarCancellationState: {},
+  };
   feedStates.set(calendar.url, { ok: true, events: initialEvents });
 
   const identity = (frontmatter) => {
     const propertyId = String(frontmatter?.tpsId || '').trim();
-    if (propertyId) return { id: propertyId, kind: String(frontmatter.kind || ''), schemaVersion: Number(frontmatter.tpsSchemaVersion) };
+    if (propertyId) return { id: propertyId, kind: String(frontmatter.kind || ''), schemaVersion: 1 };
     const identityTag = Array.isArray(frontmatter?.tags)
       ? frontmatter.tags.find((tag) => String(tag).startsWith('tps/record/v1/'))
       : null;
@@ -149,7 +162,20 @@ function harness(initialEvents = [], options = {}) {
     const frontmatter = frontmatters.get(path);
     const inspected = identity(frontmatter);
     return file && inspected
-      ? { file, path, id: inspected.id, kind: inspected.kind, frontmatter: { ...frontmatter, tpsId: inspected.id, tpsSchemaVersion: 1, kind: inspected.kind } }
+      ? {
+        file,
+        path,
+        id: inspected.id,
+        kind: inspected.kind,
+        frontmatter: {
+          ...frontmatter,
+          tpsId: inspected.id,
+          tpsSchemaVersion: 1,
+          kind: inspected.kind,
+          createdDate: new Date(file.stat.ctime).toISOString(),
+          modifiedDate: new Date(file.stat.mtime).toISOString(),
+        },
+      }
       : null;
   };
 
@@ -277,8 +303,20 @@ function harness(initialEvents = [], options = {}) {
     return next;
   };
 
+  const canonicalizeEnvelope = (frontmatter, id, kind) => {
+    const next = { ...frontmatter, tpsId: id, kind };
+    for (const key of Object.keys(next)) {
+      if (['tpsschemaversion', 'createddate', 'modifieddate'].includes(key.toLocaleLowerCase())) delete next[key];
+    }
+    if (Array.isArray(next.tags)) {
+      next.tags = next.tags.filter((tag) => !String(tag).replace(/^#+/u, '').toLocaleLowerCase().startsWith('tps/record/v1/'));
+      if (!next.tags.length) delete next.tags;
+    }
+    return next;
+  };
+
   const api = {
-    version: options.apiVersion || 5,
+    version: Object.hasOwn(options, 'apiVersion') ? options.apiVersion : 6,
     isEnabled: () => true,
     inspect(frontmatter) {
       const inspected = identity(frontmatter);
@@ -374,16 +412,8 @@ function harness(initialEvents = [], options = {}) {
         const entry = entries[index];
         const expectedPath = plannedBatch.entries[index].expectedPath;
         if (entry.operation === 'create') {
-          const now = new Date().toISOString();
           const file = makeFile(expectedPath);
-          const frontmatter = {
-            ...structuredClone(entry.properties),
-            tpsId: entry.nextId,
-            tpsSchemaVersion: 1,
-            kind: entry.kind,
-            createdDate: now,
-            modifiedDate: now,
-          };
+          const frontmatter = canonicalizeEnvelope(structuredClone(entry.properties), entry.nextId, entry.kind);
           nextFiles.set(expectedPath, file);
           nextFrontmatters.set(expectedPath, frontmatter);
           pendingMutations.push({ type: 'create', id: entry.nextId, path: expectedPath });
@@ -399,15 +429,7 @@ function harness(initialEvents = [], options = {}) {
         let frontmatter = { ...nextFrontmatters.get(sourcePath) };
         const priorId = inspected.id;
         let changed = priorId.toLocaleLowerCase() !== entry.nextId.toLocaleLowerCase();
-        if (frontmatter.tpsId) frontmatter.tpsId = entry.nextId;
-        else {
-          frontmatter.tags = Array.isArray(frontmatter.tags)
-            ? frontmatter.tags.filter((tag) => !String(tag).toLocaleLowerCase().startsWith('tps/record/v1/'))
-            : frontmatter.tags;
-          frontmatter.tpsId = entry.nextId;
-          frontmatter.tpsSchemaVersion = 1;
-          frontmatter.kind = inspected.kind;
-        }
+        frontmatter = canonicalizeEnvelope(frontmatter, entry.nextId, inspected.kind);
         if (priorId.toLocaleLowerCase() !== entry.nextId.toLocaleLowerCase()) {
           pendingMutations.push({ type: 'reidentify', path: sourcePath, nextId: entry.nextId });
         }
@@ -418,7 +440,6 @@ function harness(initialEvents = [], options = {}) {
           pendingMutations.push({ type: 'update', path: sourcePath, updates: structuredClone(updates) });
         }
         if (sourcePath !== expectedPath) changed = true;
-        if (changed) frontmatter.modifiedDate = new Date().toISOString();
         const file = nextFiles.get(sourcePath);
         nextFiles.delete(sourcePath);
         nextFrontmatters.delete(sourcePath);
@@ -446,14 +467,7 @@ function harness(initialEvents = [], options = {}) {
       const requestedBasename = String(createOptions.fileName || id);
       const basename = options.resolveCreateBasename?.(requestedBasename) || requestedBasename;
       const file = makeFile(`${basename}.md`);
-      const frontmatter = {
-        ...properties,
-        tpsId: id,
-        tpsSchemaVersion: 1,
-        kind,
-        createdDate: new Date().toISOString(),
-        modifiedDate: new Date().toISOString(),
-      };
+      const frontmatter = canonicalizeEnvelope(properties, id, kind);
       files.set(file.path, file);
       frontmatters.set(file.path, frontmatter);
       authoritativeToken += 1;
@@ -473,7 +487,6 @@ function harness(initialEvents = [], options = {}) {
           frontmatter[actual || key] = value;
         }
       }
-      frontmatter.modifiedDate = new Date().toISOString();
       frontmatters.set(path, frontmatter);
       authoritativeToken += 1;
       mutationRevision += 1;
@@ -483,15 +496,9 @@ function harness(initialEvents = [], options = {}) {
       const path = resolvePath(reference);
       if (!path || !isFreeIdentity(nextId, path)) return null;
       mutationLog.push({ type: 'reidentify', path, nextId });
-      const frontmatter = { ...frontmatters.get(path) };
+      let frontmatter = { ...frontmatters.get(path) };
       const inspected = identity(frontmatter);
-      if (frontmatter.tpsId) frontmatter.tpsId = nextId;
-      else if (Array.isArray(frontmatter.tags)) {
-        frontmatter.tags = frontmatter.tags.filter((tag) => !String(tag).startsWith('tps/record/v1/'));
-        frontmatter.tpsId = nextId;
-        frontmatter.tpsSchemaVersion = 1;
-        frontmatter.kind = inspected.kind;
-      }
+      frontmatter = canonicalizeEnvelope(frontmatter, nextId, inspected.kind);
       frontmatters.set(path, frontmatter);
       authoritativeToken += 1;
       mutationRevision += 1;
@@ -553,7 +560,13 @@ function harness(initialEvents = [], options = {}) {
       return { ok: state.ok, events: state.ok ? state.events : [], normalizedUrl: url, fromCache: false };
     },
   };
-  const service = new NativeCalendarRecordService(app, external, () => settings);
+  const service = new NativeCalendarRecordService(app, external, () => settings, async () => {
+    settingsSaveCount += 1;
+    // Controller's real saveSettings() normalizes this map before persistence,
+    // replacing its object reference even when the entries are unchanged.
+    settings.nativeCalendarCancellationState = structuredClone(settings.nativeCalendarCancellationState);
+    if (failSettingsSave) throw new Error('settings-save-failed');
+  });
   service.setup(() => {});
   const rebuildFromHandles = service.rebuildFromHandles.bind(service);
   service.rebuildFromHandles = (handles) => {
@@ -594,9 +607,16 @@ function harness(initialEvents = [], options = {}) {
     mutationLog,
     preflightLog,
     api,
+    get settingsSaveCount() { return settingsSaveCount; },
     seedRecord,
     seedRecordOnDisk,
     seedPlainFile,
+    deleteRecord: (path) => {
+      files.delete(path);
+      frontmatters.delete(path);
+      authoritativeToken += 1;
+      mutationRevision += 1;
+    },
     mutateBusinessFieldOnDisk: (path, updates) => {
       const frontmatter = frontmatters.get(path);
       if (!frontmatter) throw new Error(`missing frontmatter at ${path}`);
@@ -611,6 +631,7 @@ function harness(initialEvents = [], options = {}) {
     setAfterPreflightHook: (hook) => { afterPreflightHook = hook; },
     setAfterBatchEntryHook: (hook) => { afterBatchEntryHook = hook; },
     setAfterAuthoritativeRebuildHook: (hook) => { afterAuthoritativeRebuildHook = hook; },
+    setFailSettingsSave: (value) => { failSettingsSave = value; },
     emitMetadataChanged: (path, frontmatter) => {
       const file = files.get(path);
       if (!file || !metadataChangedListener) throw new Error(`cannot emit MetadataCache changed for ${path}`);
@@ -631,7 +652,13 @@ function legacyFrontmatter(overrides = {}) {
     status: 'complete',
     scheduled: futureDate(2).toISOString(),
     end: futureDate(2).toISOString(),
+    durationMinutes: 30,
+    allDay: false,
     description: 'Keep this business content',
+    location: '',
+    organizer: '',
+    attendees: [],
+    url: '',
     color: '#123456',
     calendarId: calendar.id,
     calendarSourceId: 'old-source-hash',
@@ -653,21 +680,17 @@ function legacyFrontmatter(overrides = {}) {
 function canonicalFrontmatter(calendarEvent, id, path, overrides = {}) {
   return {
     tpsId: id,
-    tpsSchemaVersion: 1,
     kind: 'calendar-event',
-    title: recordLink(path, calendarEvent.title),
-    eventTitle: calendarEvent.title,
+    title: calendarEvent.title,
     status: 'scheduled',
     scheduled: calendarEvent.startDate.toISOString(),
     end: calendarEvent.endDate.toISOString(),
-    durationMinutes: Math.round((calendarEvent.endDate - calendarEvent.startDate) / 60_000),
-    allDay: calendarEvent.isAllDay,
-    description: calendarEvent.description,
-    location: calendarEvent.location || '',
-    organizer: calendarEvent.organizer || '',
-    attendees: calendarEvent.attendees || [],
-    url: calendarEvent.url || '',
-    tags: ['calendar-event'],
+    ...(calendarEvent.isAllDay ? { allDay: true } : {}),
+    ...(calendarEvent.description ? { description: calendarEvent.description } : {}),
+    ...(calendarEvent.location ? { location: calendarEvent.location } : {}),
+    ...(calendarEvent.organizer ? { organizer: calendarEvent.organizer } : {}),
+    ...(calendarEvent.attendees?.length ? { attendees: calendarEvent.attendees } : {}),
+    ...(calendarEvent.url ? { url: calendarEvent.url } : {}),
     ...overrides,
   };
 }
@@ -675,6 +698,12 @@ function canonicalFrontmatter(calendarEvent, id, path, overrides = {}) {
 function assertNoRedundantFields(frontmatter) {
   for (const key of REDUNDANT_CALENDAR_RECORD_PROPERTIES) {
     assert.equal(Object.hasOwn(frontmatter, key), false, `${key} must not be persisted`);
+  }
+}
+
+function assertNoPhysicalVirtualFields(frontmatter) {
+  for (const key of ['tpsSchemaVersion', 'createdDate', 'modifiedDate']) {
+    assert.equal(Object.hasOwn(frontmatter, key), false, `${key} must remain virtual`);
   }
 }
 
@@ -695,7 +724,21 @@ test('canonical IDs are deterministic, privacy-safe, URL-independent, and contai
   assert.equal(original.tpsId.includes('work-calendar'), false);
   assert.equal(original.tpsId.includes('uid-1'), false);
   assertNoRedundantFields(original);
+  assertNoPhysicalVirtualFields(original);
   assert.equal(Object.hasOwn(original, 'associatedNote'), false);
+  assert.equal(original.title, firstEvent.title);
+  assert.equal(Object.hasOwn(original, 'allDay'), false);
+  assert.equal(Object.hasOwn(original, 'description'), false);
+  assert.equal(Object.hasOwn(original, 'location'), false);
+  assert.equal(Object.hasOwn(original, 'organizer'), false);
+  assert.equal(Object.hasOwn(original, 'attendees'), false);
+  assert.equal(Object.hasOwn(original, 'url'), false);
+  assert.equal(Object.hasOwn(original, 'tags'), false);
+  assert.deepEqual(Object.keys(original).sort(), ['end', 'kind', 'scheduled', 'status', 'title', 'tpsId']);
+  const projected = await h.api.resolve(original.tpsId);
+  assert.equal(projected.frontmatter.tpsSchemaVersion, 1);
+  assert.equal(projected.frontmatter.createdDate, '2023-11-14T22:13:20.000Z');
+  assert.equal(projected.frontmatter.modifiedDate, '2023-11-14T22:13:21.000Z');
 
   const movedStart = futureDate(4, 13);
   h.setEvents([event({
@@ -847,19 +890,172 @@ test('failed feed cannot delete or alter records while successful feed deletion 
   assert.equal(byId.get(canonicalId(personal.id, 'personal')).archived, true);
 });
 
-test('cancelled events update in place and a later feed failure preserves cancellation', async () => {
+test('cancelled events use the configured status once and preserve a later user override', async () => {
   const h = harness([event()]);
   await h.service.sync([calendar], '', true, false);
+  const [path] = h.files.keys();
+  h.mutateBusinessFieldOnDisk(path, { status: 'complete' });
+  h.settings.canceledStatusValue = 'called-off';
   h.setEvents([event({ isCancelled: true })]);
   const cancelled = await h.service.sync([calendar], '', true, false);
   assert.equal(cancelled.cancelled, 1);
-  const [path] = h.files.keys();
-  assert.equal(h.frontmatters.get(path).status, 'cancelled');
+  const id = h.frontmatters.get(path).tpsId;
+  assert.equal(h.frontmatters.get(path).status, 'called-off');
+  assert.deepEqual(h.settings.nativeCalendarCancellationState[id], {
+    appliedStatus: 'called-off',
+    previousStatusPresent: true,
+    previousStatus: 'complete',
+    canRestore: true,
+    pendingApplication: false,
+  });
+  assert.equal(Object.hasOwn(h.frontmatters.get(path), 'nativeCalendarCancellationState'), false);
+
+  h.mutateBusinessFieldOnDisk(path, { status: 'complete' });
+  await h.service.sync([calendar], '', true, false);
+  assert.equal(h.frontmatters.get(path).status, 'complete', 'an applied cancellation never reasserts over a user-completed status');
+
   h.setFetchOk(false);
   const before = structuredClone(h.frontmatters.get(path));
   const failed = await h.service.sync([calendar], '', true, false);
   assert.equal(failed.failedFeeds, 1);
   assert.deepEqual(h.frontmatters.get(path), before);
+
+  h.setFeed(calendar.url, [event()], true);
+  await h.service.sync([calendar], '', true, false);
+  assert.equal(h.frontmatters.get(path).status, 'complete');
+  assert.equal(Object.hasOwn(h.settings.nativeCalendarCancellationState, id), false);
+});
+
+test('active feed restores an exact plugin-owned cancellation, including blank and absent prior statuses', async () => {
+  for (const prior of [
+    { label: 'custom', present: true, value: 'in-progress' },
+    { label: 'blank', present: true, value: '' },
+    { label: 'null', present: true, value: null, restoredValue: '' },
+    { label: 'absent', present: false, value: null },
+  ]) {
+    const incoming = event({ occurrenceIdentity: `restore-${prior.label}`, uid: `restore-${prior.label}`, id: `restore-${prior.label}` });
+    const id = canonicalId(calendar.id, incoming.occurrenceIdentity);
+    const path = `restore-${prior.label}.md`;
+    const h = harness([{ ...incoming, isCancelled: true }]);
+    const frontmatter = canonicalFrontmatter(incoming, id, path, { status: prior.value });
+    if (!prior.present) delete frontmatter.status;
+    h.seedRecordOnDisk(path, frontmatter);
+
+    await h.service.sync([calendar], '', true, false);
+    let synced = [...h.frontmatters.values()].find((candidate) => candidate.tpsId === id);
+    assert.equal(synced.status, 'cancelled');
+    h.setEvents([incoming]);
+    await h.service.sync([calendar], '', true, false);
+    synced = [...h.frontmatters.values()].find((candidate) => candidate.tpsId === id);
+    if (prior.present) assert.equal(synced.status, prior.restoredValue ?? prior.value);
+    else assert.equal(Object.hasOwn(synced, 'status'), false);
+    assert.equal(Object.hasOwn(h.settings.nativeCalendarCancellationState, id), false);
+  }
+});
+
+test('an already-cancelled legacy record is adopted without inventing a prior status', async () => {
+  const incoming = event({ isCancelled: true });
+  const id = canonicalId(calendar.id, incoming.occurrenceIdentity);
+  const path = 'legacy-cancelled.md';
+  const h = harness([incoming]);
+  h.seedRecordOnDisk(path, canonicalFrontmatter(incoming, id, path, { status: 'cancelled' }));
+  await h.service.sync([calendar], '', true, false);
+  assert.equal(h.settings.nativeCalendarCancellationState[id].canRestore, false);
+  h.setEvents([event()]);
+  await h.service.sync([calendar], '', true, false);
+  const synced = [...h.frontmatters.values()].find((candidate) => candidate.tpsId === id);
+  assert.equal(synced.status, 'cancelled', 'unknown legacy status history is not guessed');
+  assert.equal(Object.hasOwn(h.settings.nativeCalendarCancellationState, id), false);
+});
+
+test('cancellation intent save failure aborts before frontmatter mutation and rolls back memory', async () => {
+  const h = harness([event()]);
+  await h.service.sync([calendar], '', true, false);
+  const [path] = h.files.keys();
+  const mutationCount = h.mutationLog.length;
+  h.setEvents([event({ isCancelled: true })]);
+  h.setFailSettingsSave(true);
+  await assert.rejects(h.service.sync([calendar], '', true, false), /settings-save-failed/u);
+  assert.equal(h.frontmatters.get(path).status, 'scheduled');
+  assert.deepEqual(h.settings.nativeCalendarCancellationState, {});
+  assert.equal(h.mutationLog.length, mutationCount);
+});
+
+test('cancellation status and ownership inputs are frozen before asynchronous planning', async () => {
+  const h = harness([event()]);
+  await h.service.sync([calendar], '', true, false);
+  const [path] = h.files.keys();
+  h.mutateBusinessFieldOnDisk(path, { status: 'complete' });
+  h.settings.canceledStatusValue = 'planned-cancel';
+  h.setEvents([event({ isCancelled: true })]);
+  h.setAfterPreflightHook(() => {
+    h.settings.canceledStatusValue = 'next-cancel';
+  });
+
+  await h.service.sync([calendar], '', true, false);
+  const frontmatter = [...h.frontmatters.values()][0];
+  assert.equal(frontmatter.status, 'planned-cancel');
+  assert.equal(h.settings.nativeCalendarCancellationState[frontmatter.tpsId].appliedStatus, 'planned-cancel');
+  assert.equal(h.settings.canceledStatusValue, 'next-cancel');
+});
+
+test('a rejected cancellation plan changes neither status nor private ownership', async () => {
+  const incoming = event({ isCancelled: true });
+  const id = canonicalId(calendar.id, incoming.occurrenceIdentity);
+  const h = harness([incoming], { conflictingStorageKeys: ['status'] });
+  h.seedRecordOnDisk('rejected-cancel.md', canonicalFrontmatter(incoming, id, 'rejected-cancel.md', { status: 'complete' }));
+
+  await assert.rejects(h.service.sync([calendar], '', true, false), /rejected the complete calendar identity plan/u);
+  assert.equal([...h.frontmatters.values()][0].status, 'complete');
+  assert.deepEqual(h.settings.nativeCalendarCancellationState, {});
+  assert.equal(h.settingsSaveCount, 0);
+});
+
+test('a deleted cancelled record is recreated with its tracked cancellation status', async () => {
+  const h = harness([event()]);
+  await h.service.sync([calendar], '', true, false);
+  h.setEvents([event({ isCancelled: true })]);
+  await h.service.sync([calendar], '', true, false);
+  const [path] = h.files.keys();
+  const id = h.frontmatters.get(path).tpsId;
+  h.deleteRecord(path);
+
+  const recreated = await h.service.sync([calendar], '', true, false);
+  const frontmatter = [...h.frontmatters.values()].find((candidate) => candidate.tpsId === id);
+  assert.equal(recreated.created, 1);
+  assert.equal(frontmatter.status, 'cancelled');
+  assert.equal(h.settings.nativeCalendarCancellationState[id].pendingApplication, false);
+});
+
+test('partial cancellation batch records only confirmed applications and converges safely', async () => {
+  const firstEvent = event({ occurrenceIdentity: 'cancel-first', uid: 'cancel-first', id: 'cancel-first', startDate: futureDate(2, 9), isCancelled: true });
+  const secondEvent = event({ occurrenceIdentity: 'cancel-second', uid: 'cancel-second', id: 'cancel-second', startDate: futureDate(3, 9), isCancelled: true });
+  const firstId = canonicalId(calendar.id, firstEvent.occurrenceIdentity);
+  const secondId = canonicalId(calendar.id, secondEvent.occurrenceIdentity);
+  const h = harness([firstEvent, secondEvent]);
+  h.seedRecordOnDisk('first.md', canonicalFrontmatter(firstEvent, firstId, 'first.md'));
+  h.seedRecordOnDisk('second.md', canonicalFrontmatter(secondEvent, secondId, 'second.md'));
+  h.setAfterBatchEntryHook(() => h.seedPlainFile('unrelated-race.md'));
+
+  const originalConsoleError = console.error;
+  console.error = () => {};
+  try {
+    await assert.rejects(h.service.sync([calendar], '', true, false), /interrupted the calendar batch/u);
+  } finally {
+    console.error = originalConsoleError;
+  }
+  assert.equal(h.settings.nativeCalendarCancellationState[firstId].pendingApplication, false);
+  assert.equal(h.settings.nativeCalendarCancellationState[secondId].pendingApplication, true);
+  const byIdAfterPartial = new Map([...h.frontmatters.values()].map((frontmatter) => [frontmatter.tpsId, frontmatter]));
+  assert.equal(byIdAfterPartial.get(firstId).status, 'cancelled');
+  assert.equal(byIdAfterPartial.get(secondId).status, 'scheduled');
+
+  await h.service.sync([calendar], '', true, false);
+  const byId = new Map([...h.frontmatters.values()].map((frontmatter) => [frontmatter.tpsId, frontmatter]));
+  assert.equal(byId.get(firstId).status, 'cancelled');
+  assert.equal(byId.get(secondId).status, 'cancelled');
+  assert.equal(h.settings.nativeCalendarCancellationState[firstId].pendingApplication, false);
+  assert.equal(h.settings.nativeCalendarCancellationState[secondId].pendingApplication, false);
 });
 
 test('filtered present occurrence remains seen under archive policy', async () => {
@@ -882,6 +1078,14 @@ test('legacy native record migrates once, strips redundant fields, and preserves
   const migrated = h.frontmatters.get(path);
   assert.equal(migrated.tpsId, canonicalId(calendar.id, 'uid-1'));
   assertNoRedundantFields(migrated);
+  assertNoPhysicalVirtualFields(migrated);
+  assert.equal(migrated.title, 'Standup');
+  assert.equal(Object.hasOwn(migrated, 'allDay'), false);
+  assert.equal(Object.hasOwn(migrated, 'location'), false);
+  assert.equal(Object.hasOwn(migrated, 'organizer'), false);
+  assert.equal(Object.hasOwn(migrated, 'attendees'), false);
+  assert.equal(Object.hasOwn(migrated, 'url'), false);
+  assert.equal(Object.hasOwn(migrated, 'tags'), false, 'the redundant calendar-event kind tag is removed');
   assert.equal(
     migrated.associatedNote,
     '[[Calendar Events/2026-08-26/Calendar event--deadbeef]]',
@@ -914,14 +1118,14 @@ test('active legacy migration and later refresh preserve workflow status and ord
   assert.equal(migrated.created, 0);
   let frontmatter = [...h.frontmatters.values()][0];
   assert.equal(frontmatter.status, 'complete');
-  assert.deepEqual(new Set(frontmatter.tags), new Set(['calendar-event', 'customer-important', 'managed-work']));
+  assert.deepEqual(new Set(frontmatter.tags), new Set(['customer-important', 'managed-work']));
 
   h.setEvents([event({ description: 'Second refresh' })]);
   await h.service.sync([configured], '', true, false);
   frontmatter = [...h.frontmatters.values()][0];
   assert.equal(frontmatter.status, 'complete');
   assert.equal(frontmatter.description, 'Second refresh');
-  assert.deepEqual(new Set(frontmatter.tags), new Set(['calendar-event', 'customer-important', 'managed-work']));
+  assert.deepEqual(new Set(frontmatter.tags), new Set(['customer-important', 'managed-work']));
 });
 
 test('ordinary active sync preserves an intentionally blank workflow status', async () => {
@@ -961,7 +1165,6 @@ test('tag-profile legacy migration removes only its owned identity tag and prese
   assert.deepEqual(new Set(frontmatter.tags), new Set([
     `project/calendar-event/${oldId}`,
     'customer-tag',
-    'calendar-event',
     'managed-tag',
   ]));
   assert.equal(frontmatter.tags.some((tag) => tag.startsWith('tps/record/v1/')), false);
@@ -982,7 +1185,7 @@ test('calendar configuration values are snapshotted before async work and apply 
   assert.ok(frontmatter.tags.includes('planned-tag'));
   assert.equal(frontmatter.tags.includes('next-sync-tag'), false);
   const createPlan = h.preflightLog[0].entries.find((entry) => entry.operation === 'create');
-  assert.deepEqual(createPlan.properties.tags, ['calendar-event', 'planned-tag']);
+  assert.deepEqual(createPlan.properties.tags, ['planned-tag']);
 
   await h.service.sync([configured], '', true, false);
   frontmatter = [...h.frontmatters.values()][0];
@@ -1120,7 +1323,7 @@ test('delayed stale MetadataCache delivery cannot poison authoritative sync payl
   assert.equal(synced.description, 'Fresh feed description');
   assert.deepEqual(
     new Set(synced.tags),
-    new Set(['calendar-event', 'current-disk-tag', 'managed-calendar']),
+    new Set(['current-disk-tag', 'managed-calendar']),
   );
   assert.equal(synced.tags.includes('stale-cache-tag'), false);
 });
@@ -1287,7 +1490,7 @@ test('whole-plan property preflight rejects a later case-duplicate legacy cleanu
   assert.equal(h.frontmatters.get('later-legacy.md').tpsId, 'legacy-later-cleanup');
 });
 
-test('exact create payload rejects a reserved identity tag before an earlier migration', async () => {
+test('configured native identity tags are discarded while ordinary migration proceeds', async () => {
   const h = harness([event()]);
   h.seedRecordOnDisk('first-legacy.md', legacyFrontmatter({
     path: 'first-legacy.md',
@@ -1299,14 +1502,13 @@ test('exact create payload rejects a reserved identity tag before an earlier mig
     scheduled: futureDate(90).toISOString(),
   }));
 
-  await assert.rejects(
-    h.service.sync([{ ...calendar, autoCreateTag: 'tps/record/v1/task/injected' }], '', true, false),
-    /rejected the complete calendar identity plan/u,
-  );
+  const result = await h.service.sync([{ ...calendar, autoCreateTag: 'calendar-event tps/record/v1/task/injected' }], '', true, false);
   const createPlan = h.preflightLog[0].entries.find((entry) => entry.operation === 'create');
-  assert.ok(createPlan.properties.tags.includes('tps/record/v1/task/injected'));
-  assert.equal(h.mutationLog.length, 0);
-  assert.equal(h.frontmatters.get('first-legacy.md').tpsId, 'legacy-before-invalid-create-tag');
+  assert.equal(Object.hasOwn(createPlan.properties, 'tags'), false);
+  assert.equal(result.created, 1);
+  assert.equal(result.updated, 1);
+  assert.equal([...h.frontmatters.values()].some((frontmatter) =>
+    Array.isArray(frontmatter.tags) && frontmatter.tags.some((tag) => String(tag).startsWith('tps/record/v1/'))), false);
 });
 
 test('exact event update payload rejects a custom storage-key collision before an earlier migration', async () => {
@@ -1386,7 +1588,7 @@ test('whole-plan property preflight rejects a fetched record duplicate business 
   );
   const fetchedPlan = h.preflightLog[0].entries.find((entry) => entry.reference === canonical);
   assert.ok(plannedUpdateKeys(fetchedPlan).includes('description'));
-  assert.ok(plannedUpdateKeys(fetchedPlan).includes('title'), 'self-link title is reserved in the same source plan');
+  assert.ok(plannedUpdateKeys(fetchedPlan).includes('eventTitle'), 'legacy duplicate-title storage is cleaned in the same source plan');
   assert.equal(h.mutationLog.length, 0);
   assert.equal(h.frontmatters.get('first-legacy.md').tpsId, 'legacy-before-fetched-update');
   assert.equal(h.frontmatters.get('later-canonical.md').description, 'Old description');
@@ -1561,7 +1763,7 @@ test('fetched create target occupied by another native kind fails before migrati
   assert.equal(h.frontmatters.get('legacy.md').tpsId, 'legacy-other-occurrence');
 });
 
-test('authoritative path planning relocates an outside-root legacy record and links the final path', async () => {
+test('authoritative path planning relocates an outside-root legacy record and keeps a plain title', async () => {
   const incoming = event({ title: 'Root migration' });
   const sourcePath = 'Imported/Old calendar record.md';
   const h = harness([incoming], { nativeRoot: 'TPS Records', nativeLayout: 'kind-folders' });
@@ -1578,7 +1780,7 @@ test('authoritative path planning relocates an outside-root legacy record and li
   assert.equal(result.updated, 1);
   assert.equal(h.files.has(sourcePath), false);
   assert.equal(h.files.has(expectedPath), true);
-  assert.equal(h.frontmatters.get(expectedPath).title, recordLink(expectedPath, incoming.title));
+  assert.equal(h.frontmatters.get(expectedPath).title, incoming.title);
   assert.equal(h.frontmatters.get(expectedPath).tpsId, canonicalId(calendar.id, incoming.occurrenceIdentity));
 });
 
@@ -1605,9 +1807,9 @@ test('one ordered path batch allocates two converging renames and a create witho
   assert.equal(pathById.get(firstId), basePath);
   assert.equal(pathById.get(secondId), secondPath);
   assert.equal(pathById.get(createdId), thirdPath);
-  assert.equal(h.frontmatters.get(basePath).title, recordLink(basePath, first.title));
-  assert.equal(h.frontmatters.get(secondPath).title, recordLink(secondPath, second.title));
-  assert.equal(h.frontmatters.get(thirdPath).title, recordLink(thirdPath, created.title));
+  assert.equal(h.frontmatters.get(basePath).title, first.title);
+  assert.equal(h.frontmatters.get(secondPath).title, second.title);
+  assert.equal(h.frontmatters.get(thirdPath).title, created.title);
 });
 
 test('ordered path planning reuses a path vacated by an earlier rename', async () => {
@@ -1683,10 +1885,22 @@ test('inactive legacy config without ID is irrelevant, while active config witho
   assert.equal(h.mutationLog.length, 0);
 });
 
-test('native service requires GCM API v5 before any record mutation', async () => {
-  const h = harness([event()], { apiVersion: 4 });
-  await assert.rejects(h.service.sync([calendar], '', true, false), /nativeRecords API v5/u);
+test('native service requires GCM API v6 before any record mutation', async () => {
+  const h = harness([event()], { apiVersion: 5 });
+  await assert.rejects(h.service.sync([calendar], '', true, false), /nativeRecords API v6/u);
   assert.equal(h.mutationLog.length, 0);
+
+  const missing = harness([event()], { apiVersion: undefined });
+  await assert.rejects(missing.service.sync([calendar], '', true, false), /nativeRecords API v6/u);
+  assert.equal(missing.mutationLog.length, 0);
+
+  const nonNumeric = harness([event()], { apiVersion: 'six' });
+  await assert.rejects(nonNumeric.service.sync([calendar], '', true, false), /nativeRecords API v6/u);
+  assert.equal(nonNumeric.mutationLog.length, 0);
+
+  const future = harness([event()], { apiVersion: 7 });
+  await assert.rejects(future.service.sync([calendar], '', true, false), /nativeRecords API v6/u);
+  assert.equal(future.mutationLog.length, 0);
 });
 
 test('canonical tag-identity records index without physical envelope properties', () => {

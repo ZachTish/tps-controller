@@ -1,8 +1,13 @@
-import type { ExternalCalendarConfig, TPSControllerSettings } from "../types";
+import type {
+    ExternalCalendarConfig,
+    NativeCalendarCancellationState,
+    TPSControllerSettings,
+} from "../types";
 import {
     normalizeExternalCalendarTaskNoteFolder,
     normalizeExternalCalendarTaskNoteStrategy,
 } from "./external-calendar-task-note";
+import { parseCalendarRecordId } from "./calendar-record-identity";
 import { normalizeCalendarUrl } from "../utils";
 
 type SettingsRecord = Record<string, unknown>;
@@ -21,6 +26,39 @@ export function countExternalCalendarsMissingId(value: unknown): number {
         if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return true;
         return !String((candidate as SettingsRecord).id || "").trim();
     }).length;
+}
+
+/** Keep only durable, well-formed Controller cancellation ownership entries. */
+export function normalizeNativeCalendarCancellationState(
+    value: unknown,
+): Record<string, NativeCalendarCancellationState> {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    const normalized: Record<string, NativeCalendarCancellationState> = {};
+    const claimedIds = new Set<string>();
+    for (const [rawId, candidate] of Object.entries(value as SettingsRecord)) {
+        const id = rawId.trim();
+        const identityKey = id.toLocaleLowerCase();
+        if (!parseCalendarRecordId(id)
+            || claimedIds.has(identityKey)
+            || !candidate
+            || typeof candidate !== "object"
+            || Array.isArray(candidate)) continue;
+        const entry = candidate as SettingsRecord;
+        const appliedStatus = typeof entry.appliedStatus === "string" ? entry.appliedStatus : "";
+        if (!appliedStatus) continue;
+        const previousStatus = entry.previousStatus === null || typeof entry.previousStatus === "string"
+            ? entry.previousStatus
+            : null;
+        normalized[id] = {
+            appliedStatus,
+            previousStatusPresent: entry.previousStatusPresent === true,
+            previousStatus,
+            canRestore: entry.canRestore === true,
+            pendingApplication: entry.pendingApplication === true,
+        };
+        claimedIds.add(identityKey);
+    }
+    return normalized;
 }
 
 /** Reproduce Controller's pre-canonical-ID fallback so existing records migrate. */
