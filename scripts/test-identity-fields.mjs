@@ -276,7 +276,10 @@ test('external-calendar daily-note creation uses GCM first and only falls back w
   assert.match(ensureSource, /if \(gcmAttempt\.available\) \{[\s\S]*gcmAttempt\.file instanceof TFile[\s\S]*throw new Error/);
   assert.match(ensureSource, /catch \(error\) \{[\s\S]*daily-note:gcm-failed[\s\S]*throw error/);
   assert.match(autoCreateSource, /Configured Daily Notes template was not found/);
-  assert.match(autoCreateSource, /applyDailyNoteTemplateVariables\(templateContent/);
+  assert.match(
+    autoCreateSource,
+    /const preparedTemplateContent = this\.prepareInstanceSource\([\s\S]*return applyDailyNoteTemplateVariables\(preparedTemplateContent/,
+  );
   assert.match(autoCreateSource, /overwrite_file_commands/);
   assert.match(autoCreateSource, /hasRuntimeFolder/);
   assert.match(autoCreateSource, /hasRuntimeTemplate/);

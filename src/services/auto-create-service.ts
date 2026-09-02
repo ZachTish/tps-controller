@@ -13,10 +13,13 @@ import {
 import { normalizeTagValue } from "../utils/tag-utils";
 import {
     buildCalendarExternalId,
+    canAutomaticallyMutateSourceViaGcm,
+    canAutomaticallyMutateViaGcm,
     emitFilesUpdated,
     ensureDailyNoteForIsoDateViaGcm,
     ensureInternalIdInFrontmatter,
     getExternalId,
+    prepareInstanceSourceViaGcm,
 } from "../tps-gcm-api";
 import { applyDailyNoteTemplateVariables } from "./daily-note-template";
 import { cancelOpenInlineTaskLine } from "./external-calendar-cancellation";
@@ -855,8 +858,12 @@ export class AutoCreateService {
             lineIndex: -1,
         };
         let metadataPatchUnavailable = false;
+        if (!(await this.canAutomaticallyMutateFile(match.file, "inline-task-update", "preflight"))) {
+            return { changed: false, file: match.file };
+        }
         try {
             await this.app.vault.process(match.file, (content) => {
+                if (!this.canAutomaticallyMutateSource(content, match.file, "inline-task-update")) return content;
                 const lines = content.split(/\r\n|\n|\r/);
                 const footnoteMetadata = this.parseInlineMetadataFootnotes(lines);
                 const candidateExternalIds = new Set(
@@ -1004,7 +1011,16 @@ export class AutoCreateService {
         let sourceBlock = "";
         let updatedBlock = "";
         let sourceCaptureOutcome = "not-found";
+        if (!(await this.canAutomaticallyMutateFile(match.file, "inline-task-migrate-source", "preflight"))) {
+            return { changed: false, file: match.file };
+        }
+        if (!(await this.canAutomaticallyMutateFile(targetFile, "inline-task-migrate-target", "preflight"))) {
+            return { changed: false, file: match.file };
+        }
         const sourceContent = await this.app.vault.read(match.file);
+        if (!this.canAutomaticallyMutateSource(sourceContent, match.file, "inline-task-migrate-source")) {
+            return { changed: false, file: match.file };
+        }
         const sourceLines = sourceContent.split(/\r\n|\n|\r/u);
         const sourceCapture = captureExternalTaskBlock(
             sourceContent,
@@ -1036,8 +1052,15 @@ export class AutoCreateService {
         const targetState: { outcome: "inserted" | "idempotent" | "conflict" | "unsafe" } = {
             outcome: "conflict",
         };
+        if (!(await this.canAutomaticallyMutateFile(targetFile, "inline-task-migrate-target", "mutation-boundary"))) {
+            return { changed: false, file: match.file };
+        }
         try {
             await this.app.vault.process(targetFile, (content) => {
+                if (!this.canAutomaticallyMutateSource(content, targetFile, "inline-task-migrate-target")) {
+                    targetState.outcome = "unsafe";
+                    return content;
+                }
                 const lines = content.split(/\r\n|\n|\r/u);
                 const matcher = buildMatcher(this.parseInlineMetadataFootnotes(lines));
                 const existing = captureExternalTaskBlock(content, matcher);
@@ -1092,17 +1115,25 @@ export class AutoCreateService {
 
         let sourceRemoved = false;
         try {
-            await this.app.vault.process(match.file, (content) => {
-                const lines = content.split(/\r\n|\n|\r/u);
-                const removal = removeExactExternalTaskBlock(
-                    content,
-                    buildMatcher(this.parseInlineMetadataFootnotes(lines)),
-                    sourceBlock,
-                );
-                sourceCaptureOutcome = removal.outcome;
-                sourceRemoved = removal.outcome === "changed";
-                return removal.content;
-            });
+            if (!(await this.canAutomaticallyMutateFile(match.file, "inline-task-migrate-source", "mutation-boundary"))) {
+                sourceCaptureOutcome = "template-protected";
+            } else {
+                await this.app.vault.process(match.file, (content) => {
+                    if (!this.canAutomaticallyMutateSource(content, match.file, "inline-task-migrate-source")) {
+                        sourceCaptureOutcome = "template-protected";
+                        return content;
+                    }
+                    const lines = content.split(/\r\n|\n|\r/u);
+                    const removal = removeExactExternalTaskBlock(
+                        content,
+                        buildMatcher(this.parseInlineMetadataFootnotes(lines)),
+                        sourceBlock,
+                    );
+                    sourceCaptureOutcome = removal.outcome;
+                    sourceRemoved = removal.outcome === "changed";
+                    return removal.content;
+                });
+            }
         } catch (error) {
             logger.flowError("AutoCreate", "inline-task-migrate:source-remove-failed", error, {
                 sourcePath: match.file.path,
@@ -1130,14 +1161,23 @@ export class AutoCreateService {
         if (!sourceRemoved) {
             if (targetOutcome === "inserted") {
                 try {
-                    await this.app.vault.process(targetFile, (content) => {
-                        const lines = content.split(/\r\n|\n|\r/u);
-                        return removeExactExternalTaskBlock(
-                            content,
-                            buildMatcher(this.parseInlineMetadataFootnotes(lines)),
-                            updatedBlock,
-                        ).content;
-                    });
+                    if (await this.canAutomaticallyMutateFile(
+                        targetFile,
+                        "inline-task-migrate-rollback",
+                        "mutation-boundary",
+                    )) {
+                        await this.app.vault.process(targetFile, (content) => {
+                            if (!this.canAutomaticallyMutateSource(content, targetFile, "inline-task-migrate-rollback")) {
+                                return content;
+                            }
+                            const lines = content.split(/\r\n|\n|\r/u);
+                            return removeExactExternalTaskBlock(
+                                content,
+                                buildMatcher(this.parseInlineMetadataFootnotes(lines)),
+                                updatedBlock,
+                            ).content;
+                        });
+                    }
                 } catch (error) {
                     logger.flowError("AutoCreate", "inline-task-migrate:rollback-failed", error, {
                         sourcePath: match.file.path,
@@ -1186,8 +1226,15 @@ export class AutoCreateService {
             lineIndex: -1,
         };
 
+        if (!(await this.canAutomaticallyMutateFile(file, "calendar-task-upsert", "preflight"))) {
+            return { action: "none", file };
+        }
         try {
             await this.app.vault.process(file, (content) => {
+                if (!this.canAutomaticallyMutateSource(content, file, "calendar-task-upsert")) {
+                    state.outcome = "unsafe-frontmatter";
+                    return content;
+                }
                 const lines = content.split(/\r\n|\n|\r/);
                 const footnoteMetadata = this.parseInlineMetadataFootnotes(lines);
                 const existingTask = mutateExternalTaskLineContent(
@@ -1262,7 +1309,7 @@ export class AutoCreateService {
     }
 
     private async cleanTaskTargetFrontmatter(file: TFile): Promise<void> {
-        await this.app.fileManager.processFrontMatter(file, (fm) => {
+        await this.processFrontmatterSafely(file, "clean-task-target", (fm) => {
             if (typeof fm.title !== "string" || !fm.title.trim()) {
                 fm.title = file.basename.replace(/^\d{4}-\d{2}-\d{2}\s+/, "").trim() || file.basename;
             }
@@ -1478,7 +1525,9 @@ export class AutoCreateService {
         }
         if (gcmAttempt.available) {
             if (gcmAttempt.file instanceof TFile) {
-                await this.runTemplaterOnDailyNote(gcmAttempt.file);
+                if (await this.canAutomaticallyMutateFile(gcmAttempt.file, "daily-note-templater", "preflight")) {
+                    await this.runTemplaterOnDailyNote(gcmAttempt.file);
+                }
                 logger.flow("AutoCreate", "daily-note:gcm-resolved", {
                     isoDate,
                     path: gcmAttempt.file.path,
@@ -1491,10 +1540,12 @@ export class AutoCreateService {
 
         const existing = this.app.vault.getAbstractFileByPath(path);
         if (existing instanceof TFile) {
-            await this.runTemplaterOnDailyNote(existing, {
-                awaitAutoCreate: !(existingBeforeGcm instanceof TFile),
-                createStartedAt: gcmAttemptStartedAt,
-            });
+            if (await this.canAutomaticallyMutateFile(existing, "daily-note-templater", "preflight")) {
+                await this.runTemplaterOnDailyNote(existing, {
+                    awaitAutoCreate: !(existingBeforeGcm instanceof TFile),
+                    createStartedAt: gcmAttemptStartedAt,
+                });
+            }
             return existing;
         }
 
@@ -1515,10 +1566,31 @@ export class AutoCreateService {
                 throw error;
             }
         }
-        await this.runTemplaterOnDailyNote(created, {
-            awaitAutoCreate: true,
-            createStartedAt,
-        });
+        if (createdByThisCall) {
+            if (!(await this.canAutomaticallyMutateFile(created, "daily-note-templater", "preflight"))) {
+                throw new Error(`TPS GCM rejected automatic processing for ${created.path}.`);
+            }
+            let templaterError: unknown = null;
+            try {
+                await this.runTemplaterOnDailyNote(created, {
+                    awaitAutoCreate: true,
+                    createStartedAt,
+                });
+            } catch (error) {
+                templaterError = error;
+            }
+            try {
+                await this.sanitizeInstanceSourceAfterTemplater(created, "standalone-daily-note");
+            } catch (sanitizationError) {
+                if (templaterError === null) throw sanitizationError;
+            }
+            if (templaterError !== null) throw templaterError;
+        } else if (await this.canAutomaticallyMutateFile(created, "daily-note-templater", "preflight")) {
+            await this.runTemplaterOnDailyNote(created, {
+                awaitAutoCreate: true,
+                createStartedAt,
+            });
+        }
         if (createdByThisCall) {
             logger.flow("AutoCreate", "daily-note:standalone-created", {
                 isoDate,
@@ -1538,7 +1610,11 @@ export class AutoCreateService {
             const scheduled = formatDateTimeForFrontmatter(
                 new Date(date.getFullYear(), date.getMonth(), date.getDate()),
             );
-            return `---\nscheduled: ${scheduled}\ntags:\n  - context/scheduled\n---\n\n`;
+            return this.prepareInstanceSource(
+                `---\nscheduled: ${scheduled}\ntags:\n  - context/scheduled\n---\n\n`,
+                "standalone-daily-note-default",
+                target.path,
+            );
         }
 
         const templateFile = this.resolveDailyNoteTemplateFile(templatePath);
@@ -1565,7 +1641,12 @@ export class AutoCreateService {
         const targetMoment = typeof moment === "function" ? moment(date) : null;
         const nowMoment = typeof moment === "function" ? moment() : null;
         const title = target.path.split("/").pop()?.replace(/\.md$/i, "") || this.formatAllDayDate(date);
-        return applyDailyNoteTemplateVariables(templateContent, {
+        const preparedTemplateContent = this.prepareInstanceSource(
+            templateContent,
+            "standalone-daily-note-template",
+            target.path,
+        );
+        return applyDailyNoteTemplateVariables(preparedTemplateContent, {
             title,
             defaultDateFormat: target.templateDateFormat,
             defaultTimeFormat: target.templateTimeFormat,
@@ -1582,6 +1663,27 @@ export class AutoCreateService {
                 return `{{time:${format}}}`;
             },
         });
+    }
+
+    private async sanitizeInstanceSourceAfterTemplater(file: TFile, reason: string): Promise<void> {
+        let rejected = false;
+        let changed = false;
+        await this.app.vault.process(file, (current) => {
+            const prepared = prepareInstanceSourceViaGcm(this.app, current);
+            if (prepared === null) {
+                rejected = true;
+                return current;
+            }
+            changed = prepared !== current;
+            return prepared;
+        });
+        if (rejected) {
+            logger.flowWarn("AutoCreate", "instance:post-templater-rejected", { path: file.path, reason });
+            throw new Error(`TPS GCM rejected the generated content for ${file.path}.`);
+        }
+        if (changed) {
+            logger.flow("AutoCreate", "instance:post-templater-sanitized", { path: file.path, reason });
+        }
     }
 
     private resolveDailyNoteTemplateFile(rawPath: string): TFile | null {
@@ -1933,7 +2035,9 @@ export class AutoCreateService {
             lineIndex: -1,
         };
         try {
+            if (!(await this.canAutomaticallyMutateFile(note.file, "cancel-inline-task", "preflight"))) return false;
             await this.app.vault.process(note.file, (content) => {
+                if (!this.canAutomaticallyMutateSource(content, note.file, "cancel-inline-task")) return content;
                 const lines = content.split(/\r\n|\n|\r/);
                 const footnoteMetadata = this.parseInlineMetadataFootnotes(lines);
                 const mutation = mutateExternalTaskLineContent(
@@ -2045,6 +2149,9 @@ export class AutoCreateService {
     private async deleteOrArchive(file: TFile): Promise<boolean> {
         try {
             if (this.config.syncOnEventDelete === "delete") {
+                if (!(await this.canAutomaticallyMutateFile(file, "delete-missing-calendar-note", "mutation-boundary"))) {
+                    return false;
+                }
                 await this.app.vault.delete(file);
                 return true;
             }
@@ -2058,6 +2165,7 @@ export class AutoCreateService {
     private async archiveFile(file: TFile): Promise<boolean> {
         const folder = this.config.archiveFolder;
         if (!folder || this.isArchivedNote(file)) return false;
+        if (!(await this.canAutomaticallyMutateFile(file, "archive-calendar-note", "preflight"))) return false;
         await this.ensureFolder(folder);
         let newPath = normalizePath(`${folder}/${file.name}`);
         let counter = 1;
@@ -2065,6 +2173,7 @@ export class AutoCreateService {
             newPath = normalizePath(`${folder}/${file.basename} (${counter}).${file.extension}`);
             counter++;
         }
+        if (!(await this.canAutomaticallyMutateFile(file, "archive-calendar-note", "mutation-boundary"))) return false;
         await this.app.vault.rename(file, newPath);
         return true;
     }
@@ -2092,7 +2201,11 @@ export class AutoCreateService {
         reason: string,
         mutate: (fm: Record<string, any>) => void,
     ): Promise<boolean> {
+        if (!(await this.canAutomaticallyMutateFile(file, reason, "preflight"))) return false;
         try {
+            if (!(await this.canAutomaticallyMutateFile(file, reason, "mutation-boundary"))) return false;
+            const current = await this.app.vault.read(file);
+            if (!this.canAutomaticallyMutateSource(current, file, reason)) return false;
             await this.app.fileManager.processFrontMatter(file, (fm) => mutate((fm ?? {}) as Record<string, any>));
             this.malformedFrontmatterWarnedPaths.delete(file.path);
             return true;
@@ -2104,6 +2217,41 @@ export class AutoCreateService {
             logger.warn(`[AutoCreateService] Frontmatter mutation failed (${reason})`, { file: file.path, error });
             return false;
         }
+    }
+
+    private async canAutomaticallyMutateFile(
+        file: TFile,
+        reason: string,
+        stage: "preflight" | "mutation-boundary",
+    ): Promise<boolean> {
+        const allowed = await canAutomaticallyMutateViaGcm(this.app, file);
+        if (!allowed) {
+            logger.flowWarn("AutoCreate", "mutation:skip-template-protected", {
+                path: file.path,
+                reason,
+                stage,
+            });
+        }
+        return allowed;
+    }
+
+    private canAutomaticallyMutateSource(content: string, file: TFile, reason: string): boolean {
+        const allowed = canAutomaticallyMutateSourceViaGcm(this.app, content);
+        if (!allowed) {
+            logger.flowWarn("AutoCreate", "mutation:skip-template-protected", {
+                path: file.path,
+                reason,
+                stage: "mutation-boundary",
+            });
+        }
+        return allowed;
+    }
+
+    private prepareInstanceSource(source: string, reason: string, path: string): string {
+        const prepared = prepareInstanceSourceViaGcm(this.app, source);
+        if (prepared !== null) return prepared;
+        logger.flowWarn("AutoCreate", "instance:template-source-rejected", { path, reason });
+        throw new Error(`TPS GCM rejected template-derived content for ${path}.`);
     }
 
     private findKeyInsensitive(obj: Record<string, any>, key: string): any {

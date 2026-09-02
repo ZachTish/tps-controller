@@ -16,6 +16,9 @@ class FakeFile {
 }
 
 let gcmAttemptHandler = async () => ({ available: false, file: null });
+let canAutomaticallyMutateHandler = async () => true;
+let canAutomaticallyMutateSourceHandler = () => true;
+let prepareInstanceSourceHandler = (_app, source) => source;
 
 function loadDailyTemplateModule() {
   const sourceText = readFileSync(new URL("../src/services/daily-note-template.ts", import.meta.url), "utf8");
@@ -108,10 +111,13 @@ function loadAutoCreateService() {
     if (specifier === "../tps-gcm-api") {
       return {
         buildCalendarExternalId: (_app, event) => `calendar:${event.sourceUrl || ""}#${event.id}`,
+        canAutomaticallyMutateSourceViaGcm: (...args) => canAutomaticallyMutateSourceHandler(...args),
+        canAutomaticallyMutateViaGcm: (...args) => canAutomaticallyMutateHandler(...args),
         emitFilesUpdated() {},
         ensureDailyNoteForIsoDateViaGcm: (...args) => gcmAttemptHandler(...args),
         ensureInternalIdInFrontmatter: () => "",
         getExternalId: () => "",
+        prepareInstanceSourceViaGcm: (...args) => prepareInstanceSourceHandler(...args),
       };
     }
     if (specifier === "./daily-note-template") return dailyTemplate;
@@ -146,6 +152,7 @@ function createHarness({
   templaterLocalSettingsUnavailable = false,
   templaterAutoDelayMs = 15,
   templaterEventName = "templater:overwrite-file",
+  createRaceContent = null,
   templaterTransform = async (content) => (
     content.replace("<% controller-template-body %>", "Controller template body")
   ),
@@ -155,6 +162,7 @@ function createHarness({
   const folders = new Set([""]);
   const workspaceListeners = new Map();
   let createCount = 0;
+  let pendingCreateRaceContent = createRaceContent;
   let templaterRuns = 0;
   const templaterPendingFiles = new Set();
   const hasLocalTemplaterSetting = templaterLocalSettingsUnavailable !== true;
@@ -287,6 +295,12 @@ function createHarness({
         if (files.has(normalized)) throw new Error(`File already exists: ${normalized}`);
         const parent = normalized.includes("/") ? normalized.slice(0, normalized.lastIndexOf("/")) : "";
         if (parent && !folders.has(parent)) throw new Error(`Missing parent folder: ${parent}`);
+        if (pendingCreateRaceContent !== null) {
+          files.set(normalized, String(pendingCreateRaceContent));
+          fileTimes.set(normalized, Date.now());
+          pendingCreateRaceContent = null;
+          throw new Error(`File already exists: ${normalized}`);
+        }
         createCount += 1;
         files.set(normalized, content);
         fileTimes.set(normalized, Date.now());
@@ -1133,6 +1147,173 @@ test("Controller fails closed before task append when Templater leaves commands 
     assert.match(harness.files.get(targetPath), /<% controller-template-body %>/);
     assert.doesNotMatch(harness.files.get(targetPath), /Must not append after unresolved Templater/);
   } finally {
+    restoreMoment();
+  }
+});
+
+test("Controller strips template markers before and after standalone Daily Note templating", async () => {
+  const restoreMoment = installMoment();
+  let prepareCalls = 0;
+  try {
+    gcmAttemptHandler = async () => ({ available: false, file: null });
+    prepareInstanceSourceHandler = (_app, source) => {
+      prepareCalls += 1;
+      return String(source).replace(/^\s*-\s*template\s*$\r?\n?/gmu, "");
+    };
+    const harness = createHarness({
+      initialFiles: {
+        "Templates/Daily.md": [
+          "---",
+          "tags:",
+          "  - template",
+          "  - keep",
+          "title: {{date}}",
+          "---",
+          "",
+          "<% controller-template-body %>",
+        ].join("\n"),
+      },
+      templaterLocalAutoTrigger: false,
+      templaterLegacyAutoTrigger: false,
+      templaterTransform: async (content) => content
+        .replace("  - keep", "  - template\n  - keep")
+        .replace("<% controller-template-body %>", "Controller template body"),
+    });
+    const { AutoCreateService } = loadAutoCreateService();
+    const service = new AutoCreateService(harness.app);
+
+    const file = await service.ensureDailyNoteFile(new Date(2027, 0, 22, 9, 0, 0));
+    const content = harness.files.get(file.path);
+
+    assert.equal(file.path, "Inbox/Daily/2027/01/22.md");
+    assert.ok(prepareCalls >= 2);
+    assert.doesNotMatch(content, /^\s*-\s*template\s*$/mu);
+    assert.match(content, /^\s*-\s*keep\s*$/mu);
+    assert.match(content, /Controller template body/u);
+  } finally {
+    prepareInstanceSourceHandler = (_app, source) => source;
+    restoreMoment();
+  }
+});
+
+test("Controller aborts standalone Daily Note creation when GCM rejects template-derived source", async () => {
+  const restoreMoment = installMoment();
+  try {
+    gcmAttemptHandler = async () => ({ available: false, file: null });
+    prepareInstanceSourceHandler = (_app, source) => (
+      String(source).includes("title: {{date}}") ? null : source
+    );
+    const harness = createHarness();
+    const { AutoCreateService } = loadAutoCreateService();
+    const service = new AutoCreateService(harness.app);
+
+    await assert.rejects(
+      () => service.ensureDailyNoteFile(new Date(2027, 0, 23, 9, 0, 0)),
+      /TPS GCM rejected template-derived content/u,
+    );
+    assert.equal(harness.stats.createCount, 0);
+    assert.equal(harness.app.vault.getAbstractFileByPath("Inbox/Daily/2027/01/23.md"), null);
+  } finally {
+    prepareInstanceSourceHandler = (_app, source) => source;
+    restoreMoment();
+  }
+});
+
+test("Controller rechecks current Daily Note bytes before an automatic calendar task append", async () => {
+  const restoreMoment = installMoment();
+  try {
+    const dailyPath = "Inbox/Daily/2027/01/24.md";
+    const initialContent = "---\nkind: dailynote\n---\n\nProtected body\n";
+    const harness = createHarness({ initialFiles: { [dailyPath]: initialContent } });
+    gcmAttemptHandler = async () => ({
+      available: true,
+      file: harness.app.vault.getAbstractFileByPath(dailyPath),
+    });
+    canAutomaticallyMutateHandler = async () => true;
+    canAutomaticallyMutateSourceHandler = (_app, source) => !String(source).includes("Protected body");
+    const { AutoCreateService } = loadAutoCreateService();
+    const service = new AutoCreateService(harness.app);
+    const startDate = new Date(2027, 0, 24, 9, 0, 0);
+
+    const result = await service.createTaskInTaskNote({
+      id: "protected-daily-event",
+      uid: "protected-daily-event",
+      title: "Must not be appended",
+      startDate,
+      endDate: new Date(2027, 0, 24, 9, 30, 0),
+      sourceUrl: "",
+      location: "",
+      url: "",
+      isAllDay: false,
+    }, null);
+
+    assert.equal(result.action, "none");
+    assert.equal(harness.files.get(dailyPath), initialContent);
+  } finally {
+    canAutomaticallyMutateHandler = async () => true;
+    canAutomaticallyMutateSourceHandler = () => true;
+    restoreMoment();
+  }
+});
+
+test("Controller does not treat a create-race winner as its own Daily Note instance", async () => {
+  const restoreMoment = installMoment();
+  try {
+    const racedContent = "---\ntags:\n  - template\n---\n\nConcurrent creator body\n";
+    gcmAttemptHandler = async () => ({ available: false, file: null });
+    canAutomaticallyMutateHandler = async () => false;
+    prepareInstanceSourceHandler = (_app, source) => String(source).replace(/^\s*-\s*template\s*$\r?\n?/gmu, "");
+    const harness = createHarness({
+      createRaceContent: racedContent,
+      templaterLocalAutoTrigger: false,
+      templaterLegacyAutoTrigger: false,
+    });
+    const { AutoCreateService } = loadAutoCreateService();
+    const service = new AutoCreateService(harness.app);
+
+    const file = await service.ensureDailyNoteFile(new Date(2027, 0, 25, 9, 0, 0));
+
+    assert.equal(file.path, "Inbox/Daily/2027/01/25.md");
+    assert.equal(harness.stats.createCount, 0);
+    assert.equal(harness.stats.templaterRuns, 0);
+    assert.equal(harness.files.get(file.path), racedContent);
+  } finally {
+    canAutomaticallyMutateHandler = async () => true;
+    prepareInstanceSourceHandler = (_app, source) => source;
+    restoreMoment();
+  }
+});
+
+test("Controller strips a marker reintroduced by a failing Templater pass before surfacing the error", async () => {
+  const restoreMoment = installMoment();
+  try {
+    gcmAttemptHandler = async () => ({ available: false, file: null });
+    prepareInstanceSourceHandler = (_app, source) => String(source).replace(/^\s*-\s*template\s*$\r?\n?/gmu, "");
+    let harness;
+    harness = createHarness({
+      initialFiles: {
+        "Templates/Daily.md": "---\ntags:\n  - template\n---\n\n<% controller-template-body %>\n",
+      },
+      templaterLocalAutoTrigger: false,
+      templaterLegacyAutoTrigger: false,
+      templaterTransform: async (content, file) => {
+        harness.files.set(file.path, content.replace("tags:\n", "tags:\n  - template\n"));
+        throw new Error("synthetic Templater failure");
+      },
+    });
+    const { AutoCreateService } = loadAutoCreateService();
+    const service = new AutoCreateService(harness.app);
+    const targetPath = "Inbox/Daily/2027/01/26.md";
+
+    await assert.rejects(
+      () => service.ensureDailyNoteFile(new Date(2027, 0, 26, 9, 0, 0)),
+      /synthetic Templater failure/u,
+    );
+    const content = harness.files.get(targetPath);
+    assert.match(content, /<% controller-template-body %>/u);
+    assert.doesNotMatch(content, /^\s*-\s*template\s*$/mu);
+  } finally {
+    prepareInstanceSourceHandler = (_app, source) => source;
     restoreMoment();
   }
 });

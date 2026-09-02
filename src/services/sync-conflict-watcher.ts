@@ -1,6 +1,6 @@
 import { App, TFile, Notice, normalizePath } from "obsidian";
 import * as logger from "../logger";
-import { getGcmApi } from "../tps-gcm-api";
+import { canAutomaticallyMutateViaGcm, getGcmApi } from "../tps-gcm-api";
 import { parseCalendarRecordId } from "./calendar-record-identity";
 
 export class SyncConflictWatcher {
@@ -259,6 +259,7 @@ export class SyncConflictWatcher {
         const dupFolder = this.getDuplicateArchiveFolder();
         const originalPath = file.path;
         try {
+            if (!(await this.canArchiveAutomatically(file, cause, "candidate"))) return false;
             await this.ensureFolderExists(dupFolder);
             const baseName = this.getCanonicalBaseName(file.basename);
 
@@ -280,6 +281,7 @@ export class SyncConflictWatcher {
                 targetPath: newPath,
                 collisionCount: counter - 1,
             });
+            if (!(await this.canArchiveAutomatically(file, cause, "mutation-boundary"))) return false;
             await this.app.vault.rename(file, newPath);
             logger.flowWarn("SyncConflictWatcher", "archive:done", {
                 cause,
@@ -298,6 +300,22 @@ export class SyncConflictWatcher {
             });
             return false;
         }
+    }
+
+    private async canArchiveAutomatically(
+        file: TFile,
+        cause: "vault-create" | "vault-rename" | "metadata-changed" | "startup-sweep",
+        stage: "candidate" | "mutation-boundary",
+    ): Promise<boolean> {
+        const allowed = await canAutomaticallyMutateViaGcm(this.app, file);
+        if (!allowed) {
+            logger.flowWarn("SyncConflictWatcher", "archive:skip-template-protected", {
+                cause,
+                path: file.path,
+                stage,
+            });
+        }
+        return allowed;
     }
 
     private async ensureFolderExists(folderPath: string): Promise<void> {

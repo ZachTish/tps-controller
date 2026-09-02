@@ -41,7 +41,7 @@ const serviceBuild = await build({
         loader: "js",
         contents: `
           export class Modal {
-            constructor(app) { this.app = app; this.titleEl = { setText() {} }; this.contentEl = { createEl() { return { setAttr() {}, addEventListener() {} }; }, createDiv() { return { createEl() { return { setAttr() {}, addEventListener() {} }; } }; }, empty() {} }; }
+            constructor(app) { this.app = app; this.modalEl = { addClass() {} }; this.titleEl = { setText() {} }; this.contentEl = { createEl() { return { setAttr() {}, addEventListener() {} }; }, createDiv() { return { createEl() { return { setAttr() {}, addEventListener() {} }; } }; }, empty() {} }; }
             open() { globalThis.__tishosBridgeModals?.push(this); this.onOpen?.(); }
             close() { this.onClose?.(); }
           }
@@ -2294,10 +2294,11 @@ test("local revoke approval cannot mutate authority after stop", async () => {
   assert.equal(harness.service.getStatus().clients.length, 1);
 });
 
-test("source wiring keeps discovery and execution behind one isolated seam", async () => {
-  const [main, guards, packageJson] = await Promise.all([
+test("source wiring keeps discovery, execution, and mobile-safe confirmation behind shared seams", async () => {
+  const [main, guards, bridgeService, packageJson] = await Promise.all([
     readFile(fileURLToPath(new URL("src/main.ts", root)), "utf8"),
     readFile(fileURLToPath(new URL("src/core/type-guards.ts", root)), "utf8"),
+    readFile(fileURLToPath(new URL("src/services/tishos-command-bridge-service.ts", root)), "utf8"),
     readFile(fileURLToPath(new URL("package.json", root)), "utf8"),
   ]);
   assert.match(guards, /listCommands\?: \(\) => unknown/);
@@ -2308,5 +2309,6 @@ test("source wiring keeps discovery and execution behind one isolated seam", asy
   assert.match(main, /id: "refresh-tishos-command-bridge"/);
   assert.match(main, /const commandBridgeStop = this\.tishOSCommandBridgeService\?\.stop\(\)/);
   assert.match(main, /await commandBridgeStop/);
+  assert.match(bridgeService, /this\.modalEl\.addClass\("tps-keyboard-aware-modal"\)/);
   assert.match(packageJson, /test-tishos-command-bridge\.mjs/);
 });

@@ -535,7 +535,18 @@ function harness(initialEvents = [], options = {}) {
   };
 
   const app = {
-    plugins: { getPlugin: (id) => id === 'tps-global-context-menu' ? { api: { nativeRecords: api } } : null },
+    plugins: {
+      getPlugin: (id) => id === 'tps-global-context-menu'
+        ? {
+            api: {
+              nativeRecords: api,
+              ...(options.canAutomaticallyMutate
+                ? { templates: { version: 1, canAutomaticallyMutate: options.canAutomaticallyMutate } }
+                : {}),
+            },
+          }
+        : null,
+    },
     vault: {
       getMarkdownFiles: () => [...files.values()],
       getAbstractFileByPath: (path) => files.get(path) || null,
@@ -1921,4 +1932,104 @@ test('calendar occurrence filenames use local date plus a safe readable title', 
     buildNativeCalendarRecordFileName(event({ startDate, title: 'Standup / review: Q3?' })),
     '2026-08-25 - Standup - review- Q3',
   );
+});
+
+test('native calendar sync refuses template-protected records before planning or applying mutations', async () => {
+  const incoming = event();
+  const id = canonicalId(calendar.id, incoming.occurrenceIdentity);
+  const h = harness([incoming], { canAutomaticallyMutate: async () => false });
+  h.seedRecordOnDisk('protected-calendar.md', canonicalFrontmatter(incoming, id, 'protected-calendar.md'));
+
+  await assert.rejects(
+    h.service.sync([calendar], '', true, false),
+    /template-protected record/u,
+  );
+  assert.ok(h.preflightLog.length > 0, 'non-mutating GCM planning may precede the protection decision');
+  assert.equal(h.mutationLog.length, 0);
+});
+
+test('native calendar sync repeats the protection check at the GCM batch boundary', async () => {
+  const incoming = event();
+  const id = canonicalId(calendar.id, incoming.occurrenceIdentity);
+  let checks = 0;
+  const h = harness([incoming], {
+    canAutomaticallyMutate: async () => {
+      checks += 1;
+      return checks === 1;
+    },
+  });
+  h.seedRecordOnDisk('raced-calendar.md', canonicalFrontmatter(incoming, id, 'raced-calendar.md'));
+
+  await assert.rejects(
+    h.service.sync([calendar], '', true, false),
+    /template-protected record/u,
+  );
+  assert.equal(checks, 2);
+  assert.equal(h.mutationLog.length, 0);
+});
+
+test('native calendar sync ignores a protected physical no-op while creating an unrelated record', async () => {
+  const incoming = event({ id: 'new-event', uid: 'new-event', occurrenceIdentity: 'new-event' });
+  const unrelatedEvent = event({
+    id: 'unrelated-event',
+    uid: 'unrelated-event',
+    occurrenceIdentity: 'unrelated-event',
+    title: 'Unrelated protected record',
+  });
+  const unrelatedId = canonicalId('unconfigured-calendar', unrelatedEvent.occurrenceIdentity);
+  let protectionChecks = 0;
+  const h = harness([incoming], {
+    canAutomaticallyMutate: async () => {
+      protectionChecks += 1;
+      return false;
+    },
+  });
+  h.seedRecordOnDisk(
+    'Unrelated protected record.md',
+    canonicalFrontmatter(unrelatedEvent, unrelatedId, 'Unrelated protected record.md'),
+  );
+
+  const result = await h.service.sync([calendar], '', true, false);
+
+  assert.equal(result.created, 1);
+  assert.equal(protectionChecks, 0, 'same-ID, same-path, empty-update entries do not touch the note');
+  assert.ok(h.mutationLog.some((entry) => entry.type === 'create'));
+});
+
+test('native calendar mutation classifier includes a case-only identity correction', () => {
+  const incoming = event();
+  const id = canonicalId(calendar.id, incoming.occurrenceIdentity);
+  const caseVariant = id.replace(/[A-Z]/u, (value) => value.toLocaleLowerCase());
+  assert.notEqual(caseVariant, id);
+  assert.equal(caseVariant.toLocaleLowerCase(), id.toLocaleLowerCase());
+  const path = `${buildNativeCalendarRecordFileName(incoming)}.md`;
+  const h = harness([]);
+  const file = h.seedRecord(path, canonicalFrontmatter(incoming, caseVariant, path));
+
+  const records = h.service.automaticallyMutatedRecords({
+    entries: [{
+      operation: 'reidentify',
+      reference: caseVariant,
+      nextId: id,
+      updates: [],
+    }],
+    plannedBatch: { entries: [{ expectedPath: path }] },
+  });
+
+  assert.deepEqual(records.map((record) => record.file), [file]);
+});
+
+test('native calendar sync protects an update-only record even when its path and identity are stable', async () => {
+  const incoming = event();
+  const id = canonicalId(calendar.id, incoming.occurrenceIdentity);
+  const path = `${buildNativeCalendarRecordFileName(incoming)}.md`;
+  const h = harness([incoming], { canAutomaticallyMutate: async () => false });
+  h.seedRecordOnDisk(path, canonicalFrontmatter(incoming, id, path, { title: 'Stale title' }));
+
+  await assert.rejects(
+    h.service.sync([calendar], '', true, false),
+    /template-protected record/u,
+  );
+  assert.equal(h.mutationLog.length, 0);
+  assert.equal(h.frontmatters.get(path).title, 'Stale title');
 });

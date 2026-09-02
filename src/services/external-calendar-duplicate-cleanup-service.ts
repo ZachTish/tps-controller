@@ -1,6 +1,7 @@
 import { App, TFile, normalizePath } from "obsidian";
 import type { TPSControllerSettings } from "../types";
 import * as logger from "../logger";
+import { canAutomaticallyMutateViaGcm } from "../tps-gcm-api";
 
 type DuplicateCandidate = {
     file: TFile;
@@ -161,6 +162,13 @@ export class ExternalCalendarDuplicateCleanupService {
     private async archiveDuplicate(file: TFile, preferredBaseName: string): Promise<boolean> {
         const dupFolder = this.getDuplicateArchiveFolder(this.getSettings().archiveFolder);
         try {
+            if (!(await canAutomaticallyMutateViaGcm(this.app, file))) {
+                logger.flowWarn("ExternalCalendarDuplicateCleanup", "archive:skip-template-protected", {
+                    path: file.path,
+                    stage: "preflight",
+                });
+                return false;
+            }
             await this.ensureFolderExists(dupFolder);
             const safeBase = preferredBaseName.replace(/[\\/:*?"<>|]/g, "").trim() || file.basename;
 
@@ -172,6 +180,13 @@ export class ExternalCalendarDuplicateCleanupService {
                 counter += 1;
             }
 
+            if (!(await canAutomaticallyMutateViaGcm(this.app, file))) {
+                logger.flowWarn("ExternalCalendarDuplicateCleanup", "archive:skip-template-protected", {
+                    path: file.path,
+                    stage: "mutation-boundary",
+                });
+                return false;
+            }
             await this.app.vault.rename(file, newPath);
             logger.warn(`[ExternalCalendarDuplicateCleanup] Archived duplicate ${file.path} -> ${newPath}`);
             return true;

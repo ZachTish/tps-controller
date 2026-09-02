@@ -14,7 +14,7 @@ function normalizePathValue(value) {
     .replace(/\/+/g, '/');
 }
 
-function loadTwoStageArchiveService(stats) {
+function loadTwoStageArchiveService(stats, canAutomaticallyMutate = async () => true) {
   const compiled = ts.transpileModule(serviceSource, {
     compilerOptions: {
       module: ts.ModuleKind.CommonJS,
@@ -48,6 +48,7 @@ function loadTwoStageArchiveService(stats) {
         flowError: noop,
       };
     }
+    if (specifier === '../tps-gcm-api') return { canAutomaticallyMutateViaGcm: canAutomaticallyMutate };
     if (specifier === '../types') return {};
     throw new Error(`Unexpected two-stage archive import: ${specifier}`);
   };
@@ -55,19 +56,19 @@ function loadTwoStageArchiveService(stats) {
   return module.exports.TwoStageArchiveService;
 }
 
-function createArchiveHarness() {
+function createArchiveHarness({ canAutomaticallyMutate = async () => true } = {}) {
   const files = [
     ...Array.from({ length: 80 }, (_, index) => ({
-      path: `Archive/Batch/File ${String(index).padStart(3, '0')}.md`,
+      path: `Archive/Batch/File ${String(index).padStart(3, '0')}.md`, extension: 'md',
     })),
     ...Array.from({ length: 20 }, (_, index) => ({
-      path: `Archive/_archive/Cold/File ${String(index).padStart(3, '0')}.md`,
+      path: `Archive/_archive/Cold/File ${String(index).padStart(3, '0')}.md`, extension: 'md',
     })),
     ...Array.from({ length: 450 }, (_, index) => ({
-      path: `Outside/File ${String(index).padStart(3, '0')}.md`,
+      path: `Outside/File ${String(index).padStart(3, '0')}.md`, extension: 'md',
     })),
     ...Array.from({ length: 450 }, (_, index) => ({
-      path: `Archive2/File ${String(index).padStart(3, '0')}.md`,
+      path: `Archive2/File ${String(index).padStart(3, '0')}.md`, extension: 'md',
     })),
   ];
   const stats = {
@@ -107,7 +108,7 @@ function createArchiveHarness() {
       },
     },
   };
-  const TwoStageArchiveService = loadTwoStageArchiveService(stats);
+  const TwoStageArchiveService = loadTwoStageArchiveService(stats, canAutomaticallyMutate);
   const service = new TwoStageArchiveService(
     app,
     () => settings,
@@ -196,6 +197,21 @@ test('two-stage archive normalizes each vault path once while preserving moves, 
     'one archive pass should use at most 1,163 path normalizations and three configured-root normalizations; '
       + `received ${harness.stats.normalizePathCalls} and ${harness.stats.configuredRootNormalizations}`,
   );
+});
+
+test('scheduled two-stage archive rechecks template protection while manual runs preserve explicit semantics', async () => {
+  const decision = async (_app, file) => !file.path.endsWith('File 010.md');
+  const automatic = createArchiveHarness({ canAutomaticallyMutate: decision });
+  const automaticResult = await automatic.service.runNow(0, { automatic: true });
+
+  assert.equal(automaticResult.movedCount, 79);
+  assert.equal(automaticResult.skippedCount, 21);
+  assert.equal(automatic.renamed.some(([path]) => path.endsWith('File 010.md')), false);
+
+  const manual = createArchiveHarness({ canAutomaticallyMutate: decision });
+  const manualResult = await manual.service.runNow(0);
+  assert.equal(manualResult.movedCount, 80);
+  assert.equal(manual.renamed.some(([path]) => path.endsWith('File 010.md')), true);
 });
 
 test('two-stage archive settings expose the monthly Archive to _archive workflow', () => {

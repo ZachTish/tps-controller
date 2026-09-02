@@ -1,5 +1,13 @@
 # TPS Controller
 
+## 0.14.0 template-safe automation
+
+- Controller now consumes TPS Global Context Menu's additive `templates` API v1 before background calendar, conflict-cleanup, scheduled two-stage archive, and S3 attachment work touches an existing Markdown note. A compatible GCM rejection or API error fails closed; a missing or pre-v1 API retains the prior behavior so mixed-version devices do not lose automation merely because they have not updated GCM yet.
+- Calendar task-line and frontmatter updates, native-record batches, missing-event delete/archive actions, conflict renames, scheduled archive moves, S3 note rewrites, and Controller-side attachment archive requests check the live file and recheck current bytes or file authority at their mutation boundary. Template-protected notes are skipped without changing their status, body, path, or attachments. Explicit manual two-stage archive and S3 upload commands retain their established user-directed behavior.
+- Controller-owned Daily Note fallback and external-event note creation pass template bytes through GCM's instance preparation before variable expansion and sanitize the created instance again after Templater. A rejection aborts downstream processing; a file recovered from a create race is guarded as someone else's file and is never assumed to be Controller-owned merely because its path was previously absent. No template marker, Controller-internal flag, or additional identity property is added to frontmatter.
+- The TishOS command-bridge confirmation modal now opts into the shared `tps-keyboard-aware-modal` mobile overlay contract, matching Controller's other input modals.
+- Focused regressions cover API compatibility and fail-closed errors, Daily Note and external-event pre/post-Templater cleanup, create races, calendar task and native-record boundaries, conflict and archive renames, S3 automatic-versus-manual behavior, and the command-bridge mobile contract. The complete 23-file release suite, TypeScript, diff checks, and a separate production-mode build passed. Obsidian 1.13.7 loaded Controller 0.14.0 beside GCM 1.50.0 in the isolated test vault with outbound automation disabled; production was not accessed. Minimum supported Obsidian remains 1.12.0; no Controller setting or note-data migration is required.
+
 ## 0.13.0 atomic native calendar records
 
 - Native calendar reconciliation now requires the exact TPS Global Context Menu `nativeRecords` API v6. The physical native envelope is exactly GCM-owned `tpsId` and `kind` plus a plain `title`; schema remains virtual in frontmatter inspection, while schema and file-stat-derived created/modified timestamps remain virtual in file-backed GCM handles and snapshots. Controller does not write those compatibility fields to YAML.
@@ -442,7 +450,7 @@ Canonical source, tests, Git metadata, and dependencies live inside the test vau
 
 ## Mobile modal contract
 
-Controller notification, overdue, snooze, and external-event modals use `tps-keyboard-aware-modal`, reusing TPS GCM's shared visible-viewport behavior on mobile.
+Controller notification, overdue, snooze, external-event, and TishOS command-bridge confirmation modals use `tps-keyboard-aware-modal`, reusing TPS GCM's shared visible-viewport behavior on mobile.
 
 Controller-owned automation for TPS calendar sync, reminders, overdue items, and cross-device sync requests.
 

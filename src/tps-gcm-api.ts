@@ -179,6 +179,12 @@ export interface GcmApi {
   events?: GcmEventsApi;
   tasks?: GcmTasksApi;
   nativeRecords?: GcmNativeRecordsApi;
+  templates?: {
+    version?: number;
+    canAutomaticallyMutate?: (file: TFile) => Promise<boolean>;
+    canAutomaticallyMutateSource?: (source: string) => boolean;
+    prepareInstanceSource?: (source: string) => string | null;
+  };
   dailyNotes?: {
     version?: number;
     ensureForIsoDate?: (isoDate: string) => Promise<TFile | null>;
@@ -193,6 +199,8 @@ export interface GcmApi {
     getExternalId?: (frontmatter: Record<string, unknown> | null | undefined) => string | null;
   };
 }
+
+type GcmTemplatesApi = NonNullable<GcmApi['templates']>;
 
 export interface GcmDailyNoteTaskSchedulePolicy {
   available: boolean;
@@ -217,6 +225,54 @@ export function getGcmApi(app: App): GcmApi | null {
     || plugins?.getPlugin?.('TPS-Global-Context-Menu (Dev)')
     || plugins?.plugins?.['TPS-Global-Context-Menu (Dev)'];
   return plugin?.api || null;
+}
+
+/**
+ * Preserve compatibility with GCM releases that predate templates API v1.
+ * Once a callable v1 method is present, however, a rejection or exception is
+ * authoritative and automatic Controller work must fail closed.
+ */
+export async function canAutomaticallyMutateViaGcm(app: App, file: TFile): Promise<boolean> {
+  const method = getCompatibleGcmTemplatesApi(app)?.canAutomaticallyMutate;
+  if (typeof method !== 'function') return true;
+  try {
+    return await method(file) === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Current-source mutation-boundary companion to canAutomaticallyMutateViaGcm. */
+export function canAutomaticallyMutateSourceViaGcm(app: App, source: string): boolean {
+  const method = getCompatibleGcmTemplatesApi(app)?.canAutomaticallyMutateSource;
+  if (typeof method !== 'function') return true;
+  try {
+    return method(String(source ?? '')) === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Strip template-only identity from bytes copied into a new note. Older GCM
+ * releases retain the original source; a v1 rejection/exception aborts the
+ * creation path instead of leaving a generated note classified as a template.
+ */
+export function prepareInstanceSourceViaGcm(app: App, source: string): string | null {
+  const raw = String(source ?? '');
+  const method = getCompatibleGcmTemplatesApi(app)?.prepareInstanceSource;
+  if (typeof method !== 'function') return raw;
+  try {
+    const prepared = method(raw);
+    return typeof prepared === 'string' ? prepared : null;
+  } catch {
+    return null;
+  }
+}
+
+function getCompatibleGcmTemplatesApi(app: App): GcmTemplatesApi | null {
+  const templates = getGcmApi(app)?.templates;
+  return Number(templates?.version) >= 1 ? templates ?? null : null;
 }
 
 /**

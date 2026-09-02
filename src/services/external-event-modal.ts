@@ -11,7 +11,14 @@ import {
 import { resolveTemplateFile as resolveTemplateFilePath } from "../utils/template-resolution-service";
 import { mergeTagInputs, normalizeTagValue } from "../utils/tag-utils";
 import { getPluginById, getErrorMessage } from "../core";
-import { buildCalendarExternalId, ensureInternalIdInFrontmatter, getExternalId } from "../tps-gcm-api";
+import {
+  buildCalendarExternalId,
+  canAutomaticallyMutateSourceViaGcm,
+  canAutomaticallyMutateViaGcm,
+  ensureInternalIdInFrontmatter,
+  getExternalId,
+  prepareInstanceSourceViaGcm,
+} from "../tps-gcm-api";
 
 const malformedFrontmatterWarnedPaths = new Set<string>();
 
@@ -226,7 +233,11 @@ export async function createMeetingNoteFromExternalEvent(
         bytes: processed.length,
       });
     } else {
-      templateContent = await app.vault.read(templateFile);
+      templateContent = prepareInstanceSourceOrThrow(
+        app,
+        await app.vault.read(templateFile),
+        templateFile.path,
+      );
       logger.flowWarn("CreateMeetingNote", "template:fallback-raw", {
         ...logContext,
         templateFile: templateFile.path,
@@ -277,6 +288,7 @@ export async function createMeetingNoteFromExternalEvent(
   const bodyContent = templateContent || "";
 
   let file: TFile;
+  let createdByThisCall = false;
   if (existingFile) {
     file = existingFile;
     const existingContent = await app.vault.read(file);
@@ -286,7 +298,8 @@ export async function createMeetingNoteFromExternalEvent(
       empty: !existingContent.trim(),
     });
     if (!existingContent.trim()) {
-      await app.vault.modify(file, bodyContent);
+      const written = await writeBodyIfEmptyAutomatically(app, file, bodyContent, "reuse-explicit-file");
+      if (!written) return null;
       logger.flow("CreateMeetingNote", "reuse:explicit-file-body-written", { ...logContext, path: file.path });
     }
   } else {
@@ -383,7 +396,8 @@ export async function createMeetingNoteFromExternalEvent(
           empty: !existingContent.trim(),
         });
         if (!existingContent.trim()) {
-          await app.vault.modify(file, bodyContent);
+          const written = await writeBodyIfEmptyAutomatically(app, file, bodyContent, "reuse-path");
+          if (!written) return null;
           logger.flow("CreateMeetingNote", "reuse:path-body-written", { ...logContext, path: file.path });
         }
       } else {
@@ -395,6 +409,7 @@ export async function createMeetingNoteFromExternalEvent(
           availablePath,
         });
         file = await app.vault.create(availablePath, bodyContent);
+        createdByThisCall = true;
         logger.flow("CreateMeetingNote", "create:done", { ...logContext, path: file.path, route: "path-conflict-available" });
       }
     } else {
@@ -406,6 +421,7 @@ export async function createMeetingNoteFromExternalEvent(
         try {
           logger.flow("CreateMeetingNote", "create:attempt", { ...logContext, attempt: attempt + 1, maxRetries, deterministicPath });
           file = await app.vault.create(deterministicPath, bodyContent);
+          createdByThisCall = true;
 
           await new Promise(resolve => setTimeout(resolve, 250));
 
@@ -475,14 +491,25 @@ export async function createMeetingNoteFromExternalEvent(
           throw new Error(`Failed to create meeting note after ${maxRetries} attempts: ${errorMsg}`);
         }
       }
-
-      await runTemplaterOnFile(app, file);
     }
+  }
+
+  if (createdByThisCall) {
+    if (!(await canAutomaticallyMutateViaGcm(app, file))) {
+      logger.flowWarn("CreateMeetingNote", "mutation:skip-template-protected", {
+        file: file.path,
+        reason: "external-calendar-note-templater",
+        stage: "preflight",
+      });
+      return null;
+    }
+    await runTemplaterOnFile(app, file);
+    await sanitizeInstanceSourceAfterTemplater(app, file, "external-calendar-note");
   }
 
   // Apply identity/event frontmatter in one place so templates with existing
   // frontmatter are merged safely without duplicate YAML blocks.
-  await processFrontmatterSafely(app, file, "external-event-create", (fm) => {
+  const frontmatterApplied = await processFrontmatterSafely(app, file, "external-event-create", (fm) => {
     const normalizedCalendarTag = normalizeTagValue(calendarTag);
     if (normalizedCalendarTag) {
       fm.tags = mergeTagInputs(fm.tags, normalizedCalendarTag);
@@ -499,6 +526,7 @@ export async function createMeetingNoteFromExternalEvent(
       setFrontmatterValueCaseInsensitive(fm, key, value);
     }
   });
+  if (!frontmatterApplied) return null;
   logger.flow("CreateMeetingNote", "frontmatter:applied", {
     ...logContext,
     path: file.path,
@@ -566,9 +594,20 @@ async function resolveTemplateFromPath(app: App, path: string | null): Promise<T
 }
 
 async function processTemplate(app: App, templateFile: TFile, vars: TemplateVars = {}): Promise<string | null> {
+  let raw: string;
   try {
-    const raw = await app.vault.read(templateFile);
-    return applyTemplateVars(raw, vars);
+    raw = await app.vault.read(templateFile);
+  } catch (e) {
+    logger.flowError("CreateMeetingNote", "template:process-failed", e, { templatePath: templateFile.path });
+    new Notice(`⚠️ Calendar Base: Error processing template "${templateFile.basename}".\n${getErrorMessage(e)}`);
+    return null;
+  }
+  // GCM preparation is a protection boundary, not a best-effort template
+  // transform. Its rejection/error must escape instead of being retried by
+  // the legacy raw-template fallback below.
+  const prepared = prepareInstanceSourceOrThrow(app, raw, templateFile.path);
+  try {
+    return applyTemplateVars(prepared, vars);
   } catch (e) {
     logger.flowError("CreateMeetingNote", "template:process-failed", e, { templatePath: templateFile.path });
     new Notice(`⚠️ Calendar Base: Error processing template "${templateFile.basename}".\n${getErrorMessage(e)}`);
@@ -878,6 +917,10 @@ async function processFrontmatterSafely(
   reason: string,
   mutate: (fm: Record<string, any>) => void,
 ): Promise<boolean> {
+  if (!(await canAutomaticallyMutateViaGcm(app, file))) {
+    logger.flowWarn("CreateMeetingNote", "mutation:skip-template-protected", { file: file.path, reason, stage: "preflight" });
+    return false;
+  }
   const safety = await canMutateFrontmatterSafely(app, file);
   if (!safety.safe) {
     if (!malformedFrontmatterWarnedPaths.has(file.path)) {
@@ -892,6 +935,15 @@ async function processFrontmatterSafely(
   }
 
   try {
+    if (!(await canAutomaticallyMutateViaGcm(app, file))) {
+      logger.flowWarn("CreateMeetingNote", "mutation:skip-template-protected", { file: file.path, reason, stage: "mutation-boundary" });
+      return false;
+    }
+    const current = await app.vault.read(file);
+    if (!canAutomaticallyMutateSourceViaGcm(app, current)) {
+      logger.flowWarn("CreateMeetingNote", "mutation:skip-template-protected", { file: file.path, reason, stage: "mutation-boundary" });
+      return false;
+    }
     await app.fileManager.processFrontMatter(file, (frontmatter) => {
       mutate((frontmatter ?? {}) as Record<string, any>);
     });
@@ -903,6 +955,56 @@ async function processFrontmatterSafely(
     });
     return false;
   }
+}
+
+function prepareInstanceSourceOrThrow(app: App, source: string, templatePath: string): string {
+  const prepared = prepareInstanceSourceViaGcm(app, source);
+  if (prepared !== null) return prepared;
+  logger.flowWarn("CreateMeetingNote", "template:instance-source-rejected", { templatePath });
+  throw new Error(`TPS GCM rejected template-derived content from ${templatePath}.`);
+}
+
+async function sanitizeInstanceSourceAfterTemplater(app: App, file: TFile, reason: string): Promise<void> {
+  let rejected = false;
+  let changed = false;
+  await app.vault.process(file, (current) => {
+    const prepared = prepareInstanceSourceViaGcm(app, current);
+    if (prepared === null) {
+      rejected = true;
+      return current;
+    }
+    changed = prepared !== current;
+    return prepared;
+  });
+  if (rejected) {
+    logger.flowWarn("CreateMeetingNote", "instance:post-templater-rejected", { path: file.path, reason });
+    throw new Error(`TPS GCM rejected the generated content for ${file.path}.`);
+  }
+  if (changed) logger.flow("CreateMeetingNote", "instance:post-templater-sanitized", { path: file.path, reason });
+}
+
+async function writeBodyIfEmptyAutomatically(
+  app: App,
+  file: TFile,
+  bodyContent: string,
+  reason: string,
+): Promise<boolean> {
+  if (!(await canAutomaticallyMutateViaGcm(app, file))) {
+    logger.flowWarn("CreateMeetingNote", "mutation:skip-template-protected", { file: file.path, reason, stage: "preflight" });
+    return false;
+  }
+  let allowed = true;
+  await app.vault.process(file, (current) => {
+    if (!canAutomaticallyMutateSourceViaGcm(app, current)) {
+      allowed = false;
+      return current;
+    }
+    return current.trim() ? current : bodyContent;
+  });
+  if (!allowed) {
+    logger.flowWarn("CreateMeetingNote", "mutation:skip-template-protected", { file: file.path, reason, stage: "mutation-boundary" });
+  }
+  return allowed;
 }
 
 async function canMutateFrontmatterSafely(

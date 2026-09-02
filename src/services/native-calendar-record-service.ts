@@ -5,7 +5,7 @@ import type {
     NativeCalendarCancellationState,
     TPSControllerSettings,
 } from "../types";
-import { getGcmApi } from "../tps-gcm-api";
+import { canAutomaticallyMutateViaGcm, getGcmApi } from "../tps-gcm-api";
 import type { GcmNativeRecordHandle, GcmNativeRecordSnapshot, GcmNativeRecordsApi } from "../tps-gcm-api";
 import { normalizeCalendarUrl } from "../utils";
 import {
@@ -238,12 +238,16 @@ export class NativeCalendarRecordService {
             cancellationStateSnapshot,
         );
 
+        const boundaryRecords = this.automaticallyMutatedRecords(mutationPlan);
+        await this.assertAutomaticallyMutableRecords(boundaryRecords, "planned-mutation");
+
         // Persist cancellation ownership before the corresponding frontmatter
         // write. If the vault batch is rejected or interrupted, the next sync
         // can distinguish a retry from a later user-owned status override.
         await this.commitCancellationStateUpdates(mutationPlan.preApplyCancellationStateUpdatesById);
 
         if (mutationPlan.entries.length) {
+            await this.assertAutomaticallyMutableRecords(boundaryRecords, "mutation-boundary");
             const appliedResult = await api.applyIdentityChanges!(
                 mutationPlan.plannedBatch,
                 mutationPlan.entries,
@@ -958,6 +962,40 @@ export class NativeCalendarRecordService {
             throw new Error("Canonical calendar records require TPS GCM native-record mode and nativeRecords API v6.");
         }
         return api;
+    }
+
+    private async assertAutomaticallyMutableRecords(
+        records: IndexedCalendarRecord[],
+        stage: "planned-mutation" | "mutation-boundary",
+    ): Promise<void> {
+        const seenPaths = new Set<string>();
+        for (const record of records) {
+            if (seenPaths.has(record.file.path)) continue;
+            seenPaths.add(record.file.path);
+            if (await canAutomaticallyMutateViaGcm(this.app, record.file)) continue;
+            logger.flowWarn("NativeCalendarRecords", "sync:template-protected", {
+                path: record.file.path,
+                stage,
+            });
+            throw new Error(`Calendar sync cannot automatically mutate template-protected record ${record.file.path}.`);
+        }
+    }
+
+    private automaticallyMutatedRecords(plan: PlannedCalendarMutations): IndexedCalendarRecord[] {
+        const records: IndexedCalendarRecord[] = [];
+        for (let index = 0; index < plan.entries.length; index += 1) {
+            const entry = plan.entries[index];
+            if (entry.operation !== "reidentify") continue;
+            const record = this.findUniqueById(entry.reference);
+            if (!record) continue;
+            const expectedPath = String(plan.plannedBatch.entries[index]?.expectedPath || "");
+            const changesIdentity = entry.reference !== entry.nextId;
+            const changesProperties = entry.updates.some((updates) => Object.keys(updates).length > 0);
+            const changesPath = normalizePathForComparison(expectedPath)
+                !== normalizePathForComparison(record.file.path);
+            if (changesIdentity || changesProperties || changesPath) records.push(record);
+        }
+        return records;
     }
 
     private getApi(): GcmNativeRecordsApi | null {

@@ -24,6 +24,15 @@ if (comparisonServicePath) {
 }
 const syncRequestSource = readFileSync(new URL("../src/services/sync-request-service.ts", import.meta.url), "utf8");
 
+class FakeS3File {
+  constructor(path) {
+    this.path = path;
+    this.name = path.split("/").pop();
+    this.basename = this.name.replace(/\.[^.]+$/u, "");
+    this.extension = this.name.includes(".") ? this.name.slice(this.name.lastIndexOf(".") + 1) : "";
+  }
+}
+
 test("S3 attachment upload automation exposes configurable triggers, settings, and manual command", () => {
   assert.match(typesSource, /interface S3agleAttachmentAutomationSettings/);
   assert.match(typesSource, /runOnActiveNoteOpen: true/);
@@ -97,6 +106,7 @@ test("S3 attachment upload automation uploads, rewrites, and archives only confi
   assert.match(serviceSource, /allowedAttachmentExtensions/);
   assert.match(serviceSource, /ignoredAttachmentExtensions/);
   assert.match(serviceSource, /this\.app\.vault\.modify\(noteFile, updatedContent\)/);
+  assert.match(serviceSource, /canAutomaticallyMutateNote\(noteFile, reason, "mutation-boundary"\)[\s\S]*this\.app\.vault\.process\(noteFile/);
   assert.match(serviceSource, /recordUploadedObject/);
   assert.match(serviceSource, /\.tps\/s3-upload-manifest\.json/);
   assert.match(serviceSource, /buildPublicUrl/);
@@ -307,6 +317,79 @@ test("S3 attachment upload automation can run from raw paste events", () => {
   assert.match(serviceSource, /this\.scheduleForFile\(current, "paste"\)/);
 });
 
+test("automatic S3 note work fails closed for template-protected notes while the manual command remains explicit", async () => {
+  let fileChecks = 0;
+  let noteReads = 0;
+  let renames = 0;
+  const note = new FakeS3File("Templates/Attachment workflow.md");
+  const source = new FakeS3File("Attachments/image.png");
+  const settings = {
+    archiveFolder: "Archive",
+    s3agleAttachmentAutomation: {
+      enabled: true,
+      runOnActiveNoteOpen: true,
+      runOnActiveNoteModify: true,
+      runOnPaste: true,
+      runAfterCommandIds: [],
+      debounceSeconds: 1,
+      cooldownMinutes: 1,
+      archiveUploadedSources: true,
+      allowedAttachmentExtensions: [],
+      ignoredAttachmentExtensions: [],
+      makeUploadedObjectsPublic: false,
+      accessKeySecretName: "access-key",
+      secretKeySecretName: "secret-key",
+      region: "us-east-1",
+      bucket: "bucket",
+      folder: "",
+      endpoint: "https://s3.example.test",
+      useBucketSubdomain: false,
+      contentUrl: "",
+      hashFileName: false,
+      hashSeed: 0,
+      archiveUnreferencedBucketObjects: false,
+      bucketArchivePrefix: "_archive/s3/{YYYY}/{MM}/{DD}",
+      bucketArchiveCheckIntervalMinutes: 60,
+      bucketArchiveOrphanDelayMinutes: 60,
+      bucketArchiveLastRunAt: 0,
+    },
+  };
+  const app = {
+    workspace: { getActiveFile: () => note },
+    metadataCache: { getFirstLinkpathDest: () => source },
+    vault: {
+      getAbstractFileByPath: (path) => path === note.path ? note : path === source.path ? source : null,
+      async cachedRead() {
+        noteReads += 1;
+        return "No local attachment refs";
+      },
+      async rename() {
+        renames += 1;
+      },
+    },
+  };
+  const Service = loadS3AutomationService({
+    canAutomaticallyMutate: async () => {
+      fileChecks += 1;
+      return false;
+    },
+  });
+  const service = new Service(app, () => settings, () => true, async () => {}, async () => {}, () => "secret");
+
+  assert.equal(await service.runForFileIfActive(note, "file-open"), null);
+  assert.equal(fileChecks, 1);
+  assert.equal(noteReads, 0);
+
+  assert.equal(await service.runActiveNoteNow(), null);
+  assert.equal(fileChecks, 1, "manual upload must not inherit the background template guard");
+  assert.equal(noteReads, 1);
+
+  const archiveResult = await service.fulfillArchiveRequests([{ notePath: note.path, sourcePaths: [source.path] }]);
+  assert.equal(archiveResult.archivedCount, 0);
+  assert.equal(archiveResult.skippedArchiveCount, 1);
+  assert.equal(renames, 0);
+});
+
 test("S3 credentials are resolved only for an execution and missing values fail visibly", () => {
   const startBlock = serviceSource.slice(serviceSource.indexOf("start(): void"), serviceSource.indexOf("stop(): void"));
   assert.doesNotMatch(startBlock, /resolveS3Credentials|readSecret/);
@@ -427,7 +510,7 @@ function createBucketArchiveHarness(
   };
 }
 
-function loadS3AutomationService() {
+function loadS3AutomationService(options = {}) {
   const compiled = ts.transpileModule(serviceSource, {
     compilerOptions: {
       module: ts.ModuleKind.CommonJS,
@@ -457,7 +540,7 @@ function loadS3AutomationService() {
       return {
         App: class {},
         Notice: class {},
-        TFile: class {},
+        TFile: FakeS3File,
         normalizePath: (value) =>
           String(value || "").replace(/\\/g, "/").replace(/\/+/g, "/"),
         requestUrl: async () => ({ status: 200 }),
@@ -482,6 +565,12 @@ function loadS3AutomationService() {
     }
     if (id === "crypto") return nativeRequire("node:crypto");
     if (id === "../logger") return logger;
+    if (id === "../tps-gcm-api") {
+      return {
+        canAutomaticallyMutateViaGcm: options.canAutomaticallyMutate || (async () => true),
+        canAutomaticallyMutateSourceViaGcm: options.canAutomaticallyMutateSource || (() => true),
+      };
+    }
     if (id === "./s3-credential-service") {
       return {
         resolveS3Credentials: () => ({

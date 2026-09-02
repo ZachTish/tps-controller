@@ -109,7 +109,7 @@ function normalizePath(value) {
     .replace(/\/$/, "");
 }
 
-function loadWatcherClass() {
+function loadWatcherClass(canAutomaticallyMutate = async () => true) {
   const compiled = ts.transpileModule(source, {
     compilerOptions: {
       module: ts.ModuleKind.CommonJS,
@@ -134,6 +134,7 @@ function loadWatcherClass() {
     }
     if (id === "../tps-gcm-api") {
       return {
+        canAutomaticallyMutateViaGcm: canAutomaticallyMutate,
         getGcmApi: () => ({
           nativeRecords: {
             inspect: (frontmatter) => frontmatter?.gcmCalendarId
@@ -226,7 +227,7 @@ function createHarness(files, options = {}) {
     clearTimeout: (id) => timers.clearTimeout(id),
   };
   activeNotices = [];
-  const Watcher = loadWatcherClass();
+  const Watcher = loadWatcherClass(options.canAutomaticallyMutate);
   const watcher = new Watcher(app);
   return {
     watcher,
@@ -348,6 +349,26 @@ test("SyncConflictWatcher lifecycle binds listeners and its startup fallback", a
         "System/Archive/Duplicates/Meeting duplicate.md",
       ]]);
       assert.equal(delayedCalendar.path, "Inbox/Standup (2).md");
+      harness.watcher.stop();
+    });
+
+    await t.test("template protection is checked again at the conflict-rename boundary", async () => {
+      const canonical = new FakeTFile("Inbox/Template.md");
+      const conflict = new FakeTFile("Inbox/Template duplicate.md");
+      let checks = 0;
+      const harness = createHarness([canonical, conflict], {
+        canAutomaticallyMutate: async () => {
+          checks += 1;
+          return checks === 1;
+        },
+      });
+      harness.watcher.start();
+
+      harness.vaultEvents.emit("create", conflict);
+      await waitFor(() => checks === 2, "template mutation-boundary checks");
+
+      assert.equal(harness.ops.renames.length, 0);
+      assert.equal(conflict.path, "Inbox/Template duplicate.md");
       harness.watcher.stop();
     });
 

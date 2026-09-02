@@ -1,6 +1,7 @@
 import { App, TFile, normalizePath, moment } from "obsidian";
 import type { TPSControllerSettings, TwoStageArchiveRule } from "../types";
 import * as logger from "../logger";
+import { canAutomaticallyMutateViaGcm } from "../tps-gcm-api";
 
 export interface TwoStageArchiveResult {
     movedCount: number;
@@ -32,10 +33,13 @@ export class TwoStageArchiveService {
             runKey: this.getRunKey(rule, nowMs),
         });
         if (!due) return null;
-        return this.runNow(nowMs);
+        return this.runNow(nowMs, { automatic: true });
     }
 
-    async runNow(nowMs = Date.now()): Promise<TwoStageArchiveResult> {
+    async runNow(
+        nowMs = Date.now(),
+        options: { automatic?: boolean } = {},
+    ): Promise<TwoStageArchiveResult> {
         const rule = this.getRule();
         const runKey = this.getRunKey(rule, nowMs);
         const sourceFolder = rule.sourceFolder;
@@ -91,12 +95,21 @@ export class TwoStageArchiveService {
                 continue;
             }
 
+            if (!(await this.canMoveAutomatically(file, options.automatic === true, "candidate"))) {
+                skippedCount += 1;
+                continue;
+            }
+
             const targetPath = await this.getAvailableTargetPath(
                 normalizePath(`${destinationFolder}/${relativePath}`),
             );
             await this.ensureFolderExists(targetPath.substring(0, targetPath.lastIndexOf("/")));
 
             try {
+                if (!(await this.canMoveAutomatically(file, options.automatic === true, "mutation-boundary"))) {
+                    skippedCount += 1;
+                    continue;
+                }
                 await this.app.vault.rename(file, targetPath);
                 movedCount += 1;
             } catch (error) {
@@ -115,6 +128,22 @@ export class TwoStageArchiveService {
             destinationFolder,
         });
         return { movedCount, skippedCount, runKey, sourceFolder, destinationFolder };
+    }
+
+    private async canMoveAutomatically(
+        file: TFile,
+        automatic: boolean,
+        stage: "candidate" | "mutation-boundary",
+    ): Promise<boolean> {
+        if (!automatic || file.extension.toLowerCase() !== "md") return true;
+        const allowed = await canAutomaticallyMutateViaGcm(this.app, file);
+        if (!allowed) {
+            logger.flowWarn("TwoStageArchive", "file:skip-template-protected", {
+                path: file.path,
+                stage,
+            });
+        }
+        return allowed;
     }
 
     isDue(rule: TwoStageArchiveRule, nowMs = Date.now()): boolean {

@@ -10,6 +10,7 @@ import {
     type S3ExecutionCredentials,
 } from "./s3-credential-service";
 import * as logger from "../logger";
+import { canAutomaticallyMutateSourceViaGcm, canAutomaticallyMutateViaGcm } from "../tps-gcm-api";
 
 interface LocalAttachmentReference {
     reference: string;
@@ -219,7 +220,13 @@ export class S3agleAttachmentAutomationService {
             return null;
         }
 
+        const automatic = reason !== "manual";
+        if (automatic && !(await this.canAutomaticallyMutateNote(file, reason, "preflight"))) {
+            return null;
+        }
+
         const beforeContent = await this.app.vault.cachedRead(file);
+        if (automatic && !this.canAutomaticallyMutateNoteSource(beforeContent, file, reason)) return null;
         const beforeRefs = this.extractLocalAttachmentReferences(beforeContent, file.path);
         if (!beforeRefs.length) {
             logger.flow("S3agleAutomation", "run:skip-no-local-refs", { path: file.path, reason });
@@ -235,12 +242,12 @@ export class S3agleAttachmentAutomationService {
             localRefs: beforeRefs.length,
         });
         this.lastRunByPath.set(file.path, Date.now());
-        const uploadResults = await this.uploadAndRewriteReferences(file, beforeContent, beforeRefs, credentials);
+        const uploadResults = await this.uploadAndRewriteReferences(file, beforeContent, beforeRefs, credentials, automatic, reason);
         const afterContent = uploadResults.content;
         const remainingRefs = this.extractLocalAttachmentReferences(afterContent, file.path);
         const uploadedPaths = uploadResults.uploadedPaths;
         const archived = rule.archiveUploadedSources
-            ? await this.handleUploadedSources(file.path, uploadedPaths)
+            ? await this.handleUploadedSources(file.path, uploadedPaths, automatic)
             : { archivedCount: 0, skippedArchiveCount: 0 };
         const uploadedCount = uploadedPaths.length;
 
@@ -316,9 +323,12 @@ export class S3agleAttachmentAutomationService {
         content: string,
         refs: LocalAttachmentReference[],
         credentials: S3ExecutionCredentials,
+        automatic: boolean,
+        reason: string,
     ): Promise<{ content: string; uploadedPaths: string[] }> {
         let updatedContent = content;
         const uploadedPaths: string[] = [];
+        const replacements: Array<{ reference: string; replacement: string }> = [];
         const refsByPath = new Map<string, LocalAttachmentReference[]>();
         for (const ref of refs) {
             const list = refsByPath.get(ref.path) || [];
@@ -326,6 +336,9 @@ export class S3agleAttachmentAutomationService {
             refsByPath.set(ref.path, list);
         }
         for (const [path, pathRefs] of refsByPath.entries()) {
+            if (automatic && !(await this.canAutomaticallyMutateNote(noteFile, reason, "upload-boundary"))) {
+                return { content, uploadedPaths: [] };
+            }
             const source = this.app.vault.getAbstractFileByPath(path);
             if (!(source instanceof TFile)) continue;
             if (!this.shouldUploadAttachment(source, this.getRule())) {
@@ -341,6 +354,7 @@ export class S3agleAttachmentAutomationService {
                 const replacement = this.buildReplacement(pathRefs[0].reference, upload.url);
                 for (const ref of pathRefs) {
                     updatedContent = updatedContent.split(ref.reference).join(replacement);
+                    replacements.push({ reference: ref.reference, replacement });
                 }
                 await this.recordUploadedObject({
                     key: upload.key,
@@ -357,7 +371,35 @@ export class S3agleAttachmentAutomationService {
             }
         }
         if (updatedContent !== content) {
-            await this.app.vault.modify(noteFile, updatedContent);
+            if (!automatic) {
+                await this.app.vault.modify(noteFile, updatedContent);
+            } else {
+                if (!(await this.canAutomaticallyMutateNote(noteFile, reason, "mutation-boundary"))) {
+                    return { content, uploadedPaths: [] };
+                }
+                let blocked = false;
+                let currentResult = content;
+                await this.app.vault.process(noteFile, (current) => {
+                    if (!canAutomaticallyMutateSourceViaGcm(this.app, current)) {
+                        blocked = true;
+                        return current;
+                    }
+                    currentResult = replacements.reduce(
+                        (next, replacement) => next.split(replacement.reference).join(replacement.replacement),
+                        current,
+                    );
+                    return currentResult;
+                });
+                if (blocked) {
+                    logger.flowWarn("S3agleAutomation", "rewrite:skip-template-protected", {
+                        path: noteFile.path,
+                        reason,
+                        stage: "mutation-boundary",
+                    });
+                    return { content: currentResult, uploadedPaths: [] };
+                }
+                updatedContent = currentResult;
+            }
         }
         return { content: updatedContent, uploadedPaths: uploadedPaths.sort() };
     }
@@ -806,10 +848,20 @@ export class S3agleAttachmentAutomationService {
     private async handleUploadedSources(
         notePath: string,
         uploadedPaths: string[],
+        automatic: boolean,
     ): Promise<{ archivedCount: number; skippedArchiveCount: number }> {
         if (!uploadedPaths.length) return { archivedCount: 0, skippedArchiveCount: 0 };
+        let mutationAuthority: TFile | null = null;
+        if (automatic) {
+            const note = this.app.vault.getAbstractFileByPath(notePath);
+            if (!(note instanceof TFile)
+                || !(await this.canAutomaticallyMutateNote(note, "archive-uploaded-sources", "mutation-boundary"))) {
+                return { archivedCount: 0, skippedArchiveCount: uploadedPaths.length };
+            }
+            mutationAuthority = note;
+        }
         if (this.isController()) {
-            return this.archiveUploadedSourcePaths(uploadedPaths);
+            return this.archiveUploadedSourcePaths(uploadedPaths, mutationAuthority, "archive-uploaded-sources");
         }
         await this.requestControllerArchive(notePath, uploadedPaths);
         logger.flow("S3agleAutomation", "controller-archive:requested", { notePath, sourcePaths: uploadedPaths });
@@ -831,11 +883,18 @@ export class S3agleAttachmentAutomationService {
             return { archivedCount: 0, skippedArchiveCount: sourcePaths.length };
         }
 
+        if (!(await this.canAutomaticallyMutateNote(note, "controller-archive-request", "preflight"))) {
+            return { archivedCount: 0, skippedArchiveCount: sourcePaths.length };
+        }
+
         const content = await this.app.vault.cachedRead(note);
+        if (!this.canAutomaticallyMutateNoteSource(content, note, "controller-archive-request")) {
+            return { archivedCount: 0, skippedArchiveCount: sourcePaths.length };
+        }
         const remainingPaths = new Set(this.extractLocalAttachmentReferences(content, note.path).map((ref) => ref.path));
         const confirmedPaths = sourcePaths.filter((path) => !remainingPaths.has(path));
         const skippedReferenced = sourcePaths.length - confirmedPaths.length;
-        const result = await this.archiveUploadedSourcePaths(confirmedPaths);
+        const result = await this.archiveUploadedSourcePaths(confirmedPaths, note, "controller-archive-request");
         return {
             archivedCount: result.archivedCount,
             skippedArchiveCount: result.skippedArchiveCount + skippedReferenced,
@@ -844,6 +903,8 @@ export class S3agleAttachmentAutomationService {
 
     private async archiveUploadedSourcePaths(
         sourcePaths: string[],
+        mutationAuthority: TFile | null = null,
+        reason = "manual",
     ): Promise<{ archivedCount: number; skippedArchiveCount: number }> {
         const archiveFolder = this.getArchiveFolder();
         if (!archiveFolder) {
@@ -868,6 +929,11 @@ export class S3agleAttachmentAutomationService {
             const targetPath = await this.getAvailableArchivePath(source, archiveFolder);
             await this.ensureFolderExists(targetPath.substring(0, targetPath.lastIndexOf("/")));
             try {
+                if (mutationAuthority
+                    && !(await this.canAutomaticallyMutateNote(mutationAuthority, reason, "mutation-boundary"))) {
+                    skippedArchiveCount += 1;
+                    continue;
+                }
                 await this.app.vault.rename(source, targetPath);
                 archivedCount += 1;
             } catch (error) {
@@ -877,6 +943,34 @@ export class S3agleAttachmentAutomationService {
         }
 
         return { archivedCount, skippedArchiveCount };
+    }
+
+    private async canAutomaticallyMutateNote(
+        file: TFile,
+        reason: string,
+        stage: "preflight" | "upload-boundary" | "mutation-boundary",
+    ): Promise<boolean> {
+        const allowed = await canAutomaticallyMutateViaGcm(this.app, file);
+        if (!allowed) {
+            logger.flowWarn("S3agleAutomation", "run:skip-template-protected", {
+                path: file.path,
+                reason,
+                stage,
+            });
+        }
+        return allowed;
+    }
+
+    private canAutomaticallyMutateNoteSource(content: string, file: TFile, reason: string): boolean {
+        const allowed = canAutomaticallyMutateSourceViaGcm(this.app, content);
+        if (!allowed) {
+            logger.flowWarn("S3agleAutomation", "run:skip-template-protected", {
+                path: file.path,
+                reason,
+                stage: "mutation-boundary",
+            });
+        }
+        return allowed;
     }
 
     private extractLocalAttachmentReferences(content: string, sourcePath: string): LocalAttachmentReference[] {

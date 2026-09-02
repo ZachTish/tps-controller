@@ -238,6 +238,7 @@ class CommandBridgeConfirmationModal extends Modal {
     }
 
     onOpen(): void {
+        this.modalEl.addClass("tps-keyboard-aware-modal");
         this.titleEl.setText(this.title);
         this.contentEl.createEl("p", { text: this.message });
         this.contentEl.createEl("p", {

@@ -94,6 +94,8 @@ function loadAutoCreateService(stats) {
         if (specifier === "../tps-gcm-api") {
             return {
                 buildCalendarExternalId: () => null,
+                canAutomaticallyMutateSourceViaGcm: () => true,
+                canAutomaticallyMutateViaGcm: async () => true,
                 emitFilesUpdated: noop,
                 ensureDailyNoteForIsoDateViaGcm: async () => ({ available: false, file: null }),
                 ensureInternalIdInFrontmatter: asyncNoop,
@@ -101,6 +103,7 @@ function loadAutoCreateService(stats) {
                     const value = readCaseInsensitive(frontmatter, "externalId");
                     return typeof value === "string" && value.trim() ? value.trim() : null;
                 },
+                prepareInstanceSourceViaGcm: (_app, source) => source,
             };
         }
         if (specifier === "./daily-note-template") {
