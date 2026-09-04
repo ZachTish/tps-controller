@@ -16,6 +16,8 @@ import {
     parseCalendarRecordId,
 } from "./calendar-record-identity";
 import type { ExternalCalendarService } from "./external-calendar-service";
+import { readNativeCalendarTemplate, renderNativeCalendarTemplate } from "./native-calendar-template";
+import type { NativeCalendarTemplateInstance } from "./native-calendar-template";
 import * as logger from "../logger";
 
 export const TPS_CONTROLLER_NATIVE_CALENDAR_RECORDS_VERSION = 2;
@@ -68,6 +70,7 @@ interface PlannedCalendarOccurrence {
     plannedEventUpdates?: Record<string, unknown>;
     plannedRecordPath?: string;
     plannedSourcePath?: string;
+    templateInstance?: NativeCalendarTemplateInstance;
 }
 
 interface PreparedCalendarSync {
@@ -90,6 +93,7 @@ type PlannedGcmIdentityEntry = {
     kind: "calendar-event";
     properties: Record<string, unknown>;
     fileName?: string;
+    body?: string;
 } | {
     operation: "reidentify";
     nextId: string;
@@ -225,6 +229,7 @@ export class NativeCalendarRecordService {
         const authoritativeSnapshot = await api.snapshot!();
         this.rebuildFromHandles(authoritativeSnapshot.records);
         const migrationPlan = await this.prepareLegacyMigration(contexts, authoritativeSnapshot.records);
+        await this.prepareCreationTemplates(prepared, migrationPlan);
         const mutationPlan = await this.preflightIdentityPlan(
             api,
             migrationPlan,
@@ -440,6 +445,34 @@ export class NativeCalendarRecordService {
             }
         }
         return { occurrences, seenIds, successfulSourceScopes, fetched: fetchedCount, failedFeeds };
+    }
+
+    private async prepareCreationTemplates(
+        prepared: PreparedCalendarSync,
+        migrations: PlannedLegacyMigration[],
+    ): Promise<void> {
+        const migratedIds = new Set(migrations.map((migration) => identityKey(migration.targetId)));
+        const sourcesByPath = new Map<string, Promise<string>>();
+        for (const occurrence of prepared.occurrences) {
+            if (migratedIds.has(identityKey(occurrence.id)) || this.findUniqueById(occurrence.id)) continue;
+            const path = String(occurrence.context.calendar.autoCreateTemplate || "").trim();
+            if (!path) continue;
+            let source = sourcesByPath.get(path);
+            if (!source) {
+                source = readNativeCalendarTemplate(this.app, path);
+                sourcesByPath.set(path, source);
+            }
+            try {
+                occurrence.templateInstance = renderNativeCalendarTemplate(await source, occurrence.event, path);
+            } catch (error) {
+                logger.flowWarn("NativeCalendarRecords", "template:rejected", {
+                    templatePath: path,
+                    error: logger.errorSummary(error),
+                    mutationStarted: false,
+                });
+                throw error;
+            }
+        }
     }
 
     private async prepareLegacyMigration(
@@ -664,8 +697,12 @@ export class NativeCalendarRecordService {
                     null,
                     cancellationStatus,
                     cancellationStateForId(cancellationState, occurrence.id),
+                    occurrence.templateInstance?.properties,
                 );
-                const properties = clonePropertyPayload(projection.properties);
+                const properties = applyCaseInsensitiveUpdates(
+                    occurrence.templateInstance?.properties || {},
+                    projection.properties,
+                );
                 if (projection.preApplyCancellationStateUpdate !== undefined) {
                     preApplyCancellationStateUpdatesById.set(occurrence.id, projection.preApplyCancellationStateUpdate);
                 }
@@ -682,6 +719,7 @@ export class NativeCalendarRecordService {
                     kind: "calendar-event",
                     properties,
                     fileName,
+                    ...(occurrence.templateInstance ? { body: occurrence.templateInstance.body } : {}),
                 });
             }
 
@@ -847,13 +885,14 @@ export class NativeCalendarRecordService {
         existing: IndexedCalendarRecord | null,
         cancellationStatus: string,
         cancellationState: NativeCalendarCancellationState | null,
+        creationProperties: Record<string, unknown> = {},
     ): ProjectedCalendarEventProperties {
         const scheduled = event.isAllDay ? localDateKey(event.startDate) : event.startDate.toISOString();
         const end = event.isAllDay ? localDateKey(event.endDate) : event.endDate.toISOString();
         const displayTitle = normalizeCalendarEventTitle(event.title);
         const associatedNote = existing ? this.existingAssociatedNote(existing) : null;
         const tags = mergeCalendarRecordTags(
-            readPropertyCaseInsensitive(existing?.frontmatter || {}, "tags"),
+            readPropertyCaseInsensitive(existing?.frontmatter || creationProperties, "tags"),
             calendar.autoCreateTag,
         );
         const description = nonBlankText(event.description);
@@ -868,7 +907,7 @@ export class NativeCalendarRecordService {
                 end,
                 ...(event.isAllDay
                     ? { allDay: true }
-                    : existing && hasPropertyCaseInsensitive(existing.frontmatter, "allDay")
+                    : hasPropertyCaseInsensitive(existing?.frontmatter || creationProperties, "allDay")
                         ? { allDay: null }
                         : {}),
                 ...optionalSyncedTextProperty(existing, "description", description),
@@ -887,10 +926,10 @@ export class NativeCalendarRecordService {
 
         const statusPresent = existing
             ? hasPropertyCaseInsensitive(existing.frontmatter, "status")
-            : false;
+            : hasPropertyCaseInsensitive(creationProperties, "status");
         const statusValue = existing
             ? normalizeStoredStatus(readPropertyCaseInsensitive(existing.frontmatter, "status"))
-            : null;
+            : normalizeStoredStatus(readPropertyCaseInsensitive(creationProperties, "status"));
         if (event.isCancelled) {
             if (!cancellationState) {
                 if (existing && statusPresent && statusValue === cancellationStatus) {
@@ -906,7 +945,7 @@ export class NativeCalendarRecordService {
                     const pendingState: NativeCalendarCancellationState = {
                         appliedStatus: cancellationStatus,
                         previousStatusPresent: existing ? statusPresent : true,
-                        previousStatus: existing ? statusValue : "scheduled",
+                        previousStatus: existing || statusPresent ? statusValue : "scheduled",
                         canRestore: true,
                         pendingApplication: true,
                     };
@@ -936,7 +975,7 @@ export class NativeCalendarRecordService {
             return projected;
         }
 
-        if (!existing) projected.properties.status = "scheduled";
+        if (!existing) projected.properties.status = statusPresent ? statusValue : "scheduled";
         if (cancellationState) {
             if (cancellationState.canRestore
                 && statusPresent
@@ -954,12 +993,13 @@ export class NativeCalendarRecordService {
         const api = getGcmApi(this.app)?.nativeRecords;
         if (!api
             || Number(api.version) !== 6
+            || api.capabilities?.calendarTemplateRecords !== true
             || api.isEnabled?.() !== true
             || typeof api.inspect !== "function"
             || typeof api.snapshot !== "function"
             || typeof api.planIdentityChanges !== "function"
             || typeof api.applyIdentityChanges !== "function") {
-            throw new Error("Canonical calendar records require TPS GCM native-record mode and nativeRecords API v6.");
+            throw new Error("Canonical calendar records require TPS GCM native-record mode, nativeRecords API v6, and calendarTemplateRecords support. Update TPS Global Context Menu first.");
         }
         return api;
     }
@@ -1012,7 +1052,7 @@ export class NativeCalendarRecordService {
         this.recordsByPath.clear();
         this.pathsById.clear();
         for (const handle of handles) {
-            if (handle.kind === "calendar-event") this.indexFile(handle.file, handle.frontmatter);
+            if (parseCalendarRecordId(handle.id) || handle.kind === "calendar-event") this.indexFile(handle.file, handle.frontmatter);
         }
     }
 
@@ -1024,10 +1064,11 @@ export class NativeCalendarRecordService {
             ? api.inspect(resolved)
             : null;
         const canonical = inspected?.frontmatter || resolved;
-        if (String(inspected?.kind || resolved?.kind || "") !== "calendar-event"
-            || Number(inspected?.schemaVersion || resolved?.tpsSchemaVersion) !== 1) return;
         const id = String(inspected?.id || resolved?.tpsId || "").trim();
         if (!id) return;
+        if (!parseCalendarRecordId(id)
+            && (String(inspected?.kind || resolved?.kind || "") !== "calendar-event"
+                || Number(inspected?.schemaVersion || resolved?.tpsSchemaVersion) !== 1)) return;
         this.recordsByPath.set(file.path, {
             file,
             frontmatter: { ...canonical },
@@ -1305,7 +1346,7 @@ function mergeCalendarRecordTags(existing: unknown, configuredTag: unknown): str
     const seen = new Set<string>();
     return tags.filter((tag) => {
         const key = tag.toLocaleLowerCase();
-        if (key === "calendar-event" || key.startsWith("tps/record/v1/")) return false;
+        if (key.startsWith("tps/record/v1/")) return false;
         if (seen.has(key)) return false;
         seen.add(key);
         return true;

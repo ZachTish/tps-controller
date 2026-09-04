@@ -79,6 +79,7 @@ export interface GcmNativeRecordSnapshot {
 
 export interface GcmNativeRecordsApi {
   version?: number;
+  capabilities?: { calendarTemplateRecords?: boolean };
   isEnabled?: () => boolean;
   create?: (
     kind: 'calendar-event',
@@ -112,6 +113,7 @@ export interface GcmNativeRecordsApi {
     kind: 'calendar-event';
     properties: Record<string, unknown>;
     fileName?: string;
+    body?: string;
   } | {
     operation: 'reidentify';
     nextId: string;
@@ -126,6 +128,7 @@ export interface GcmNativeRecordsApi {
     kind: 'calendar-event';
     properties: Record<string, unknown>;
     fileName?: string;
+    body?: string;
   } | {
     operation: 'reidentify';
     nextId: string;
@@ -150,6 +153,7 @@ export interface GcmNativeRecordsApi {
       kind: 'calendar-event';
       properties: Record<string, unknown>;
       fileName?: string;
+      body?: string;
     } | {
       operation: 'reidentify';
       nextId: string;

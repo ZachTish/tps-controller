@@ -2312,10 +2312,12 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                         await save();
                     }));
 
-            if ((calendar.autoCreateMode || "note") === "note") {
+            if (this.plugin.settings.calendarStorageMode === "native-records" || (calendar.autoCreateMode || "note") === "note") {
                 new Setting(acContent)
                     .setName("Template")
-                    .setDesc("Path to template file")
+                    .setDesc(this.plugin.settings.calendarStorageMode === "native-records"
+                        ? "Defaults and body for new event notes; kind is added only if this template supplies it. Supports static Markdown/YAML and {{title}}, {{start}}, {{end}} variables. Quote variables in YAML values. Executable Templater commands are not supported; existing notes are not re-templated."
+                        : "Path to template file")
                     .addText(t => t
                         .setValue(calendar.autoCreateTemplate || "")
                         .setPlaceholder("Templates/Meeting.md")

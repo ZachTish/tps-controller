@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import { createHash, webcrypto } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 
@@ -21,7 +22,8 @@ async function loadModule() {
         builder.onResolve({ filter: /^obsidian$/u }, () => ({ path: 'obsidian', namespace: 'native-calendar-test' }));
         builder.onLoad({ filter: /.*/, namespace: 'native-calendar-test' }, () => ({
           loader: 'js',
-          contents: `export class App {} export class TFile { constructor(path) { this.path = path; this.name = path.split('/').pop(); this.basename = this.name.replace(/\\.md$/u, ''); this.extension = 'md'; } }`,
+          resolveDir: process.cwd(),
+          contents: `import { load } from 'js-yaml'; export const parseYaml = load; export const normalizePath = value => value.replace(/\\\\/g, '/'); export class App {} export class TFile { static [Symbol.hasInstance](value) { return value?.extension === 'md' && typeof value.path === 'string'; } constructor(path) { this.path = path; this.name = path.split('/').pop(); this.basename = this.name.replace(/\\.md$/u, ''); this.extension = 'md'; } }`,
         }));
       },
     }],
@@ -108,6 +110,8 @@ function recordLink(path, alias) {
 function harness(initialEvents = [], options = {}) {
   const files = new Map();
   const frontmatters = new Map();
+  const bodies = new Map();
+  const templates = new Map(Object.entries(options.templates || {}).map(([path, source]) => [path, { file: makeFile(path), source }]));
   const feedStates = new Map();
   const mutationLog = [];
   const preflightLog = [];
@@ -134,7 +138,7 @@ function harness(initialEvents = [], options = {}) {
 
   const identity = (frontmatter) => {
     const propertyId = String(frontmatter?.tpsId || '').trim();
-    if (propertyId) return { id: propertyId, kind: String(frontmatter.kind || ''), schemaVersion: 1 };
+    if (propertyId) return { id: propertyId, kind: /^calendar:v1:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]{27}$/u.test(propertyId) ? 'calendar-event' : String(frontmatter.kind || ''), schemaVersion: 1 };
     const identityTag = Array.isArray(frontmatter?.tags)
       ? frontmatter.tags.find((tag) => String(tag).startsWith('tps/record/v1/'))
       : null;
@@ -171,7 +175,6 @@ function harness(initialEvents = [], options = {}) {
           ...frontmatter,
           tpsId: inspected.id,
           tpsSchemaVersion: 1,
-          kind: inspected.kind,
           createdDate: new Date(file.stat.ctime).toISOString(),
           modifiedDate: new Date(file.stat.mtime).toISOString(),
         },
@@ -304,7 +307,8 @@ function harness(initialEvents = [], options = {}) {
   };
 
   const canonicalizeEnvelope = (frontmatter, id, kind) => {
-    const next = { ...frontmatter, tpsId: id, kind };
+    const next = { ...frontmatter, tpsId: id };
+    if (!/^calendar:v1:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]{27}$/u.test(id)) next.kind = kind;
     for (const key of Object.keys(next)) {
       if (['tpsschemaversion', 'createddate', 'modifieddate'].includes(key.toLocaleLowerCase())) delete next[key];
     }
@@ -317,13 +321,14 @@ function harness(initialEvents = [], options = {}) {
 
   const api = {
     version: Object.hasOwn(options, 'apiVersion') ? options.apiVersion : 6,
+    capabilities: { calendarTemplateRecords: options.calendarTemplateRecords !== false },
     isEnabled: () => true,
     inspect(frontmatter) {
       const inspected = identity(frontmatter);
       return inspected?.id && inspected.kind && inspected.schemaVersion === 1
         ? {
           ...inspected,
-          frontmatter: { ...frontmatter, tpsId: inspected.id, tpsSchemaVersion: 1, kind: inspected.kind },
+          frontmatter: { ...frontmatter, tpsId: inspected.id, tpsSchemaVersion: 1 },
           profile: { identityTagPrefix: 'tps/record' },
         }
         : null;
@@ -416,6 +421,7 @@ function harness(initialEvents = [], options = {}) {
           const frontmatter = canonicalizeEnvelope(structuredClone(entry.properties), entry.nextId, entry.kind);
           nextFiles.set(expectedPath, file);
           nextFrontmatters.set(expectedPath, frontmatter);
+          bodies.set(expectedPath, entry.body || '');
           pendingMutations.push({ type: 'create', id: entry.nextId, path: expectedPath });
           handles.push({ file, path: expectedPath, id: entry.nextId, kind: entry.kind, frontmatter: { ...frontmatter } });
           const interrupted = await interruptAfterCommittedEntry(index);
@@ -446,6 +452,10 @@ function harness(initialEvents = [], options = {}) {
         Object.assign(file, makeFile(expectedPath));
         nextFiles.set(expectedPath, file);
         nextFrontmatters.set(expectedPath, frontmatter);
+        if (sourcePath !== expectedPath && bodies.has(sourcePath)) {
+          bodies.set(expectedPath, bodies.get(sourcePath));
+          bodies.delete(sourcePath);
+        }
         if (sourcePath !== expectedPath) pendingMutations.push({ type: 'rename', oldPath: sourcePath, nextPath: expectedPath });
         handles.push({ file, path: expectedPath, id: entry.nextId, kind: inspected.kind, frontmatter: { ...frontmatter } });
         const interrupted = await interruptAfterCommittedEntry(index);
@@ -540,17 +550,23 @@ function harness(initialEvents = [], options = {}) {
         ? {
             api: {
               nativeRecords: api,
-              ...(options.canAutomaticallyMutate
-                ? { templates: { version: 1, canAutomaticallyMutate: options.canAutomaticallyMutate } }
-                : {}),
+              templates: {
+                version: 1,
+                canAutomaticallyMutate: options.canAutomaticallyMutate || (() => true),
+                prepareInstanceSource: options.prepareInstanceSource || ((source) => source),
+              },
             },
           }
         : null,
     },
     vault: {
       getMarkdownFiles: () => [...files.values()],
-      getAbstractFileByPath: (path) => files.get(path) || null,
+      getAbstractFileByPath: (path) => files.get(path) || templates.get(path)?.file || null,
       getFileByPath: (path) => files.get(path) || null,
+      read: async (file) => {
+        if (!templates.has(file.path)) throw new Error('template-read-failed');
+        return templates.get(file.path).source;
+      },
       on: () => ({}),
     },
     metadataCache: {
@@ -615,6 +631,7 @@ function harness(initialEvents = [], options = {}) {
     settings,
     files,
     frontmatters,
+    bodies,
     mutationLog,
     preflightLog,
     api,
@@ -745,7 +762,7 @@ test('canonical IDs are deterministic, privacy-safe, URL-independent, and contai
   assert.equal(Object.hasOwn(original, 'attendees'), false);
   assert.equal(Object.hasOwn(original, 'url'), false);
   assert.equal(Object.hasOwn(original, 'tags'), false);
-  assert.deepEqual(Object.keys(original).sort(), ['end', 'kind', 'scheduled', 'status', 'title', 'tpsId']);
+  assert.deepEqual(Object.keys(original).sort(), ['end', 'scheduled', 'status', 'title', 'tpsId']);
   const projected = await h.api.resolve(original.tpsId);
   assert.equal(projected.frontmatter.tpsSchemaVersion, 1);
   assert.equal(projected.frontmatter.createdDate, '2023-11-14T22:13:20.000Z');
@@ -1096,7 +1113,7 @@ test('legacy native record migrates once, strips redundant fields, and preserves
   assert.equal(Object.hasOwn(migrated, 'organizer'), false);
   assert.equal(Object.hasOwn(migrated, 'attendees'), false);
   assert.equal(Object.hasOwn(migrated, 'url'), false);
-  assert.equal(Object.hasOwn(migrated, 'tags'), false, 'the redundant calendar-event kind tag is removed');
+  assert.deepEqual(migrated.tags, ['calendar-event'], 'ordinary tags may be authored and are preserved');
   assert.equal(
     migrated.associatedNote,
     '[[Calendar Events/2026-08-26/Calendar event--deadbeef]]',
@@ -1129,14 +1146,14 @@ test('active legacy migration and later refresh preserve workflow status and ord
   assert.equal(migrated.created, 0);
   let frontmatter = [...h.frontmatters.values()][0];
   assert.equal(frontmatter.status, 'complete');
-  assert.deepEqual(new Set(frontmatter.tags), new Set(['customer-important', 'managed-work']));
+  assert.deepEqual(new Set(frontmatter.tags), new Set(['calendar-event', 'customer-important', 'managed-work']));
 
   h.setEvents([event({ description: 'Second refresh' })]);
   await h.service.sync([configured], '', true, false);
   frontmatter = [...h.frontmatters.values()][0];
   assert.equal(frontmatter.status, 'complete');
   assert.equal(frontmatter.description, 'Second refresh');
-  assert.deepEqual(new Set(frontmatter.tags), new Set(['customer-important', 'managed-work']));
+  assert.deepEqual(new Set(frontmatter.tags), new Set(['calendar-event', 'customer-important', 'managed-work']));
 });
 
 test('ordinary active sync preserves an intentionally blank workflow status', async () => {
@@ -1334,7 +1351,7 @@ test('delayed stale MetadataCache delivery cannot poison authoritative sync payl
   assert.equal(synced.description, 'Fresh feed description');
   assert.deepEqual(
     new Set(synced.tags),
-    new Set(['current-disk-tag', 'managed-calendar']),
+    new Set(['calendar-event', 'current-disk-tag', 'managed-calendar']),
   );
   assert.equal(synced.tags.includes('stale-cache-tag'), false);
 });
@@ -1515,7 +1532,7 @@ test('configured native identity tags are discarded while ordinary migration pro
 
   const result = await h.service.sync([{ ...calendar, autoCreateTag: 'calendar-event tps/record/v1/task/injected' }], '', true, false);
   const createPlan = h.preflightLog[0].entries.find((entry) => entry.operation === 'create');
-  assert.equal(Object.hasOwn(createPlan.properties, 'tags'), false);
+  assert.deepEqual(createPlan.properties.tags, ['calendar-event']);
   assert.equal(result.created, 1);
   assert.equal(result.updated, 1);
   assert.equal([...h.frontmatters.values()].some((frontmatter) =>
@@ -1747,7 +1764,7 @@ test('fetched canonical-ID collision fails before a pending migration mutates an
   assert.equal(h.frontmatters.get('legacy.md').tpsId, 'legacy-source');
 });
 
-test('fetched create target occupied by another native kind fails before migration writes', async () => {
+test('canonical calendar identity stays owned when the user changes its public kind', async () => {
   const incoming = event();
   const target = canonicalId(calendar.id, incoming.occurrenceIdentity);
   const h = harness([incoming]);
@@ -1764,14 +1781,15 @@ test('fetched create target occupied by another native kind fails before migrati
     tpsSchemaVersion: 1,
     kind: 'task',
     title: 'Occupied by a task',
+    status: 'complete',
   });
-  await assert.rejects(
-    h.service.sync([calendar], '', true, false),
-    /rejected the complete calendar identity plan/u,
-  );
-  assert.equal(h.preflightLog.length, 1);
-  assert.equal(h.mutationLog.length, 0);
-  assert.equal(h.frontmatters.get('legacy.md').tpsId, 'legacy-other-occurrence');
+  const result = await h.service.sync([calendar], '', true, false);
+  assert.equal(result.created, 0);
+  const owned = [...h.frontmatters.values()].find((record) => record.tpsId === target);
+  assert.equal(owned.kind, 'task');
+  assert.equal(owned.status, 'complete');
+  assert.equal(owned.scheduled, incoming.startDate.toISOString());
+  assert.equal([...h.frontmatters.values()].filter((record) => record.tpsId === target).length, 1);
 });
 
 test('authoritative path planning relocates an outside-root legacy record and keeps a plain title', async () => {
@@ -2032,4 +2050,160 @@ test('native calendar sync protects an update-only record even when its path and
   );
   assert.equal(h.mutationLog.length, 0);
   assert.equal(h.frontmatters.get(path).title, 'Stale title');
+});
+
+test('new native calendar notes omit public kind without an explicit template kind', async () => {
+  const incoming = event();
+  const h = harness([incoming]);
+  await h.service.sync([calendar], '', true, false);
+  const [record] = h.frontmatters.values();
+  assert.equal(Object.hasOwn(record, 'kind'), false);
+  assert.equal(record.scheduled, incoming.startDate.toISOString());
+  assert.equal(record.end, incoming.endDate.toISOString());
+  const handle = await h.api.resolve(record.tpsId);
+  assert.equal(handle.kind, 'calendar-event');
+  assert.equal(Object.hasOwn(handle.frontmatter, 'kind'), false);
+  assert.equal((await h.service.sync([calendar], '', true, false)).created, 0);
+  assert.equal(h.files.size, 1);
+});
+
+test('native calendar template contributes public kind, defaults, body and variables but never source identity', async () => {
+  const incoming = event({ title: 'Weekly 1:1' });
+  const templatePath = 'Templates/Meeting.md';
+  let preparations = 0;
+  const h = harness([incoming], {
+    templates: {
+      [templatePath]: [
+        '---', 'kind: Team Meeting', 'status: working', 'tags: [template, work, calendar-event]',
+        'tpsId: source-template-id', 'tpsSchemaVersion: 1', 'calendarOccurrenceKey: never-copy',
+        'externalId: old-provider-id', 'createdDate: 2026-01-01',
+        'agenda: review', 'scheduled: 2000-01-01', '---',
+        'Discuss {{title}}.', 'Starts {{start}} and ends {{end}}.', '',
+      ].join('\n'),
+    },
+    prepareInstanceSource(source) {
+      preparations += 1;
+      return source.replace('[template, work, calendar-event]', '[work, calendar-event]');
+    },
+  });
+  const configured = { ...calendar, autoCreateTemplate: templatePath, autoCreateTag: 'team' };
+  const first = await h.service.sync([configured], '', true, false);
+  assert.equal(first.created, 1);
+  assert.equal(preparations, 1);
+  const [path, record] = [...h.frontmatters.entries()][0];
+  assert.equal(record.kind, 'Team Meeting');
+  assert.equal(record.status, 'working');
+  assert.equal(record.agenda, 'review');
+  assert.equal(record.tpsId, canonicalId(calendar.id, incoming.occurrenceIdentity));
+  assert.equal(record.scheduled, incoming.startDate.toISOString());
+  assert.equal(record.end, incoming.endDate.toISOString());
+  assert.deepEqual(record.tags, ['work', 'calendar-event', 'team']);
+  for (const key of ['externalId', 'calendarOccurrenceKey', 'createdDate', 'tpsSchemaVersion']) {
+    assert.equal(Object.hasOwn(record, key), false, key);
+  }
+  assert.equal(h.bodies.get(path), `Discuss Weekly 1:1.\nStarts ${incoming.startDate.toISOString()} and ends ${incoming.endDate.toISOString()}.\n`);
+  assert.equal(h.preflightLog[0].entries[0].body, h.bodies.get(path));
+  h.mutateBusinessFieldOnDisk(path, { kind: 'event', status: 'complete' });
+  h.bodies.set(path, 'My private meeting notes.\n');
+  await h.service.sync([{ ...configured, autoCreateTemplate: 'Templates/Now missing.md' }], '', true, false);
+  assert.equal(preparations, 1, 'existing notes are not re-templated');
+  const [updatedPath, updated] = [...h.frontmatters.entries()][0];
+  assert.equal(updated.kind, 'event');
+  assert.equal(updated.status, 'complete');
+  assert.deepEqual(updated.tags, ['work', 'calendar-event', 'team']);
+  assert.equal(h.bodies.get(updatedPath), 'My private meeting notes.\n');
+  assert.equal(h.files.size, 1);
+});
+
+test('native calendar template without kind keeps it absent and preserves a blank authored status', async () => {
+  const h = harness([event()], { templates: { 'Template.md': '---\nstatus: ""\n---\nBody\n' } });
+  await h.service.sync([{ ...calendar, autoCreateTemplate: 'Template.md' }], '', true, false);
+  const [record] = h.frontmatters.values();
+  assert.equal(Object.hasOwn(record, 'kind'), false);
+  assert.equal(record.status, '');
+});
+
+test('feed all-day state overrides conflicting template defaults on the first creation', async () => {
+  for (const isAllDay of [false, true]) {
+    const incoming = event({ isAllDay });
+    const h = harness([incoming], {
+      templates: { 'Template.md': `---\nallDay: ${!isAllDay}\n---\n` },
+    });
+    await h.service.sync([{ ...calendar, autoCreateTemplate: 'Template.md' }], '', true, false);
+    const [record] = h.frontmatters.values();
+    if (isAllDay) {
+      assert.equal(record.allDay, true);
+      assert.match(record.scheduled, /^\d{4}-\d{2}-\d{2}$/u);
+    } else {
+      assert.equal(Object.hasOwn(record, 'allDay'), false);
+      assert.equal(record.scheduled, incoming.startDate.toISOString());
+      assert.equal(record.end, incoming.endDate.toISOString());
+    }
+  }
+});
+
+test('native calendar handles empty template frontmatter without leaking delimiters into body', async () => {
+  const h = harness([event()], { templates: { 'Template.md': '---\n---\nBody\n' } });
+  await h.service.sync([{ ...calendar, autoCreateTemplate: 'Template.md' }], '', true, false);
+  assert.equal([...h.bodies.values()][0], 'Body\n');
+});
+
+test('calendar template variables remain data when a feed title contains YAML punctuation', async () => {
+  const incoming = event({ title: 'Planning "review"\nextra: unsafe' });
+  const h = harness([incoming], { templates: { 'Template.md': '---\nlabel: "{{title}}"\n---\n{{title}}\n' } });
+  await h.service.sync([{ ...calendar, autoCreateTemplate: 'Template.md' }], '', true, false);
+  const [record] = h.frontmatters.values();
+  assert.equal(record.label, incoming.title);
+  assert.equal(Object.hasOwn(record, 'extra'), false);
+  assert.equal([...h.bodies.values()][0], `${incoming.title}\n`);
+});
+
+test('cancelled template-created calendar events restore their authored initial workflow status', async () => {
+  const incoming = event({ isCancelled: true });
+  const h = harness([incoming], { templates: { 'Template.md': '---\nstatus: working\nkind: event\n---\n' } });
+  const configured = { ...calendar, autoCreateTemplate: 'Template.md' };
+  await h.service.sync([configured], '', true, false);
+  assert.equal([...h.frontmatters.values()][0].status, 'cancelled');
+  h.setEvents([{ ...incoming, isCancelled: false }]);
+  await h.service.sync([configured], '', true, false);
+  assert.equal([...h.frontmatters.values()][0].status, 'working');
+  assert.equal([...h.frontmatters.values()][0].kind, 'event');
+});
+
+test('unsafe or missing native calendar templates abort before any create or migration', async () => {
+  const cases = [
+    { source: undefined, expected: /template was not found/u },
+    { source: '---\nkind: [broken\n---\n', expected: /frontmatter is invalid/u },
+    { source: '---\nkind: event\n', expected: /unclosed frontmatter/u },
+    { source: '---\nkind: true\n---\n', expected: /kind must be text/u },
+    { source: '---\nkind: event\nKind: task\n---\n', expected: /duplicate property/u },
+    { source: '<% tp.date.now() %>', expected: /executable Templater/u },
+    { source: 'Template content', prepareInstanceSource: () => null, expected: /GCM rejected/u },
+  ];
+  for (const fixture of cases) {
+    const h = harness([event()], {
+      templates: fixture.source === undefined ? {} : { 'Template.md': fixture.source },
+      prepareInstanceSource: fixture.prepareInstanceSource,
+    });
+    h.seedRecord('legacy.md', legacyFrontmatter({
+      tpsId: 'legacy-other-occurrence', calendarUid: 'other', calendarOccurrenceIdentity: 'other',
+      calendarOccurrenceKey: `${calendar.id}:old-source-hash:other`,
+    }));
+    await assert.rejects(h.service.sync([{ ...calendar, autoCreateTemplate: 'Template.md' }], '', true, false), fixture.expected);
+    assert.equal(h.mutationLog.length, 0);
+    assert.equal(h.preflightLog.length, 0);
+  }
+});
+
+test('native calendar refuses old GCM capabilities before injecting a fallback kind', async () => {
+  const h = harness([event()], { calendarTemplateRecords: false });
+  await assert.rejects(h.service.sync([calendar], '', true, false), /calendarTemplateRecords support/u);
+  assert.equal(h.mutationLog.length, 0);
+});
+
+test('native calendar template setting remains reachable with a saved legacy task mode', () => {
+  const source = readFileSync(new URL('../src/settings-tab.ts', import.meta.url), 'utf8');
+  assert.match(source, /if \(this\.plugin\.settings\.calendarStorageMode === "native-records" \|\| \(calendar\.autoCreateMode \|\| "note"\) === "note"\) \{\s*new Setting\(acContent\)\s*\.setName\("Template"\)/u);
+  assert.match(source, /Quote variables in YAML values/u);
+  assert.match(source, /Executable Templater commands are not supported/u);
 });

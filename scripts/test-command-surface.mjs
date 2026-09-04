@@ -418,7 +418,7 @@ test("Controller settings use one routed page with an explicit five-destination 
   assert.match(calendarEditorSource, /nextCalendarId[\s\S]*focusCalendarControl\(container, nextCalendarId, 'configure'\)/);
   assert.match(calendarEditorSource, /if \(\(calendar\.autoCreateMode \|\| "note"\) === "task"\)/);
   assert.match(calendarEditorSource, /\} else \{\s*new Setting\(acContent\)\s*\.setName\("Type Folder"\)/);
-  assert.match(calendarEditorSource, /if \(\(calendar\.autoCreateMode \|\| "note"\) === "note"\) \{\s*new Setting\(acContent\)\s*\.setName\("Template"\)/);
+  assert.match(calendarEditorSource, /if \(this\.plugin\.settings\.calendarStorageMode === "native-records" \|\| \(calendar\.autoCreateMode \|\| "note"\) === "note"\) \{\s*new Setting\(acContent\)\s*\.setName\("Template"\)/);
 
   assert.ok(
     reminderPageSource.indexOf(".setName('Rule actions')") < reminderPageSource.indexOf("this.renderReminderRules(rulesContainer)"),
