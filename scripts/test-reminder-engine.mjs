@@ -16,6 +16,7 @@ const reminderDeliveryWindowSource = readFileSync(new URL('../src/services/remin
 const reminderRuntimePolicySource = readFileSync(new URL('../src/services/reminder-runtime-policy.ts', import.meta.url), 'utf8');
 const timeCalculationSource = readFileSync(new URL('../src/utils/time-calculation-service.ts', import.meta.url), 'utf8');
 const utilsSource = readFileSync(new URL('../src/utils.ts', import.meta.url), 'utf8');
+const reminderDeliveryStatusSource = readFileSync(new URL('../src/services/reminder-delivery-status.ts', import.meta.url), 'utf8');
 const notificationViewSource = readFileSync(new URL('../src/views/notification-view.ts', import.meta.url), 'utf8');
 const notificationSignatureSource = readFileSync(new URL('../src/views/notification-view-signature.ts', import.meta.url), 'utf8');
 const overdueModalSource = readFileSync(new URL('../src/modals/overdue-modal.ts', import.meta.url), 'utf8');
@@ -997,14 +998,14 @@ test('master reminder switch keeps the audit list and native schedule projection
 
 test('reminder audit surfaces report master, provider, platform, and per-device publication truth', () => {
   assert.match(mainSource, /getReminderDeliveryAuditStatus\(\)[\s\S]*remindersEnabled:[\s\S]*notificationDeliveryProvider:[\s\S]*localDeliveryMode:[\s\S]*tishOSNativeNotificationsSupported:[\s\S]*commandBridge:/);
-  assert.match(notificationViewSource, /Reminder delivery is off\. No reminder is being published\./);
-  assert.match(notificationViewSource, /Local Obsidian notices are active while Obsidian is open/);
-  assert.match(notificationViewSource, /ntfy delivery does not run on this mobile\/User device/);
-  assert.match(notificationViewSource, /nativeNotificationState === 'pending'/);
-  assert.match(notificationViewSource, /nativeNotificationReason/);
-  assert.match(notificationViewSource, /nativeNotificationItemCount/);
-  assert.match(notificationViewSource, /nativeNotificationPublishedAt/);
-  assert.doesNotMatch(notificationViewSource, /reduce\([\s\S]{0,200}nativeNotificationItemCount/);
+  assert.match(reminderDeliveryStatusSource, /Reminder delivery is off\. No reminder is being published\./);
+  assert.match(reminderDeliveryStatusSource, /Local Obsidian notices are active while Obsidian is open/);
+  assert.match(reminderDeliveryStatusSource, /ntfy delivery does not run on this mobile\/User device/);
+  assert.match(reminderDeliveryStatusSource, /nativeNotificationState === 'pending'/);
+  assert.match(reminderDeliveryStatusSource, /nativeNotificationReason/);
+  assert.match(reminderDeliveryStatusSource, /nativeNotificationItemCount/);
+  assert.match(reminderDeliveryStatusSource, /nativeNotificationPublishedAt/);
+  assert.doesNotMatch(reminderDeliveryStatusSource, /reduce\([\s\S]{0,200}nativeNotificationItemCount/);
   assert.match(settingsTabSource, /private describeNativeNotificationStatus/);
   assert.match(settingsTabSource, /reminders are off/);
   assert.match(settingsTabSource, /ntfy is selected/);
@@ -1014,6 +1015,7 @@ test('reminder audit surfaces report master, provider, platform, and per-device 
   assert.match(settingsTabSource, /tishOSNativeNotificationsSupported === false/);
   assert.match(settingsTabSource, /Local Obsidian fallback is blocked because Enable Reminders is off/);
   assert.match(settingsTabSource, /a closed or suspended app cannot be notified/);
+  assert.doesNotMatch(notificationViewSource, /buildDeliveryStatusText|deliveryAuditStatus|tps-notification-delivery-status/);
 });
 
 test('native schedule retains the modal-visible due occurrence with its stable fire time', async () => {

@@ -23,6 +23,7 @@ const policy = await importBundled("../src/services/reminder-runtime-policy.ts")
 const mainSource = await readFile(new URL("../src/main.ts", import.meta.url), "utf8");
 const settingsSource = await readFile(new URL("../src/settings-tab.ts", import.meta.url), "utf8");
 const typesSource = await readFile(new URL("../src/types.ts", import.meta.url), "utf8");
+const reminderDeliveryStatusSource = await readFile(new URL('../src/services/reminder-delivery-status.ts', import.meta.url), 'utf8');
 const notificationViewSource = await readFile(new URL("../src/views/notification-view.ts", import.meta.url), "utf8");
 
 test("notification provider registry is explicit and extensible", () => {
@@ -158,7 +159,7 @@ test("Controller persists one provider, gates all routes, and isolates local fal
     "metadata readiness must be registered before asynchronous settings migration can yield",
   );
   assert.match(mainSource, /metadata-resolved-post-active/);
-  assert.match(notificationViewSource, /localDeliveryMode === 'local-obsidian'[\s\S]*Local Obsidian notices are active while Obsidian is open/);
+  assert.match(reminderDeliveryStatusSource, /localDeliveryMode === 'local-obsidian'[\s\S]*Local Obsidian notices are active while Obsidian is open/);
 });
 
 test("Reminder settings expose a provider picker rather than competing delivery toggles", () => {

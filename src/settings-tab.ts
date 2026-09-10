@@ -1,3 +1,4 @@
+import { buildReminderDeliveryStatusText } from "./services/reminder-delivery-status";
 import { renderAttachmentSyncSettings } from "./services/attachment-sync/settings-ui";
 import { App, Notice, PluginSettingTab, SecretComponent, Setting, normalizePath } from 'obsidian';
 import type TPSControllerPlugin from './main';
@@ -58,6 +59,7 @@ const createSettingsSection = (
 export class TPSControllerSettingTab extends PluginSettingTab {
     plugin: TPSControllerPlugin;
     private attachmentStatusDispose: (() => void) | null = null;
+    private reminderDeliveryStatusTimer: number | null = null;
     private activePage: ControllerSettingsPage = 'overview';
     private activeAutomation: ControllerAutomationPage = 'archive';
     private selectedCalendarId: string | null = null;
@@ -75,13 +77,14 @@ export class TPSControllerSettingTab extends PluginSettingTab {
     }
 
     hide(): void {
+        if (this.reminderDeliveryStatusTimer !== null) window.clearInterval(this.reminderDeliveryStatusTimer);
+        this.reminderDeliveryStatusTimer = null;
         this.attachmentStatusDispose?.();
         this.attachmentStatusDispose = null;
     }
 
     display(): void {
-        this.attachmentStatusDispose?.();
-        this.attachmentStatusDispose = null;
+        this.hide();
         const { containerEl } = this;
         containerEl.empty();
 
@@ -716,12 +719,29 @@ export class TPSControllerSettingTab extends PluginSettingTab {
         return `${count} native alert${count === 1 ? '' : 's'}${updated}`;
     }
 
+    private renderReminderDeliveryNotice(container: HTMLElement): () => void {
+        const notice = container.createDiv({
+            cls: 'tps-controller-reminder-delivery-status',
+            attr: { role: 'status', 'aria-live': 'polite', 'aria-label': 'Reminder delivery status' },
+        });
+        const update = () => {
+            const text = buildReminderDeliveryStatusText(this.plugin.getReminderDeliveryAuditStatus());
+            if (notice.textContent !== text) notice.setText(text);
+            notice.hidden = !text;
+        };
+        update();
+        this.reminderDeliveryStatusTimer = window.setInterval(update, 30_000);
+        return update;
+    }
+
     private renderReminderSettingsPage(container: HTMLElement): void {
         this.renderPageHeading(
             container,
             'Reminder rules',
             'Create and edit notification rules first, then adjust shared defaults, filters, and snooze choices.'
         );
+
+        const updateDeliveryNotice = this.renderReminderDeliveryNotice(container);
 
         const rulesSection = createSettingsSection(
             container,
@@ -791,6 +811,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     } catch (e) {
                         new Notice('Reminder check failed.');
                     }
+                    updateDeliveryNotice();
                     btn.setButtonText('Check Now');
                     btn.setDisabled(false);
                 }));

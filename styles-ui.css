@@ -411,8 +411,9 @@
   }
 }
 
-.tps-notification-delivery-status {
-  margin: 8px 10px 4px;
+.tps-controller-reminder-delivery-status {
+  margin: 0 0 16px;
+  overflow-wrap: anywhere;
   padding: 8px 10px;
   border: 1px solid var(--background-modifier-border);
   border-radius: 7px;
