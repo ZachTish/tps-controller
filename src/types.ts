@@ -1,5 +1,6 @@
 import { TFile } from "obsidian";
 import type { NotificationDeliveryProvider } from "./services/notification-delivery-provider";
+import { DEFAULT_ATTACHMENT_SYNC_SETTINGS, type AttachmentSyncSettings } from "./services/attachment-sync/settings";
 
 // ============================================================================
 // Device Role (Existing)
@@ -60,6 +61,7 @@ export interface TwoStageArchiveRule {
     lastRunKey: string;
 }
 
+/** Retained only to import old connection settings and restore recorded uploads. */
 export interface S3agleAttachmentAutomationSettings {
     enabled: boolean;
     runOnActiveNoteOpen: boolean;
@@ -186,6 +188,7 @@ export interface TPSControllerSettings {
     externalCalendars: ExternalCalendarConfig[];
     twoStageArchive: TwoStageArchiveRule;
     s3agleAttachmentAutomation: S3agleAttachmentAutomationSettings;
+    attachmentSync: AttachmentSyncSettings;
 
 
     // Frontmatter Key Names (shared with Calendar for sync)
@@ -255,6 +258,7 @@ export const DEFAULT_CONTROLLER_SETTINGS: TPSControllerSettings = {
         runTime: "23:55",
         lastRunKey: "",
     },
+    attachmentSync: { ...DEFAULT_ATTACHMENT_SYNC_SETTINGS, excludedPaths: [] },
     s3agleAttachmentAutomation: {
         enabled: false,
         runOnActiveNoteOpen: true,

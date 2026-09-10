@@ -22,7 +22,8 @@ const context = await esbuild.context({
     },
     entryPoints: ["src/main.ts"],
     bundle: true,
-    platform: "node",
+    // Prefer browser implementations; explicitly externalized Node APIs remain desktop-gated.
+    platform: "browser",
     external: [
         "obsidian",
         "electron",

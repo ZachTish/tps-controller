@@ -1,4 +1,6 @@
 ﻿import { App, Plugin, Notice, Platform, TFile, TextFileView, moment, normalizePath } from "obsidian";
+import { AttachmentSyncService } from "./services/attachment-sync/service";
+import { normalizeAttachmentSyncSettings } from "./services/attachment-sync/settings";
 import { DeviceRoleManager, DeviceRole } from "./device-role-manager";
 import { TPSControllerSettings, DEFAULT_CONTROLLER_SETTINGS } from "./types";
 import { AutoCreateService } from "./services/auto-create-service";
@@ -110,51 +112,6 @@ interface GcmPluginAPI {
     };
 }
 
-interface S3AttachmentAutomationAPI {
-    start(): void;
-    stop(): void;
-    restart(): void;
-    runActiveNoteNow(): Promise<{ notePath: string; uploadedCount: number; archivedCount: number; skippedArchiveCount: number } | null>;
-    fulfillArchiveRequests(requests: any[] | undefined): Promise<{ archivedCount: number; skippedArchiveCount: number }>;
-    runBucketArchiveIfDue(nowMs?: number): Promise<{ archivedCount: number; skippedCount: number; lastError?: string; lastSkipReason?: string } | null>;
-    runBucketArchiveNow(nowMs?: number): Promise<{ archivedCount: number; skippedCount: number; lastError?: string; lastSkipReason?: string }>;
-    getBucketArchiveCheckIntervalMs(): number;
-}
-
-class DisabledS3AttachmentAutomationService implements S3AttachmentAutomationAPI {
-    start(): void {
-        logger.flow("S3agleAutomation", "start:mobile-disabled");
-    }
-
-    stop(): void {}
-
-    restart(): void {
-        this.start();
-    }
-
-    async runActiveNoteNow(): Promise<null> {
-        new Notice("S3 attachment upload is not available on mobile. Use a desktop Controller instance.");
-        return null;
-    }
-
-    async fulfillArchiveRequests(): Promise<{ archivedCount: number; skippedArchiveCount: number }> {
-        return { archivedCount: 0, skippedArchiveCount: 0 };
-    }
-
-    async runBucketArchiveIfDue(): Promise<null> {
-        return null;
-    }
-
-    async runBucketArchiveNow(): Promise<{ archivedCount: number; skippedCount: number; lastSkipReason: string }> {
-        new Notice("S3 bucket archive is not available on mobile. Use the desktop Controller device.");
-        return { archivedCount: 0, skippedCount: 0, lastSkipReason: "mobile disabled" };
-    }
-
-    getBucketArchiveCheckIntervalMs(): number {
-        return 60 * 60 * 1000;
-    }
-}
-
 // ============================================================================
 // Controller Plugin
 // ============================================================================
@@ -187,7 +144,7 @@ export default class TPSControllerPlugin extends Plugin {
     private calendarAutomation: CalendarAutomationService;
     private nativeCalendarRecordService: NativeCalendarRecordService;
     private twoStageArchiveService: TwoStageArchiveService;
-    private s3agleAttachmentAutomationService: S3AttachmentAutomationAPI;
+    attachmentSyncService: AttachmentSyncService;
     private tishOSCommandBridgeService: TishOSCommandBridgeService;
 
     // Reminder interval
@@ -199,7 +156,6 @@ export default class TPSControllerPlugin extends Plugin {
     private syncRequestFulfillmentPromise: Promise<void> | null = null;
     private parentChildMaintenanceIntervalId: number | null = null;
     private twoStageArchiveIntervalId: number | null = null;
-    private s3BucketArchiveIntervalId: number | null = null;
     private parentChildBootstrapIntervalId: number | null = null;
     private tishOSNotificationRefreshTimeoutId: number | null = null;
     private parentChildStartupResolvedHandled = false;
@@ -268,7 +224,7 @@ export default class TPSControllerPlugin extends Plugin {
             () => this.getCalendarSyncReadiness()
         );
         this.twoStageArchiveService = new TwoStageArchiveService(this.app, () => this.settings, () => this.saveSettings());
-        this.s3agleAttachmentAutomationService = await this.createS3AttachmentAutomationService();
+        this.attachmentSyncService = new AttachmentSyncService(this.app, () => this.settings.attachmentSync, () => this.settings.s3agleAttachmentAutomation);
         this.tishOSCommandBridgeService = new TishOSCommandBridgeService(this.app, this.manifest, {
             notificationScheduleReadiness: () => (
                 this.settings.enableReminders === true
@@ -360,28 +316,24 @@ export default class TPSControllerPlugin extends Plugin {
             callback: () => this.traceCommand("open-notifications", () => this.overdueService.openNotificationModal()),
         });
         this.addCommand({
+            id: "sync-attachments-now",
+            name: "Sync Attachments Now",
+            callback: () => this.traceCommand("sync-attachments-now", () => this.runS3agleAttachmentAutomationNow()),
+        });
+        this.addCommand({
             id: "run-s3agle-attachment-automation-now",
-            name: "Run S3 Attachment Upload Now",
-            callback: () => this.traceCommand("run-s3agle-attachment-automation-now", async () => {
-                await this.s3agleAttachmentAutomationService.runActiveNoteNow();
-            }),
+            name: "Sync Attachments Now (legacy shortcut)",
+            callback: () => this.traceCommand("run-s3agle-attachment-automation-now", () => this.runS3agleAttachmentAutomationNow()),
         });
         this.addCommand({
             id: "run-s3-bucket-archive-now",
-            name: "Run S3 Bucket Archive Now",
-            callback: () => this.traceCommand("run-s3-bucket-archive-now", async () => {
-                if (!this.deviceRoleManager.isController()) {
-                    new Notice("S3 bucket archive runs on the Controller device.");
-                    return;
-                }
-                const result = await this.s3agleAttachmentAutomationService.runBucketArchiveNow();
-                const suffix = result.lastError
-                    ? ` Last error: ${result.lastError}`
-                    : result.lastSkipReason
-                        ? ` Last skip: ${result.lastSkipReason}`
-                        : "";
-                new Notice(`S3 bucket archive: moved ${result.archivedCount}, skipped ${result.skippedCount}.${suffix}`);
-            }),
+            name: "S3 Bucket Archive (retired)",
+            callback: () => this.traceCommand("run-s3-bucket-archive-now", async () => { await this.runS3BucketArchiveNow(); }),
+        });
+        this.addCommand({
+            id: "test-attachment-sync-mobile",
+            name: "Test Attachment Sync on This Device",
+            callback: () => this.traceCommand("test-attachment-sync-mobile", () => this.attachmentSyncService.runDiagnostic()),
         });
         this.addCommand({
             id: "refresh-tishos-command-bridge",
@@ -638,6 +590,16 @@ export default class TPSControllerPlugin extends Plugin {
         delete (this.settings as unknown as Record<string, unknown>).enableLocalReminderNoticesOnUserDevices;
         const importedS3agleSettings = await this.migrateS3agleSettingsIfNeeded(data || {});
         const s3CredentialMigration = this.migrateS3CredentialsFromSettings();
+        const attachmentSyncMigrationChanged = !data.attachmentSync
+            || this.settings.s3agleAttachmentAutomation?.enabled === true
+            || this.settings.s3agleAttachmentAutomation?.archiveUnreferencedBucketObjects === true;
+        try {
+            this.settings.attachmentSync = normalizeAttachmentSyncSettings(data.attachmentSync, this.settings.s3agleAttachmentAutomation);
+        } catch {
+            // Preserve a newer device's configuration byte-for-value. Only this feature pauses.
+            this.settings.attachmentSync = data.attachmentSync as TPSControllerSettings["attachmentSync"];
+            logger.flowWarn("AttachmentSync", "configuration:newer-schema", { paused: true });
+        }
         if (!this.settings._migratedFromPlugins) {
             await migrateSettingsFromPlugins(this.app, this.settings, data, () => this.saveSettings());
             this.cleanLegacySettings();
@@ -655,7 +617,8 @@ export default class TPSControllerPlugin extends Plugin {
         this.sanitizeS3agleAttachmentAutomationSettings();
         logger.setLoggingEnabled(this.settings.enableLogging);
         let finalMigrationSaveSucceeded = true;
-        if (importedS3agleSettings
+        if (attachmentSyncMigrationChanged
+            || importedS3agleSettings
             || s3CredentialMigration.changed
             || notificationProviderMigrationChanged
             || calendarIdMigrationChanged) {
@@ -868,7 +831,7 @@ export default class TPSControllerPlugin extends Plugin {
             syncOnEventDelete: this.settings.syncOnEventDelete,
             archiveFolder: this.settings.archiveFolder || "",
             twoStageArchiveEnabled: this.settings.twoStageArchive?.enabled === true,
-            s3agleAttachmentAutomationEnabled: this.settings.s3agleAttachmentAutomation?.enabled === true,
+            attachmentSyncEnabled: this.settings.attachmentSync?.enabled === true,
         };
     }
 
@@ -943,7 +906,7 @@ export default class TPSControllerPlugin extends Plugin {
                 .sort();
         };
         this.settings.s3agleAttachmentAutomation = {
-            enabled: raw.enabled === true,
+            enabled: false,
             runOnActiveNoteOpen: raw.runOnActiveNoteOpen !== false,
             runOnActiveNoteModify: raw.runOnActiveNoteModify !== false,
             runOnPaste: raw.runOnPaste !== false,
@@ -956,10 +919,10 @@ export default class TPSControllerPlugin extends Plugin {
             cooldownMinutes: Number.isFinite(cooldownMinutes) && cooldownMinutes >= 1
                 ? Math.floor(cooldownMinutes)
                 : defaults.cooldownMinutes,
-            archiveUploadedSources: raw.archiveUploadedSources !== false,
+            archiveUploadedSources: false,
             allowedAttachmentExtensions: normalizeExtensionList(raw.allowedAttachmentExtensions),
             ignoredAttachmentExtensions: normalizeExtensionList(raw.ignoredAttachmentExtensions),
-            makeUploadedObjectsPublic: raw.makeUploadedObjectsPublic !== false,
+            makeUploadedObjectsPublic: false,
             accessKeySecretName: typeof raw.accessKeySecretName === "string"
                 ? raw.accessKeySecretName.trim()
                 : defaults.accessKeySecretName,
@@ -974,7 +937,7 @@ export default class TPSControllerPlugin extends Plugin {
             contentUrl: String(raw.contentUrl || "").trim().replace(/\/+$/g, ""),
             hashFileName: raw.hashFileName === true,
             hashSeed: Number.isFinite(hashSeed) ? Math.floor(hashSeed) : defaults.hashSeed,
-            archiveUnreferencedBucketObjects: raw.archiveUnreferencedBucketObjects === true,
+            archiveUnreferencedBucketObjects: false,
             bucketArchivePrefix: normalizePath(String(raw.bucketArchivePrefix || defaults.bucketArchivePrefix).trim().replace(/^\/+|\/+$/g, "")) || defaults.bucketArchivePrefix,
             bucketArchiveCheckIntervalMinutes: Number.isFinite(bucketArchiveCheckIntervalMinutes) && bucketArchiveCheckIntervalMinutes >= 1
                 ? Math.floor(bucketArchiveCheckIntervalMinutes)
@@ -1231,7 +1194,6 @@ export default class TPSControllerPlugin extends Plugin {
         this.startTimeTrackingReminderLoop();
         this.startParentChildMaintenanceLoop();
         this.startTwoStageArchiveLoop();
-        this.startS3BucketArchiveLoop();
         this.syncConflictWatcher.updateConfig(this.settings.archiveFolder, this.settings.eventIdKey);
         this.syncConflictWatcher.start();
         logger.flow("Automation", "start-all:done");
@@ -1245,25 +1207,23 @@ export default class TPSControllerPlugin extends Plugin {
         this.stopTimeTrackingReminderLoop();
         this.stopParentChildMaintenanceLoop();
         this.stopTwoStageArchiveLoop();
-        this.stopS3BucketArchiveLoop();
         this.syncConflictWatcher.stop();
     }
 
     restartS3agleAttachmentAutomation(): void {
-        this.startS3agleAttachmentAutomation();
+        this.attachmentSyncService?.start();
     }
 
     async runS3agleAttachmentAutomationNow(): Promise<void> {
-        await this.s3agleAttachmentAutomationService.runActiveNoteNow();
+        await this.attachmentSyncService.runNow();
     }
 
-    restartS3BucketArchiveLoop(): void {
-        if (!this.deviceRoleManager?.isController?.()) return;
-        this.startS3BucketArchiveLoop();
-    }
+    /** Compatibility only: orphan cleanup was retired with public-link offloading. */
+    restartS3BucketArchiveLoop(): void {}
 
     async runS3BucketArchiveNow() {
-        return logger.timeAsync("S3BucketArchive", "manual-run", {}, () => this.s3agleAttachmentAutomationService.runBucketArchiveNow());
+        new Notice("S3 bucket archiving is retired. Attachment sync now follows file changes and keeps local copies.");
+        return { archivedCount: 0, skippedCount: 0, lastSkipReason: "retired" };
     }
 
     restartTwoStageArchiveLoop(): void {
@@ -1306,60 +1266,12 @@ export default class TPSControllerPlugin extends Plugin {
         }
     }
 
-    private startS3BucketArchiveLoop(): void {
-        this.stopS3BucketArchiveLoop();
-        if (Platform.isMobile) {
-            logger.flow("S3BucketArchive", "loop:skip-mobile");
-            return;
-        }
-        if (!this.settings.s3agleAttachmentAutomation?.archiveUnreferencedBucketObjects) {
-            logger.flow("S3BucketArchive", "loop:not-enabled");
-            return;
-        }
-        logger.flow("S3BucketArchive", "loop:start", {
-            checkIntervalMs: this.s3agleAttachmentAutomationService.getBucketArchiveCheckIntervalMs(),
-            archivePrefix: this.settings.s3agleAttachmentAutomation.bucketArchivePrefix,
-            orphanDelayMinutes: this.settings.s3agleAttachmentAutomation.bucketArchiveOrphanDelayMinutes,
-        });
-        const tick = () => {
-            void this.s3agleAttachmentAutomationService.runBucketArchiveIfDue().catch((error) => {
-                logger.flowError("S3BucketArchive", "scheduled-run:failed", error);
-            });
-        };
-        tick();
-        this.s3BucketArchiveIntervalId = window.setInterval(tick, this.s3agleAttachmentAutomationService.getBucketArchiveCheckIntervalMs());
-    }
-
-    private stopS3BucketArchiveLoop(): void {
-        if (this.s3BucketArchiveIntervalId !== null) {
-            window.clearInterval(this.s3BucketArchiveIntervalId);
-            this.s3BucketArchiveIntervalId = null;
-            logger.flow("S3BucketArchive", "loop:stopped");
-        }
-    }
-
     private startS3agleAttachmentAutomation(): void {
-        this.s3agleAttachmentAutomationService.start();
+        this.attachmentSyncService.start();
     }
 
     private stopS3agleAttachmentAutomation(): void {
-        this.s3agleAttachmentAutomationService.stop();
-    }
-
-    private async createS3AttachmentAutomationService(): Promise<S3AttachmentAutomationAPI> {
-        if (Platform.isMobile) {
-            logger.flow("S3agleAutomation", "service:mobile-disabled");
-            return new DisabledS3AttachmentAutomationService();
-        }
-        const module = await import("./services/s3agle-attachment-automation-service");
-        return new module.S3agleAttachmentAutomationService(
-            this.app,
-            () => this.settings,
-            () => this.deviceRoleManager?.isController?.() === true,
-            (notePath, sourcePaths) => this.syncRequestService.writeS3agleArchiveRequest(notePath, sourcePaths),
-            () => this.saveSettings(),
-            (name) => this.app.secretStorage.getSecret(name),
-        );
+        this.attachmentSyncService.stop();
     }
 
     private deferCalendarSyncSettlement(reason: string): void {
@@ -1441,10 +1353,10 @@ export default class TPSControllerPlugin extends Plugin {
                 if (request.scope.includes("calendar")) await this.calendarAutomation.runSync();
                 if (request.scope.includes("reminders")) await this.runReminderCheck();
                 if (request.scope.includes("s3agle-archive")) {
-                    const result = await this.s3agleAttachmentAutomationService.fulfillArchiveRequests(request.s3agleArchiveRequests);
-                    if (result.archivedCount > 0 || result.skippedArchiveCount > 0) {
-                        new Notice(`S3agle archive: moved ${result.archivedCount}, skipped ${result.skippedArchiveCount}.`);
-                    }
+                    // Acknowledge old requests without removing local content.
+                    logger.flow("AttachmentSync", "legacy-source-archive:retired", {
+                        requests: request.s3agleArchiveRequests?.length || 0,
+                    });
                 }
             }, () => this.syncRequestService.acknowledgeRequest(request));
             logger.flow("SyncRequest", "fulfill:acknowledged", {

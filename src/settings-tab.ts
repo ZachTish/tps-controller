@@ -1,3 +1,4 @@
+import { renderAttachmentSyncSettings } from "./services/attachment-sync/settings-ui";
 import { App, Notice, PluginSettingTab, SecretComponent, Setting, normalizePath } from 'obsidian';
 import type TPSControllerPlugin from './main';
 import type { PropertyReminder, ExternalCalendarConfig } from './types';
@@ -56,6 +57,7 @@ const createSettingsSection = (
 
 export class TPSControllerSettingTab extends PluginSettingTab {
     plugin: TPSControllerPlugin;
+    private attachmentStatusDispose: (() => void) | null = null;
     private activePage: ControllerSettingsPage = 'overview';
     private activeAutomation: ControllerAutomationPage = 'archive';
     private selectedCalendarId: string | null = null;
@@ -72,7 +74,14 @@ export class TPSControllerSettingTab extends PluginSettingTab {
         this.display();
     }
 
+    hide(): void {
+        this.attachmentStatusDispose?.();
+        this.attachmentStatusDispose = null;
+    }
+
     display(): void {
+        this.attachmentStatusDispose?.();
+        this.attachmentStatusDispose = null;
         const { containerEl } = this;
         containerEl.empty();
 
@@ -137,7 +146,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             'reminders'
         );
         const enabledAutomationCount = Number(this.plugin.settings.twoStageArchive?.enabled === true)
-            + Number(this.plugin.settings.s3agleAttachmentAutomation?.enabled === true);
+            + Number(this.plugin.settings.attachmentSync?.enabled === true);
         this.renderOverviewCard(
             overviewCards,
             'Automations',
@@ -412,332 +421,9 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                 }));
         }
 
-        // ── S3 Attachment Upload Automation ────────────────────────
+        // Attachment sync replaces the former public-link offloader.
         if (this.activeAutomation === 'attachments') {
-        const s3agleSection = createSettingsSection(
-            containerEl,
-            'Upload attachments',
-            'Upload active-note attachments to S3-compatible storage, rewrite links, and optionally archive replaced source files.'
-        );
-
-        new Setting(s3agleSection)
-            .setName('Enable S3 Attachment Upload Automation')
-            .setDesc('When enabled, this device watches the active note and uploads local attachment links directly to S3-compatible storage.')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.s3agleAttachmentAutomation?.enabled === true)
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.enabled = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.restartS3agleAttachmentAutomation();
-                }));
-
-        new Setting(s3agleSection)
-            .setName('Run on Note Open')
-            .setDesc('Checks the active note shortly after it is opened.')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.s3agleAttachmentAutomation.runOnActiveNoteOpen !== false)
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.runOnActiveNoteOpen = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.restartS3agleAttachmentAutomation();
-                }));
-
-        new Setting(s3agleSection)
-            .setName('Run on Active Note Changes')
-            .setDesc('Checks the active note after it is modified and the debounce delay has passed.')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.s3agleAttachmentAutomation.runOnActiveNoteModify !== false)
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.runOnActiveNoteModify = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.restartS3agleAttachmentAutomation();
-                }));
-
-        new Setting(s3agleSection)
-            .setName('Run on Paste')
-            .setDesc('Checks the active note shortly after a paste event so newly pasted attachments can be uploaded.')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.s3agleAttachmentAutomation.runOnPaste !== false)
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.runOnPaste = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.restartS3agleAttachmentAutomation();
-                }));
-
-        new Setting(s3agleSection)
-            .setName('Run After Commands')
-            .setDesc('Comma-separated command IDs that should trigger this after they run, such as a Linter command or another workflow command.')
-            .addTextArea(text => text
-                .setPlaceholder('obsidian-linter:lint-file')
-                .setValue((this.plugin.settings.s3agleAttachmentAutomation.runAfterCommandIds || []).join(', '))
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.runAfterCommandIds = value
-                        .split(',')
-                        .map(id => id.trim())
-                        .filter(Boolean);
-                    await this.plugin.saveSettings();
-                    this.plugin.restartS3agleAttachmentAutomation();
-                }));
-
-        new Setting(s3agleSection)
-            .setName('S3 Endpoint')
-            .setDesc('S3-compatible endpoint URL.')
-            .addText(text => text
-                .setPlaceholder('https://storage.googleapis.com')
-                .setValue(this.plugin.settings.s3agleAttachmentAutomation.endpoint || '')
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.endpoint = value.trim();
-                    await this.plugin.saveSettings();
-                    this.plugin.restartS3agleAttachmentAutomation();
-                }));
-
-        new Setting(s3agleSection)
-            .setName('S3 Bucket')
-            .setDesc('Bucket used for uploaded attachments.')
-            .addText(text => text
-                .setValue(this.plugin.settings.s3agleAttachmentAutomation.bucket || '')
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.bucket = value.trim();
-                    await this.plugin.saveSettings();
-                    this.plugin.restartS3agleAttachmentAutomation();
-                }));
-
-        new Setting(s3agleSection)
-            .setName('S3 Region')
-            .setDesc('Region value passed to the S3-compatible client.')
-            .addText(text => text
-                .setValue(this.plugin.settings.s3agleAttachmentAutomation.region || '')
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.region = value.trim();
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(s3agleSection)
-            .setName('S3 Folder')
-            .setDesc('Optional object key prefix for uploaded attachments.')
-            .addText(text => text
-                .setValue(this.plugin.settings.s3agleAttachmentAutomation.folder || '')
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.folder = value.trim();
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(s3agleSection)
-            .setName('Use Bucket Subdomain URLs')
-            .setDesc('Build links as https://bucket.endpoint/key instead of https://endpoint/bucket/key.')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.s3agleAttachmentAutomation.useBucketSubdomain === true)
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.useBucketSubdomain = value;
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(s3agleSection)
-            .setName('Content URL')
-            .setDesc('Optional public/read endpoint for generated links. Leave blank to use the S3 endpoint.')
-            .addText(text => text
-                .setValue(this.plugin.settings.s3agleAttachmentAutomation.contentUrl || '')
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.contentUrl = value.trim();
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(s3agleSection)
-            .setName('Access Key')
-            .setDesc('Select or create a device-local Obsidian secret containing a scoped S3 access key.')
-            .addComponent(element => new SecretComponent(this.app, element)
-                .setValue(this.plugin.settings.s3agleAttachmentAutomation.accessKeySecretName || '')
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.accessKeySecretName = value.trim();
-                    await this.plugin.saveSettings();
-                    this.plugin.restartS3agleAttachmentAutomation();
-                }));
-
-        new Setting(s3agleSection)
-            .setName('Secret Key')
-            .setDesc('Select or create a separate device-local Obsidian secret containing the S3 secret key.')
-            .addComponent(element => new SecretComponent(this.app, element)
-                .setValue(this.plugin.settings.s3agleAttachmentAutomation.secretKeySecretName || '')
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.secretKeySecretName = value.trim();
-                    await this.plugin.saveSettings();
-                    this.plugin.restartS3agleAttachmentAutomation();
-                }));
-
-        new Setting(s3agleSection)
-            .setName('Archive Uploaded Source Files')
-            .setDesc('After a local attachment link is rewritten to S3, ask the controller device to move the source attachment file into the configured archive folder.')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.s3agleAttachmentAutomation.archiveUploadedSources !== false)
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.archiveUploadedSources = value;
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(s3agleSection)
-            .setName('Make Uploaded Objects Public')
-            .setDesc('Applies a public-read ACL before rewriting notes. Keep this on for Obsidian embeds unless the bucket is public by policy.')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.s3agleAttachmentAutomation.makeUploadedObjectsPublic !== false)
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.makeUploadedObjectsPublic = value;
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(s3agleSection)
-            .setName('Allowed Attachment Extensions')
-            .setDesc('Comma-separated extensions to upload. Leave blank to allow all except ignored extensions.')
-            .addText(text => text
-                .setPlaceholder('png, jpg, jpeg, gif, webp, svg, heic, heif')
-                .setValue((this.plugin.settings.s3agleAttachmentAutomation.allowedAttachmentExtensions || []).join(', '))
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.allowedAttachmentExtensions = value
-                        .split(',')
-                        .map((item) => item.trim().toLowerCase().replace(/^\./, ''))
-                        .filter(Boolean)
-                        .sort();
-                    await this.plugin.saveSettings();
-                    this.plugin.restartS3agleAttachmentAutomation();
-                }));
-
-        new Setting(s3agleSection)
-            .setName('Ignored Attachment Extensions')
-            .setDesc('Comma-separated extensions to never upload. This wins over the allowed list.')
-            .addText(text => text
-                .setPlaceholder('pdf, mov, mp4')
-                .setValue((this.plugin.settings.s3agleAttachmentAutomation.ignoredAttachmentExtensions || []).join(', '))
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.ignoredAttachmentExtensions = value
-                        .split(',')
-                        .map((item) => item.trim().toLowerCase().replace(/^\./, ''))
-                        .filter(Boolean)
-                        .sort();
-                    await this.plugin.saveSettings();
-                    this.plugin.restartS3agleAttachmentAutomation();
-                }));
-
-        new Setting(s3agleSection)
-            .setName('Archive Unreferenced Bucket Objects')
-            .setDesc('On the Controller device, move Controller-uploaded S3 objects into the bucket archive prefix after their generated URL is no longer found in vault notes.')
-            .addToggle(toggle => {
-                toggle.toggleEl.dataset.tpsSettingsFocus = 'bucket-archive-toggle';
-                return toggle
-                    .setValue(this.plugin.settings.s3agleAttachmentAutomation.archiveUnreferencedBucketObjects === true)
-                    .onChange(async (value) => {
-                        this.plugin.settings.s3agleAttachmentAutomation.archiveUnreferencedBucketObjects = value;
-                        await this.plugin.saveSettings();
-                        this.plugin.restartS3BucketArchiveLoop();
-                        this.redisplayPreservingScroll('[data-tps-settings-focus="bucket-archive-toggle"]');
-                    });
-            });
-
-        if (this.plugin.settings.s3agleAttachmentAutomation.archiveUnreferencedBucketObjects === true) {
-        new Setting(s3agleSection)
-            .setName('Bucket Archive Prefix')
-            .setDesc('Object key prefix for unreferenced bucket objects. Supports {YYYY}, {MM}, and {DD}.')
-            .addText(text => text
-                .setPlaceholder('_archive/s3/{YYYY}/{MM}/{DD}')
-                .setValue(this.plugin.settings.s3agleAttachmentAutomation.bucketArchivePrefix || '')
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.bucketArchivePrefix = value.trim();
-                    await this.plugin.saveSettings();
-                    this.plugin.restartS3BucketArchiveLoop();
-                }));
-
-        new Setting(s3agleSection)
-            .setName('Bucket Archive Check Interval (minutes)')
-            .setDesc('How often the Controller checks the manifest for uploaded S3 objects whose URLs are no longer referenced.')
-            .addSlider(slider => slider
-                .setLimits(5, 1440, 5)
-                .setValue(this.plugin.settings.s3agleAttachmentAutomation.bucketArchiveCheckIntervalMinutes)
-                .setDynamicTooltip()
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.bucketArchiveCheckIntervalMinutes = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.restartS3BucketArchiveLoop();
-                }));
-
-        new Setting(s3agleSection)
-            .setName('Bucket Archive Delay (minutes)')
-            .setDesc('Minimum time after an uploaded URL was last seen before the Controller moves the object into the bucket archive prefix.')
-            .addSlider(slider => slider
-                .setLimits(5, 1440, 5)
-                .setValue(this.plugin.settings.s3agleAttachmentAutomation.bucketArchiveOrphanDelayMinutes)
-                .setDynamicTooltip()
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.bucketArchiveOrphanDelayMinutes = value;
-                    await this.plugin.saveSettings();
-                }));
-        }
-
-        new Setting(s3agleSection)
-            .setName('Debounce (seconds)')
-            .setDesc('How long to wait after opening or editing a note before uploading attachments.')
-            .addSlider(slider => slider
-                .setLimits(1, 60, 1)
-                .setValue(this.plugin.settings.s3agleAttachmentAutomation.debounceSeconds)
-                .setDynamicTooltip()
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.debounceSeconds = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.restartS3agleAttachmentAutomation();
-                }));
-
-        new Setting(s3agleSection)
-            .setName('Cooldown (minutes)')
-            .setDesc('Minimum time before the same note is processed again.')
-            .addSlider(slider => slider
-                .setLimits(1, 60, 1)
-                .setValue(this.plugin.settings.s3agleAttachmentAutomation.cooldownMinutes)
-                .setDynamicTooltip()
-                .onChange(async (value) => {
-                    this.plugin.settings.s3agleAttachmentAutomation.cooldownMinutes = value;
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(s3agleSection)
-            .setName('Run S3 Upload Now')
-            .setDesc('Uploads local attachments for the current active note.')
-            .addButton(btn => btn
-                .setButtonText('Run Now')
-                .onClick(async () => {
-                    btn.setDisabled(true);
-                    btn.setButtonText('Running...');
-                    try {
-                        await this.plugin.runS3agleAttachmentAutomationNow();
-                    } catch (error) {
-                        new Notice(`S3 attachment upload failed: ${(error as Error).message}`);
-                    }
-                    btn.setButtonText('Run Now');
-                    btn.setDisabled(false);
-                }));
-
-        new Setting(s3agleSection)
-            .setName('Run S3 Bucket Archive Now')
-            .setDesc('Controller-only: moves unreferenced Controller-uploaded S3 objects into the bucket archive prefix.')
-            .addButton(btn => btn
-                .setButtonText('Run Now')
-                .onClick(async () => {
-                    if (!this.plugin.deviceRoleManager.isController()) {
-                        new Notice('S3 bucket archive runs on the Controller device.');
-                        return;
-                    }
-                    btn.setDisabled(true);
-                    btn.setButtonText('Running...');
-                    try {
-                        const result = await this.plugin.runS3BucketArchiveNow();
-                        const suffix = result.lastError
-                            ? ` Last error: ${result.lastError}`
-                            : result.lastSkipReason
-                                ? ` Last skip: ${result.lastSkipReason}`
-                                : "";
-                        new Notice(`S3 bucket archive: moved ${result.archivedCount}, skipped ${result.skippedCount}.${suffix}`);
-                    } catch (error) {
-                        new Notice(`S3 bucket archive failed: ${(error as Error).message}`);
-                    }
-                    btn.setButtonText('Run Now');
-                    btn.setDisabled(false);
-                }));
+            this.attachmentStatusDispose = renderAttachmentSyncSettings(containerEl, this.plugin);
         }
         }
 
@@ -979,7 +665,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
         const destinations: Array<{ id: ControllerAutomationPage; label: string }> = [
             { id: 'archive', label: 'Archive files' },
-            { id: 'attachments', label: 'Upload attachments' },
+            { id: 'attachments', label: 'Sync attachments' },
         ];
 
         for (const destination of destinations) {

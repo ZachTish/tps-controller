@@ -673,3 +673,53 @@ body.tps-controller-mode {
   line-height: 1.35;
 }
 
+/* Attachment sync owns this namespace; no other plugin's settings are affected. */
+.tps-controller-attachment-sync-status {
+    padding: 0.75em;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-m);
+    margin-bottom: 0.75em;
+    overflow-wrap: anywhere;
+}
+.tps-controller-attachment-sync-settings button {
+    height: auto;
+    min-height: 32px;
+    white-space: normal;
+}
+.tps-controller-attachment-sync-settings button:focus-visible,
+.tps-controller-attachment-sync-settings summary:focus-visible {
+    outline: 2px solid var(--interactive-accent);
+    outline-offset: 2px;
+}
+.tps-controller-attachment-sync-settings .setting-item-control {
+    flex-wrap: wrap;
+    gap: 0.5em;
+}
+.tps-controller-attachment-sync-migration,
+.tps-controller-attachment-sync-warnings {
+    overflow-wrap: anywhere;
+}
+.tps-controller-attachment-sync-key {
+    width: 100%;
+    min-height: 6em;
+    resize: vertical;
+}
+@media (max-width: 600px) {
+    .tps-controller-attachment-sync-settings .setting-item {
+        align-items: stretch;
+        flex-direction: column;
+        gap: 0.65em;
+    }
+    .tps-controller-attachment-sync-settings .setting-item-control {
+        justify-content: flex-start;
+        width: 100%;
+    }
+    .tps-controller-attachment-sync-settings input,
+    .tps-controller-attachment-sync-settings textarea {
+        width: 100%;
+        min-width: 0;
+    }
+    .tps-controller-attachment-sync-settings button {
+        min-height: 40px;
+    }
+}
