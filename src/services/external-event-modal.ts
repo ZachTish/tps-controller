@@ -1,3 +1,4 @@
+import { setIntegrationNoteField } from '../tps-gcm-api';
 import { App, Modal, TFile, normalizePath, Notice, moment } from "obsidian";
 import { ExternalCalendarEvent } from "../types";
 import * as logger from "../logger";
@@ -250,22 +251,18 @@ export async function createMeetingNoteFromExternalEvent(
   // intentionally collapsed to tpsId + externalId; legacy keys are read only
   // for compatibility and removed when this path touches a note.
   const titleKey = frontmatterKeys?.titleKey || "title";
-  const statusKey = frontmatterKeys?.statusKey || "status";
 
   const frontmatter: Record<string, any> = {};
   ensureInternalIdInFrontmatter(app, frontmatter);
   frontmatter[titleKey] = event.title;
-  frontmatter.externalId = externalId;
+  setIntegrationNoteField(app, frontmatter, 'externalId', externalId);
   if (event.isAllDay) {
     frontmatter["allDay"] = true;
   }
   if (event.url) {
-    frontmatter.url = event.url.trim().replace(/\/+$/, "");
+    setIntegrationNoteField(app, frontmatter, 'url', event.url.trim().replace(/\/+$/, ""));
   }
 
-  if (event.endDate.getTime() < Date.now()) {
-    frontmatter[statusKey] = "complete";
-  }
 
   if (startProperty) {
     frontmatter[startProperty] = formatDateTimeForFrontmatter(event.startDate);

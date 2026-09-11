@@ -116,6 +116,8 @@ function loadAutoCreateService() {
         emitFilesUpdated() {},
         ensureDailyNoteForIsoDateViaGcm: (...args) => gcmAttemptHandler(...args),
         ensureInternalIdInFrontmatter: () => "",
+        getIntegrationNoteField: (_app, fm, field) => { const key = Object.keys(fm || {}).find(key => key.toLowerCase() === field.toLowerCase()); return key ? fm[key] : undefined; },
+        setIntegrationNoteField: (_app, fm, field, value) => { if(value == null) delete fm[field]; else fm[field] = value; },
         getExternalId: () => "",
         prepareInstanceSourceViaGcm: (...args) => prepareInstanceSourceHandler(...args),
       };

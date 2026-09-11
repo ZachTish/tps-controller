@@ -198,6 +198,8 @@ export interface GcmApi {
     };
   };
   identity?: {
+    getNoteField?: (frontmatter: Record<string, unknown> | null | undefined, field: 'externalId' | 'location' | 'url' | 'tpsCalendarOrphanCandidateAt' | 'tpsCalendarCancelledAt') => unknown;
+    setNoteField?: (frontmatter: Record<string, unknown>, field: 'externalId' | 'location' | 'url' | 'tpsCalendarOrphanCandidateAt' | 'tpsCalendarCancelledAt', value: unknown) => void;
     buildCalendarExternalId?: (event: ExternalCalendarEvent) => string;
     ensureInternalIdInFrontmatter?: (frontmatter: Record<string, unknown>) => string;
     getExternalId?: (frontmatter: Record<string, unknown> | null | undefined) => string | null;
@@ -390,4 +392,18 @@ export function getExternalId(app: App | null | undefined, frontmatter: Record<s
   const key = Object.keys(frontmatter).find((candidate) => candidate.trim().toLowerCase() === 'externalid');
   const value = key ? String(frontmatter[key] ?? '').trim() : '';
   return value || null;
+}
+
+/** GCM owns persisted integration field names; inline task tokens stay canonical. */
+export function getIntegrationNoteField(app: App, frontmatter: Record<string, unknown>, field: 'externalId' | 'location' | 'url' | 'tpsCalendarOrphanCandidateAt' | 'tpsCalendarCancelledAt'): unknown {
+  const identity = getGcmApi(app)?.identity;
+  if (typeof identity?.getNoteField === 'function') return identity.getNoteField(frontmatter, field);
+  const key = Object.keys(frontmatter).find(candidate => candidate.toLowerCase() === field.toLowerCase());
+  return key ? frontmatter[key] : undefined;
+}
+export function setIntegrationNoteField(app: App, frontmatter: Record<string, unknown>, field: 'externalId' | 'location' | 'url' | 'tpsCalendarOrphanCandidateAt' | 'tpsCalendarCancelledAt', value: unknown): void {
+  const identity = getGcmApi(app)?.identity;
+  if (typeof identity?.setNoteField === 'function') { identity.setNoteField(frontmatter, field, value); return; }
+  const key = Object.keys(frontmatter).find(candidate => candidate.toLowerCase() === field.toLowerCase()) || field;
+  if (value == null) delete frontmatter[key]; else frontmatter[key] = value;
 }

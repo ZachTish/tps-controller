@@ -1,3 +1,4 @@
+import { getIntegrationNoteField, setIntegrationNoteField } from '../tps-gcm-api';
 import { App, Notice, TFile, normalizePath } from "obsidian";
 import * as logger from "../logger";
 import { ExternalCalendarEvent } from "../types";
@@ -473,7 +474,7 @@ export class AutoCreateService {
             const externalId = getExternalId(this.app, fm);
             const uidRaw = this.normalizeIdentityValue(this.findKeyInsensitive(fm, this.config.uidKey));
             const uid = uidRaw || (eventId ? this.extractUid(eventId) || eventId : "");
-            const eventUrl = this.normalizeEventUrl(this.findKeyInsensitive(fm, "url"));
+            const eventUrl = this.normalizeEventUrl(getIntegrationNoteField(this.app, fm, 'url'));
             if (!externalId && !uid && !eventId && !eventUrl) continue;
 
             const storedStartRaw = this.findKeyInsensitive(fm, this.config.startProperty) ?? this.findKeyInsensitive(fm, "scheduled");
@@ -494,7 +495,7 @@ export class AutoCreateService {
                 storedStart,
                 storedEnd,
                 storedTitle: String(this.findKeyInsensitive(fm, this.config.titleKey) ?? "").trim(),
-                storedLocation: String(this.findKeyInsensitive(fm, "location") ?? "").trim(),
+                storedLocation: String(getIntegrationNoteField(this.app, fm, 'location') ?? "").trim(),
                 storedAllDay: this.normalizeBooleanValue(this.findKeyInsensitive(fm, "allDay")),
                 startDate,
                 sourceUrl,
@@ -717,13 +718,13 @@ export class AutoCreateService {
                 const expectedExternalId = buildCalendarExternalId(this.app, event);
                 if (expectedExternalId && getExternalId(this.app, fm) !== expectedExternalId) {
                     ensureInternalIdInFrontmatter(this.app, fm);
-                    fm.externalId = expectedExternalId;
+                    setIntegrationNoteField(this.app, fm, 'externalId', expectedExternalId);
                     this.deleteLegacyCalendarIdentityFields(fm);
                     didUpdate = true;
                 }
                 if (vaultMatch.repairedEventId) {
                     ensureInternalIdInFrontmatter(this.app, fm);
-                    fm.externalId = expectedExternalId;
+                    setIntegrationNoteField(this.app, fm, 'externalId', expectedExternalId);
                     this.deleteLegacyCalendarIdentityFields(fm);
                     didUpdate = true;
                 }
@@ -732,17 +733,17 @@ export class AutoCreateService {
                     didUpdate = true;
                 }
                 if (locationMissing) {
-                    fm.location = event.location;
+                    setIntegrationNoteField(this.app, fm, 'location', event.location);
                     didUpdate = true;
                 }
                 if (sourceChanged && normalizedSourceUrl) {
                     ensureInternalIdInFrontmatter(this.app, fm);
-                    fm.externalId = expectedExternalId;
+                    setIntegrationNoteField(this.app, fm, 'externalId', expectedExternalId);
                     this.deleteLegacyCalendarIdentityFields(fm);
                     didUpdate = true;
                 }
                 if (urlChanged && normalizedEventUrl) {
-                    fm.url = normalizedEventUrl;
+                    setIntegrationNoteField(this.app, fm, 'url', normalizedEventUrl);
                     didUpdate = true;
                 }
                 if (allDayChanged) {
@@ -1310,9 +1311,10 @@ export class AutoCreateService {
 
     private async cleanTaskTargetFrontmatter(file: TFile): Promise<void> {
         await this.processFrontmatterSafely(file, "clean-task-target", (fm) => {
-            if (typeof fm.title !== "string" || !fm.title.trim()) {
-                fm.title = file.basename.replace(/^\d{4}-\d{2}-\d{2}\s+/, "").trim() || file.basename;
+            if (!String(this.findKeyInsensitive(fm, this.config.titleKey) || '').trim()) {
+                fm[this.config.titleKey] = file.basename.replace(/^\d{4}-\d{2}-\d{2}\s+/, "").trim() || file.basename;
             }
+            for (const field of ['externalId', 'location', 'url'] as const) setIntegrationNoteField(this.app, fm, field, null);
             for (const key of [
                 this.config.startProperty,
                 this.config.endProperty,
@@ -2106,7 +2108,7 @@ export class AutoCreateService {
                 didUpdate = true;
             }
             if (!this.normalizeIdentityValue(this.findKeyInsensitive(fm, this.config.cancelledAtKey))) {
-                fm[this.config.cancelledAtKey] = cancelledAt;
+                setIntegrationNoteField(this.app, fm, 'tpsCalendarCancelledAt', cancelledAt);
                 didUpdate = true;
             }
             didUpdate = this.deleteFrontmatterKeyIfPresent(fm, this.config.orphanCandidateAtKey) || didUpdate;
@@ -2116,20 +2118,12 @@ export class AutoCreateService {
         return didUpdate;
     }
 
-    private async markOrphanCandidate(note: VaultNote, missCount: number): Promise<boolean> {
+    private async markOrphanCandidate(note: VaultNote, _missCount: number): Promise<boolean> {
         const now = new Date().toISOString();
         let didUpdate = false;
         await this.processFrontmatterSafely(note.file, "mark-orphan-candidate", (fm) => {
             if (!this.normalizeIdentityValue(this.findKeyInsensitive(fm, this.config.orphanCandidateAtKey))) {
-                fm[this.config.orphanCandidateAtKey] = now;
-                didUpdate = true;
-            }
-            if (Number(this.findKeyInsensitive(fm, this.config.orphanMissCountKey)) !== missCount) {
-                fm[this.config.orphanMissCountKey] = missCount;
-                didUpdate = true;
-            }
-            if (this.normalizeIdentityValue(this.findKeyInsensitive(fm, this.config.orphanReasonKey)) !== "missing-from-source") {
-                fm[this.config.orphanReasonKey] = "missing-from-source";
+                setIntegrationNoteField(this.app, fm, 'tpsCalendarOrphanCandidateAt', now);
                 didUpdate = true;
             }
         });
@@ -2255,12 +2249,19 @@ export class AutoCreateService {
     }
 
     private findKeyInsensitive(obj: Record<string, any>, key: string): any {
+        if (key === this.config.orphanCandidateAtKey) return getIntegrationNoteField(this.app, obj, 'tpsCalendarOrphanCandidateAt');
+        if (key === this.config.cancelledAtKey) return getIntegrationNoteField(this.app, obj, 'tpsCalendarCancelledAt');
         const normalized = String(key || "").trim().toLowerCase();
         const found = Object.keys(obj).find((candidate) => candidate.trim().toLowerCase() === normalized);
         return found ? obj[found] : undefined;
     }
 
     private deleteFrontmatterKeyIfPresent(obj: Record<string, any>, key: string): boolean {
+        if (key === this.config.orphanCandidateAtKey || key === this.config.cancelledAtKey) {
+            const before = Object.keys(obj).length;
+            setIntegrationNoteField(this.app, obj, key === this.config.orphanCandidateAtKey ? 'tpsCalendarOrphanCandidateAt' : 'tpsCalendarCancelledAt', null);
+            return Object.keys(obj).length !== before;
+        }
         const normalized = String(key || "").trim().toLowerCase();
         const found = Object.keys(obj).find((candidate) => candidate.trim().toLowerCase() === normalized);
         if (!found) return false;

@@ -1071,7 +1071,9 @@ export class OverdueService {
             ? (window as any).moment().format('YYYY-MM-DD HH:mm:ss')
             : new Date().toISOString().replace('T', ' ').slice(0, 19);
         await this.app.fileManager.processFrontMatter(file, (fm) => {
-            fm.status = 'complete';
+            const statusKey = this.getSettings().statusKey || 'status';
+            const existing = Object.keys(fm).find(key => key.toLowerCase() === statusKey.toLowerCase());
+            fm[existing || statusKey] = 'complete';
             fm.completedDate = now;
         });
         this.triggerFilesUpdated([file.path]);
@@ -1084,7 +1086,9 @@ export class OverdueService {
             ? (window as any).moment().format('YYYY-MM-DD HH:mm:ss')
             : new Date().toISOString().replace('T', ' ').slice(0, 19);
         await this.app.fileManager.processFrontMatter(file, (fm) => {
-            fm.status = 'wont-do';
+            const statusKey = this.getSettings().statusKey || 'status';
+            const existing = Object.keys(fm).find(key => key.toLowerCase() === statusKey.toLowerCase());
+            fm[existing || statusKey] = 'wont-do';
             fm.completedDate = now;
         });
         this.triggerFilesUpdated([file.path]);

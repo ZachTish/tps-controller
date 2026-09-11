@@ -57,7 +57,7 @@ test('external reminder synthetic frontmatter uses externalId instead of legacy 
 test('Controller external event note creation writes tpsId and externalId instead of legacy identity triplet', () => {
   assert.match(createSource, /ensureInternalIdInFrontmatter\(app, frontmatter\)/);
   assert.match(createSource, /const externalId = buildCalendarExternalId\(app, event\)/);
-  assert.match(createSource, /frontmatter\.externalId = externalId/);
+  assert.match(createSource, /setIntegrationNoteField\(app, frontmatter, 'externalId', externalId\)/);
   assert.match(createSource, /if \(event\.isAllDay\) \{\s*frontmatter\["allDay"\] = true;/);
   assert.doesNotMatch(createSource, /frontmatter\["allDay"\] = !!event\.isAllDay/);
   assert.doesNotMatch(createSource, /setFrontmatterValueCaseInsensitive\(fm, "folderPath"/);
@@ -68,7 +68,7 @@ test('Controller external event note creation writes tpsId and externalId instea
 
 test('Controller auto-create repair writes externalId and removes legacy identity fields', () => {
   assert.match(autoCreateSource, /const externalId = getExternalId\(this\.app, fm\)/);
-  assert.match(autoCreateSource, /fm\.externalId = expectedExternalId/);
+  assert.match(autoCreateSource, /setIntegrationNoteField\(this\.app, fm, 'externalId', expectedExternalId\)/);
   assert.match(autoCreateSource, /deleteLegacyCalendarIdentityFields/);
   assert.match(autoCreateSource, /this\.deleteFrontmatterKeyIfPresent\(obj, "externalEventId"\)/);
   assert.match(autoCreateSource, /this\.deleteFrontmatterKeyIfPresent\(obj, "tpsCalendarUid"\)/);
@@ -710,4 +710,19 @@ test('Controller uses atomic, task-scoped writes for upsert and cancellation', (
 
   assert.match(autoCreateSource, /Inline events share a note with unrelated content/u);
   assert.match(autoCreateSource, /if \(!metadataPatch\.patched\) \{[\s\S]*return line;/u);
+});
+
+test('integration field reads and writes use the GCM configured-name contract', () => {
+ const frontmatter = { mirror: 'old', title: 'Keep' };
+ const app = { plugins: { plugins: { 'tps-global-context-menu': { api: { identity: {
+  getNoteField: (fm, field) => { assert.equal(field, 'externalId'); return fm.mirror; },
+  setNoteField: (fm, field, value) => { assert.equal(field, 'externalId'); if(value == null) delete fm.mirror; else fm.mirror=value; }
+ } } } } } };
+ assert.equal(gcmApi.getIntegrationNoteField(app,frontmatter,'externalId'),'old');
+ gcmApi.setIntegrationNoteField(app,frontmatter,'externalId','new');assert.deepEqual(frontmatter,{mirror:'new',title:'Keep'});
+ gcmApi.setIntegrationNoteField(app,frontmatter,'externalId',null);assert.deepEqual(frontmatter,{title:'Keep'});
+});
+test('new external notes and quarantine updates avoid redundant hardcoded writes', () => {
+ assert.doesNotMatch(createSource,/frontmatter\[statusKey\] = "complete"/);
+ assert.doesNotMatch(autoCreateSource,/fm\[this\.config\.orphanMissCountKey\] =|fm\[this\.config\.orphanReasonKey\] =/);
 });

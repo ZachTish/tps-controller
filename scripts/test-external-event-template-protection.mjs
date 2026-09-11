@@ -70,6 +70,7 @@ function loadModule(options = {}) {
     }
     if (specifier === "../tps-gcm-api") {
       return {
+        setIntegrationNoteField: (_app, fm, field, value) => { fm[field] = value; },
         buildCalendarExternalId: () => "calendar:protected-test",
         canAutomaticallyMutateSourceViaGcm: (_app, source) => (
           typeof options.canAutomaticallyMutateSource === "function"
@@ -82,7 +83,8 @@ function loadModule(options = {}) {
             : true
         ),
         ensureInternalIdInFrontmatter: () => "test-id",
-        getExternalId: () => null,
+        getIntegrationNoteField: (_app, fm, field) => { const key = Object.keys(fm || {}).find(key => key.toLowerCase() === field.toLowerCase()); return key ? fm[key] : undefined; },
+                getExternalId: () => null,
         prepareInstanceSourceViaGcm: (_app, source) => (
           typeof options.prepareInstanceSource === "function"
             ? options.prepareInstanceSource(source)

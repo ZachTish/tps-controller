@@ -99,6 +99,8 @@ function loadAutoCreateService(stats) {
                 emitFilesUpdated: noop,
                 ensureDailyNoteForIsoDateViaGcm: async () => ({ available: false, file: null }),
                 ensureInternalIdInFrontmatter: asyncNoop,
+                getIntegrationNoteField: (_app, fm, field) => { const key = Object.keys(fm || {}).find(key => key.toLowerCase() === field.toLowerCase()); return key ? fm[key] : undefined; },
+                setIntegrationNoteField: (_app, fm, field, value) => { if(value == null) delete fm[field]; else fm[field] = value; },
                 getExternalId: (_app, frontmatter) => {
                     const value = readCaseInsensitive(frontmatter, "externalId");
                     return typeof value === "string" && value.trim() ? value.trim() : null;

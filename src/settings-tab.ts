@@ -516,8 +516,14 @@ export class TPSControllerSettingTab extends PluginSettingTab {
         const fmContent = createSettingsSection(
             containerEl,
             'Calendar field names',
-            'Controller-owned calendar sync fields. Shared identity is managed by TPS Global Context Menu as tpsId and externalId.'
+            'Controller-owned calendar sync fields. External identity, imported location/URL, and detection/cancellation date keys are configured in GCM → Advanced → Integration property names. tpsId remains fixed.'
         );
+
+        new Setting(fmContent).setName('Shared integration property names').addButton(button => button
+            .setButtonText('Open GCM settings').onClick(() => {
+                const manager = (this.app as App & { setting?: { open?: () => void; openTabById?: (id: string) => void } }).setting;
+                manager?.open?.(); manager?.openTabById?.('tps-global-context-menu');
+            }));
 
         const fmKeys: { key: keyof typeof this.plugin.settings; label: string; placeholder: string }[] = [
             { key: 'titleKey', label: 'Title Key', placeholder: 'title' },
