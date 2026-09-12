@@ -89,10 +89,6 @@ export class TPSControllerSettingTab extends PluginSettingTab {
         containerEl.empty();
 
         containerEl.createEl('h2', { text: 'TPS Controller Settings' });
-        containerEl.createEl('p', {
-            text: 'This is the suite-level owner for background automation, calendar sync, reminders, and shared calendar field mappings. Other TPS plugins should stay focused on UI and local interaction.',
-            cls: 'setting-item-description'
-        });
         this.renderSettingsDestinationHub(containerEl);
 
         if (this.activePage === 'overview') {
@@ -571,7 +567,6 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
         new Setting(debugSection)
             .setName('Enable Logging')
-            .setDesc('Print detailed logs to console.')
             .addToggle(toggle => toggle
                 .setValue(this.plugin.settings.enableLogging)
                 .onChange(async (value) => {
@@ -608,7 +603,6 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             button.setAttr('type', 'button');
             button.setAttr('aria-pressed', String(this.activePage === destination.id));
             button.createSpan({ cls: 'tps-settings-destination-label', text: destination.label });
-            button.createSpan({ cls: 'tps-settings-destination-description', text: destination.description });
             button.addEventListener('click', () => {
                 if (this.activePage === destination.id) return;
                 this.navigateToPage(destination.id);
@@ -620,7 +614,6 @@ export class TPSControllerSettingTab extends PluginSettingTab {
         const heading = container.createDiv({ cls: 'tps-settings-page-heading' });
         const titleEl = heading.createEl('h2', { text: title });
         titleEl.setAttr('tabindex', '-1');
-        heading.createEl('p', { text: description, cls: 'setting-item-description' });
     }
 
     private renderOverviewCard(
