@@ -36,8 +36,13 @@ export async function buildReminderTargetsForFile(
     app: unknown,
     file: TFile,
     frontmatter: Record<string, unknown>,
-    _settings: TPSControllerSettings,
+    settings: TPSControllerSettings,
 ): Promise<ReminderEvaluationTarget[]> {
+    const gcm = (app as any)?.plugins?.getPlugin?.('tps-global-context-menu')
+        || (app as any)?.plugins?.plugins?.['tps-global-context-menu'];
+    const inlineMode = settings.inlineTaskReminders === "gcm"
+        ? (gcm?.settings?.dataArchitectureMode === "legacy" ? "scheduled" : "none")
+        : settings.inlineTaskReminders;
     const noteTitle = buildNoteDisplayName(file, frontmatter);
     const noteTarget: ReminderEvaluationTarget = {
         sourceKey: file.path,
@@ -88,7 +93,12 @@ export async function buildReminderTargetsForFile(
             migratedTaskIndent = indent;
             continue;
         }
-        const noteStatus = getFrontmatterValueCaseInsensitive(frontmatter, "status");
+        if (inlineMode === "none") continue;
+        if (inlineMode === "scheduled") {
+            const ownSchedule = getFrontmatterValueCaseInsensitive(parsed.properties, settings.startProperty || "scheduled");
+            if (ownSchedule == null || String(ownSchedule).trim() === "") continue;
+        }
+        const noteStatus = getFrontmatterValueCaseInsensitive(frontmatter, settings.statusKey || "status");
         targets.push({
             sourceKey: `${file.path}::task:${index}`,
             sourceType: "file",

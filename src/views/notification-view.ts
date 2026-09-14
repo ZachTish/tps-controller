@@ -10,7 +10,7 @@ export const NOTIFICATION_VIEW_TYPE = 'tps-notification-view';
 
 // Minimal interface so the view stays decoupled from the full plugin class.
 export interface TPSControllerRemindersAPI {
-    settings: { snoozeOptions?: { label: string; minutes: number }[] };
+    settings: { statusKey?: string; snoozeOptions?: { label: string; minutes: number }[] };
     getOverdueItems(): Promise<OverdueItem[]>;
     snoozeFile(file: TFile, minutes: number): Promise<void>;
     snoozeOverdueItem?(item: OverdueItem, minutes: number): Promise<void>;
@@ -362,18 +362,15 @@ export class NotificationView extends ItemView {
             }
 
             // Right Actions
-            const actions = row.createDiv({ cls: 'tps-notification-actions' });
+            const actions = content.createDiv({ cls: 'tps-notification-actions' });
             actions.style.display = 'flex';
             actions.style.alignItems = 'center';
             actions.style.gap = '4px';
-            actions.style.position = 'absolute';
-            actions.style.right = '12px';
-            actions.style.top = '50%';
-            actions.style.transform = 'translateY(-50%)';
-            actions.style.zIndex = '2';
+            actions.style.flexWrap = 'wrap';
+            actions.style.marginTop = '4px';
 
             const createIconBtn = (icon: string, label: string, onClick: (e: MouseEvent) => void) => {
-                const btn = actions.createDiv({ cls: 'tps-icon-btn' });
+                const btn = actions.createEl('button', { cls: 'tps-icon-btn clickable-icon' });
                 setIcon(btn, icon);
                 btn.setAttribute('aria-label', label);
                 btn.setAttribute('title', label);
@@ -427,17 +424,19 @@ export class NotificationView extends ItemView {
                         void runResolve();
                     }).open();
                 });
-            } else {
-                // Clickable status pill — always visible for non-task reminders.
+            }
+            {
+                // Use the configured status selector for both note and inline task targets.
                 const gcmApi = this.getGcmApi();
                 const gcmServices = this.getGcmServices();
                 const statusOptions: string[] = gcmServices?.status?.getStatusOptions?.()
                     ?? gcmApi?.settings?.properties
-                    ?.find((p: any) => p.key === 'status')?.options
-                    ?? ['open', 'working', 'blocked', 'wont-do', 'complete'];
+                    ?.find((p: any) => p.key === (this.plugin.settings.statusKey || 'status'))?.options
+                    ?? [];
 
                 const currentStatus = item.status || '';
-                const statusPill = actions.createDiv({ cls: 'tps-status-pill', text: currentStatus || '—' });
+                const statusPill = actions.createEl('button', { cls: 'tps-status-pill', text: currentStatus || 'Set status' });
+                statusPill.setAttribute('aria-label', 'Change reminder status');
                 statusPill.style.cursor = 'pointer';
                 statusPill.style.padding = '2px 8px';
                 statusPill.style.borderRadius = '10px';
@@ -445,7 +444,9 @@ export class NotificationView extends ItemView {
                 statusPill.style.background = 'var(--background-secondary)';
                 statusPill.style.color = currentStatus ? 'var(--text-normal)' : 'var(--text-faint)';
                 statusPill.style.border = '1px solid var(--background-modifier-border)';
-                statusPill.style.whiteSpace = 'nowrap';
+                statusPill.style.whiteSpace = 'normal';
+                statusPill.style.height = 'auto';
+                statusPill.style.maxWidth = '100%';
                 statusPill.addEventListener('mouseenter', () => {
                     statusPill.style.background = 'var(--background-modifier-hover)';
                 });
@@ -535,7 +536,8 @@ export class NotificationView extends ItemView {
                             void applyStatus(opt);
                         }));
                     });
-                    menu.showAtMouseEvent(e);
+                    const bounds = statusPill.getBoundingClientRect();
+                    menu.showAtPosition({ x: bounds.left, y: bounds.bottom });
                 });
             }
 
@@ -547,39 +549,7 @@ export class NotificationView extends ItemView {
                 }, this.plugin.settings.snoozeOptions || []).open();
             });
 
-            createIconBtn('check', 'Complete', (_e) => {
-                this.removeItemOptimistically(item);
-                void (async () => {
-                    try {
-                        if (this.plugin.markOverdueItemComplete) await this.plugin.markOverdueItemComplete(item);
-                        else await this.plugin.markFileComplete(item.file);
-                        this.refreshDebounced();
-                    } catch (error) {
-                        logger.flowError('NotificationView', 'complete-overdue-item-failed', error, {
-                            path: item.file?.path || '',
-                            sourceType: item.sourceType || '',
-                        });
-                        this.refreshDebounced();
-                    }
-                })();
-            });
 
-            createIconBtn('minus', 'Wont do', (_e) => {
-                this.removeItemOptimistically(item);
-                void (async () => {
-                    try {
-                        if (this.plugin.markOverdueItemWontDo) await this.plugin.markOverdueItemWontDo(item);
-                        else await this.plugin.markFileWontDo(item.file);
-                        this.refreshDebounced();
-                    } catch (error) {
-                        logger.flowError('NotificationView', 'wont-do-overdue-item-failed', error, {
-                            path: item.file?.path || '',
-                            sourceType: item.sourceType || '',
-                        });
-                        this.refreshDebounced();
-                    }
-                })();
-            });
         }
     }
 

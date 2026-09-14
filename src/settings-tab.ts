@@ -764,6 +764,21 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     });
             });
 
+        new Setting(rulesSection)
+            .setName('Inline task reminders')
+            .setDesc('Follow GCM uses full notes in atomic-note mode, otherwise explicitly scheduled tasks. A date on the containing note does not count.')
+            .addDropdown(dropdown => dropdown
+                .addOption('gcm', 'Follow GCM architecture')
+                .addOption('none', 'Full notes only')
+                .addOption('scheduled', 'Notes and explicitly scheduled tasks')
+                .addOption('all', 'Notes and all inline tasks')
+                .setValue(this.plugin.settings.inlineTaskReminders || 'gcm')
+                .onChange(async value => {
+                    this.plugin.settings.inlineTaskReminders = value as 'gcm' | 'none' | 'scheduled' | 'all';
+                    await this.plugin.saveSettings();
+                    this.plugin.refreshReminderPolicy();
+                }));
+
         let rulesContainer: HTMLElement | null = null;
         let presetSummary: HTMLElement | null = null;
         if (!(this.plugin.settings.enableReminders ?? true)) {

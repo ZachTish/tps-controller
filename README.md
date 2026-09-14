@@ -1,3 +1,13 @@
+## 1.2.0 reminder target integrity
+
+- Reminders → Rules now includes Inline task reminders. The default follows GCM: atomic-note mode (or unavailable GCM) evaluates notes only; legacy mode requires an inline task’s own configured scheduling property. Explicit notes-only, scheduled-task, and all-task choices remain editable while reminders are off. Existing rules and external-event reminders remain intact.
+- Sidebar actions wrap beneath the title rather than overlaying it on narrow panes. Menus anchor to their status button for keyboard activation.
+- Overdue rows use a keyboard-accessible status button with the available GCM statuses for both notes and inline tasks; fixed Complete/Wont do shortcuts are removed. Snooze and task move/clear actions remain.
+- Inline targets retain the containing note’s configured status field instead of assuming status. The eligibility gate is shared by reminder delivery and overdue enumeration.
+- This deliberately narrows inline eligibility on upgrade. Choose Notes and all inline tasks to retain inherited scheduling behavior. No note properties are migrated.
+- Focused tests cover custom scheduling/status keys, missing and empty own schedules, all three explicit scopes, and GCM startup/architecture states.
+- Validation: full suite passed (457 passing tests, three pre-existing skipped notification comparison tests), TypeScript and separate production build passed. Obsidian 1.14.1 test-vault reload verified Controller 1.2.0 with GCM 2.2.6. UI inspection covered the existing settings hub, all four scope choices, and narrow sidebar controls. Actual overdue enumeration verified each scope; a Controller status mutation preserved the synthetic note body. Test settings remained unchanged and the fixture was archived. Native menu selection could not be independently exercised through macOS UI automation; the mutation route was exercised via Controller’s API. Minimum Obsidian remains 1.12.3; no production installation.
+
 ## 1.1.1 — cleaner settings copy
 
 Removed generic settings introductions and repeated navigation/page descriptions. Existing destinations, default route, optional disclosures, control labels/options, commands/actions, conditional visibility, focus behavior, and narrow-screen layout remain unchanged. Useful guidance about consequences, ownership, credentials, and non-obvious inputs stays beside its setting; dynamic status/counts remain. This presentation patch changes no settings schema, defaults, note data, provider behavior, or automation.

@@ -1716,7 +1716,7 @@ test('ignore-path edits invalidate every reminder run and refresh open notificat
   assert.match(mainSource, /runGeneration: number = this\.reminderRunGeneration/);
   assert.match(mainSource, /if \(runGeneration !== this\.reminderRunGeneration\) \{/);
   assert.doesNotMatch(mainSource, /runGeneration !== undefined && runGeneration !== this\.reminderRunGeneration/);
-  assert.equal((settingsTabSource.match(/this\.plugin\.refreshReminderPolicy\(\);/g) || []).length, 8);
+  assert.equal((settingsTabSource.match(/this\.plugin\.refreshReminderPolicy\(\);/g) || []).length, 9);
 });
 
 test('direct reminder delivery preserves ntfy ownership and adds role-agnostic local fallback', () => {
@@ -2112,12 +2112,12 @@ test('notification sidebar uses task icons for task reminder rows', () => {
   assert.doesNotMatch(notificationViewSource, /const iconName = rawIcon\.includes\(': '\)/);
 });
 
-test('notification sidebar titles can extend under row action buttons', () => {
-  assert.match(notificationViewSource, /row\.style\.position = 'relative'/);
-  assert.match(notificationViewSource, /content\.style\.minWidth = '0'/);
-  assert.match(notificationViewSource, /actions\.style\.position = 'absolute'/);
-  assert.match(notificationViewSource, /actions\.style\.right = '12px'/);
-  assert.match(notificationViewSource, /actions\.style\.transform = 'translateY\(-50%\)'/);
+test('notification actions wrap below titles and status menus support keyboard positioning', () => {
+  assert.match(notificationViewSource, /content\.createDiv\(\{ cls: 'tps-notification-actions' \}\)/);
+  assert.match(notificationViewSource, /actions\.style\.flexWrap = 'wrap'/);
+  assert.doesNotMatch(notificationViewSource, /actions\.style\.position = 'absolute'/);
+  assert.match(notificationViewSource, /statusPill\.getBoundingClientRect\(\)/);
+  assert.match(notificationViewSource, /menu\.showAtPosition/);
 });
 
 test('notification view redraw signature includes visible row and action fields', () => {
@@ -2191,7 +2191,7 @@ test('notification view renders reminder titles as clickable markdown links', ()
 });
 
 test('task reminder entity status is derived from checkbox marker, not parent note status', () => {
-  assert.match(reminderTargetSource, /const noteStatus = getFrontmatterValueCaseInsensitive\(frontmatter, "status"\)/);
+  assert.match(reminderTargetSource, /const noteStatus = getFrontmatterValueCaseInsensitive\(frontmatter, settings\.statusKey \|\| "status"\)/);
   assert.match(reminderTargetSource, /noteStatus,/);
   assert.match(reminderTargetSource, /const parsedStatus = typeof properties\.status === "string" \? properties\.status\.trim\(\) : properties\.status/);
   assert.match(reminderTargetSource, /if \(parsedStatus\) properties\.inlineStatus = parsedStatus/);
@@ -2535,16 +2535,16 @@ test('notification sort direction can be reversed from settings', () => {
   assert.match(overdueSource, /return delta \* sortDirection/);
 });
 
-test('overdue modal complete actions are single-click and preserve list position', () => {
+test('overdue modal status selector preserves list position and waits for writes', () => {
   assert.match(overdueModalSource, /private suppressedItemKeys = new Set<string>\(\)/);
   assert.match(overdueModalSource, /this\.suppressedItemKeys\.add\(key\)/);
   assert.match(overdueModalSource, /nextItems\.filter\(\(item\) => !this\.suppressedItemKeys\.has\(this\.getItemKey\(item\)\)\)/);
   assert.match(overdueModalSource, /const previousScrollTop = this\.container\.scrollTop/);
   assert.match(overdueModalSource, /this\.container\.scrollTop = previousScrollTop/);
-  assert.match(overdueModalSource, /if \(button\.disabled\) return/);
-  assert.match(overdueModalSource, /button\.disabled = true/);
+  assert.match(overdueModalSource, /await this\.plugin\.setOverdueItemStatus\(item, status\)/);
+  assert.match(overdueModalSource, /statusButton\.disabled = true/);
   assert.match(overdueModalSource, /this\.refreshDebounced\(\)/);
-  assert.match(overdueModalSource, /this\.suppressedItemKeys\.delete\(this\.getItemKey\(item\)\)/);
+  assert.match(overdueModalSource, /statusButton\.disabled = false/);
   assert.doesNotMatch(overdueModalSource, /window\.setTimeout\(\(\): void => void this\.refresh\(\), 100\)/);
 });
 
@@ -2559,4 +2559,32 @@ test('notification sidebar refreshes are coalesced to avoid action lag', () => {
   assert.match(notificationViewSource, /buildNotificationItemsSignature\(nextItems\)/);
   assert.match(notificationViewSource, /nextSignature !== this\.lastRenderedSignature/);
   assert.match(notificationViewSource, /\[NotificationView\] slow refresh/);
+});
+
+
+test('inline reminder scope requires an own schedule and never inherits the note date', async () => {
+  const { buildReminderTargetsForFile } = loadReminderTargetModule();
+  const app = { vault: { cachedRead: async () => '- [ ] Unscheduled\n- [ ] Own [when:: 2026-09-15]\n- [ ] Empty [when:: ]' } };
+  const file = { path: 'Inbox/Scope.md', basename: 'Scope', extension: 'md' };
+  const frontmatter = { when: '2026-09-14', workflow: 'working' };
+  const settings = { inlineTaskReminders: 'scheduled', startProperty: 'when', statusKey: 'workflow' };
+  const targets = await buildReminderTargetsForFile(app, file, frontmatter, settings);
+  assert.deepEqual(targets.map(t => t.targetKind), ['note', 'task']);
+  assert.equal(targets[1].taskTitle, 'Own');
+  assert.equal(targets[1].taskFrontmatter.noteStatus, 'working');
+  assert.equal((await buildReminderTargetsForFile(app, file, frontmatter, {...settings, inlineTaskReminders: 'none'})).length, 1);
+  assert.equal((await buildReminderTargetsForFile(app, file, frontmatter, {...settings, inlineTaskReminders: 'all'})).length, 4);
+});
+
+
+test('GCM architecture scope is notes-only for atomic notes and while GCM is unavailable', async () => {
+  const { buildReminderTargetsForFile } = loadReminderTargetModule();
+  const file = {path: 'Inbox/Scope.md', basename: 'Scope', extension: 'md'};
+  const app = {vault: {cachedRead: async () => '- [ ] Own [scheduled:: 2026-09-15]\n- [ ] Plain'}};
+  const settings = {inlineTaskReminders: 'gcm'};
+  assert.equal((await buildReminderTargetsForFile(app, file, {}, settings)).length, 1);
+  app.plugins = {getPlugin: () => ({settings: {dataArchitectureMode: 'native-records'}})};
+  assert.equal((await buildReminderTargetsForFile(app, file, {}, settings)).length, 1);
+  app.plugins = {getPlugin: () => ({settings: {dataArchitectureMode: 'legacy'}})};
+  assert.equal((await buildReminderTargetsForFile(app, file, {}, settings)).length, 2);
 });

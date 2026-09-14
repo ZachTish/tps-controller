@@ -203,6 +203,7 @@ export interface TPSControllerSettings {
     // Notification Rules
     pollMinutes: number;
     enableReminders: boolean;
+    inlineTaskReminders: "gcm" | "none" | "scheduled" | "all";
     enableTimeTrackingHourlyReminders: boolean;
     reminders: PropertyReminder[];
     alertState: AlertState;
@@ -301,6 +302,7 @@ export const DEFAULT_CONTROLLER_SETTINGS: TPSControllerSettings = {
     // Notification Rules
     pollMinutes: 0.5,
     enableReminders: true,
+    inlineTaskReminders: "gcm",
     enableTimeTrackingHourlyReminders: true,
     reminders: [],
     alertState: {},

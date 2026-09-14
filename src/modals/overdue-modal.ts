@@ -120,45 +120,33 @@ export class OverdueItemsModal extends Modal {
             actions.style.marginTop = '4px';
             actions.style.alignItems = 'center';
 
-            const createIconButton = (icon: string, label: string, onClick: () => Promise<void>): HTMLButtonElement => {
-                const button = actions.createEl('button', { cls: 'clickable-icon tps-overdue-action-button' });
-                button.setAttribute('aria-label', label);
-                button.setAttribute('title', label);
-                button.style.display = 'flex';
-                button.style.alignItems = 'center';
-                button.style.justifyContent = 'center';
-                button.style.width = '30px';
-                button.style.height = '30px';
-                button.style.padding = '0';
-                setIcon(button, icon);
-                button.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    if (button.disabled) return;
-                    button.disabled = true;
-                    this.removeItemOptimistically(item);
-                    void (async () => {
-                        try {
-                            await onClick();
-                            this.refreshDebounced();
-                        } catch (error) {
-                            this.suppressedItemKeys.delete(this.getItemKey(item));
-                            logger.flowError('OverdueModal', 'action-failed', error, {
-                                action: label,
-                                path: item.file?.path || '',
-                            });
-                            await this.refresh();
-                        }
-                    })();
-                });
-                return button;
-            };
-
-            createIconButton('check', 'Complete', async () => {
-                await this.plugin.markOverdueItemComplete(item);
-            });
-
-            createIconButton('x', 'Wont-do', async () => {
-                await this.plugin.markOverdueItemWontDo(item);
+            actions.style.flexWrap = 'wrap';
+            const statusButton = actions.createEl('button', { text: item.status || 'Set status' });
+            statusButton.setAttribute('aria-label', 'Change reminder status');
+            statusButton.addEventListener('click', event => {
+                event.stopPropagation();
+                const gcm = (this.app as any).plugins?.getPlugin?.('tps-global-context-menu');
+                const statusService = gcm?.api?.services?.status || gcm?.sharedServices?.status;
+                const options: string[] = statusService?.getStatusOptions?.() || [];
+                const menu = new Menu();
+                const applyStatus = async (status: string | null) => {
+                    statusButton.disabled = true;
+                    try {
+                        await this.plugin.setOverdueItemStatus(item, status);
+                        await this.refresh();
+                    } catch (error) {
+                        logger.flowError('OverdueModal', 'status-failed', error, { path: item.file.path });
+                    } finally {
+                        statusButton.disabled = false;
+                    }
+                };
+                menu.addItem(entry => entry.setTitle('(none)').onClick(() => { void applyStatus(null); }));
+                for (const option of options) {
+                    menu.addItem(entry => entry.setTitle(option).setChecked(option === item.status)
+                        .onClick(() => { void applyStatus(option); }));
+                }
+                const bounds = statusButton.getBoundingClientRect();
+                menu.showAtPosition({ x: bounds.left, y: bounds.bottom });
             });
 
             const openBtn = actions.createEl('button', { text: 'Open Note' });
