@@ -1,3 +1,4 @@
+import { PlaidConnectionService } from "./services/plaid-connection";
 ﻿import { App, Plugin, Notice, Platform, TFile, TextFileView, moment, normalizePath } from "obsidian";
 import { AttachmentSyncService } from "./services/attachment-sync/service";
 import { normalizeAttachmentSyncSettings } from "./services/attachment-sync/settings";
@@ -359,7 +360,14 @@ export default class TPSControllerPlugin extends Plugin {
         this.addRibbonIcon('bell', 'View Notifications', () => { void this.overdueService.openNotificationModal(); });
 
         // API
+        this.plaidConnection = new PlaidConnectionService(this.app);
         (this as any).api = {
+            plaid: this.plaidConnection,
+            openPlaidSettings: () => {
+                const settings = (this.app as any).setting;
+                settings?.open(); settings?.openTabById(this.manifest.id);
+                this.settingsTab?.openPlaidSettings();
+            },
             isController: (): boolean => this.deviceRoleManager.isController(),
             getRole: (): DeviceRole => this.deviceRoleManager.role,
             getSettings: (): TPSControllerSettings => this.settings,
@@ -548,6 +556,8 @@ export default class TPSControllerPlugin extends Plugin {
     // ========================================================================
     // Settings
     // ========================================================================
+
+    plaidConnection!: PlaidConnectionService;
 
     async loadSettings() {
         logger.flow("Settings", "load:start");

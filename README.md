@@ -1,3 +1,9 @@
+## 1.3.0 — Plaid connection ownership
+
+Controller now exposes Plaid connection API v1 and Advanced → Plaid settings. Environment, credential references, and OAuth redirect URI use vault-scoped device-local storage, labeled This device. Secret values stay in Obsidian SecretStorage. Finances imports its existing references once; subsequent device edits do not sync. Only approved Plaid endpoints and environments are accepted. Existing Controller routes and automation controls are unchanged. Finances retains institution linking UI, local access-token/cursor state, and ledger normalization. There is no new background financial automation.
+
+Verified in the reloaded test vault: Advanced shows the device-local Plaid controls after its heading, and the Finances handoff opens the existing ledger settings. Service tests cover isolated devices, one-time reference import, missing/conflicting keys, fixed hosts/endpoints, and delegated authenticated requests. Controller remained in User mode; no live Plaid calls or outbound automation were run. Full declared npm test and a separate final npm run build are required for the versioned artifacts; the stable build deploys only shipped files to Obsidian Plugin Test Vault. Hot Reload plus explicit test-plugin reload was used for UI verification. Release notes record final validation and SHA-256 hashes. Production installation remains the user’s BRAT pull.
+
 ## 1.2.0 reminder target integrity
 
 - Reminders → Rules now includes Inline task reminders. The default follows GCM: atomic-note mode (or unavailable GCM) evaluates notes only; legacy mode requires an inline task’s own configured scheduling property. Explicit notes-only, scheduled-task, and all-task choices remain editable while reminders are off. Existing rules and external-event reminders remain intact.

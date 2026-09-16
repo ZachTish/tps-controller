@@ -1,3 +1,4 @@
+import { renderPlaidConnectionSettings } from "./services/plaid-connection";
 import { buildReminderDeliveryStatusText } from "./services/reminder-delivery-status";
 import { renderAttachmentSyncSettings } from "./services/attachment-sync/settings-ui";
 import { App, Notice, PluginSettingTab, SecretComponent, Setting, normalizePath } from 'obsidian';
@@ -65,6 +66,11 @@ export class TPSControllerSettingTab extends PluginSettingTab {
     private selectedCalendarId: string | null = null;
     private reminderRuleViewState = new Map<string, boolean>();
     private reminderRuleFilterQuery = '';
+
+    openPlaidSettings(): void {
+        this.activePage = 'advanced';
+        this.display();
+    }
 
     constructor(app: App, plugin: TPSControllerPlugin) {
         super(app, plugin);
@@ -509,6 +515,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             'Advanced',
             'Change shared field names or use troubleshooting controls. Normal calendar and reminder rules do not require these options.'
         );
+        renderPlaidConnectionSettings(containerEl, this.app, this.plugin.plaidConnection);
         const fmContent = createSettingsSection(
             containerEl,
             'Calendar field names',
