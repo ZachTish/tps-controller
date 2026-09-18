@@ -2,7 +2,7 @@
 
 Device roles, calendar synchronization, reminders, encrypted attachment sync, and shared Plaid transport.
 
-Current release: [1.4.0](https://github.com/ZachTish/tps-controller/releases/tag/1.4.0) · Obsidian 1.12.3+ · Desktop and mobile.
+Current release: [1.5.0](https://github.com/ZachTish/tps-controller/releases/tag/1.5.0) · Obsidian 1.12.3+ · Desktop and mobile.
 
 ## Install with BRAT
 
@@ -16,6 +16,18 @@ The settings hub keeps Overview, Automations, Reminders, and Advanced separate. 
 - Configure reminder rules in Reminders. Inline-task eligibility can follow GCM's Atomic note/Atomic line mode, require the task's own scheduled value, or use an explicit override.
 - Configure **Advanced → Plaid** for TPS Finances 1.3.0+. Environment, credential references, and OAuth redirect URI are marked **This device**. Secret values stay in Obsidian SecretStorage. Finances owns institution linking, account records, and ledger reconciliation.
 - Attachment sync preserves local files and ordinary links. It uses encrypted GCS objects, device enrollment, and a recovery key; it is independent of Controller/User role. Markdown, Canvas, Bases, configuration, hidden files, and excluded paths stay outside this attachment collection.
+
+## Configurable finance request folder — 1.5.0
+
+**Advanced → Finance server → Request files folder** accepts a vault-relative folder such as `_system/TPS Finance Relay` or `_system`. The default remains `_assets/TPS Finance Relay`. This is a backward-compatible minor release; minimum Obsidian remains 1.12.3. The setting is local to each device's finance pairing. New host setup uses the entered folder; an existing host offers **Move files**. The move relocates only its `<collection-id>` subfolder. Other `_assets` content is untouched.
+
+Before changing an existing connection, pause finance service on each device and allow vault sync to settle. Move it on the desktop host, export its new pairing code, then use **Update pairing code** on each client before resuming. Install Controller 1.5.0 on every participant first. Keep the destination included in vault sync. Reusing the same connection code updates the folder while preserving that client's device identity, key, pending requests, and pause state. Old codes without a folder retain the default. A different connection/key is rejected without replacing the existing pairing. A stale client left on the old folder cannot discover the move automatically and may recreate transport files there.
+
+The host records its intended move before renaming. Restart completes a pending move without resetting the connection. Unsafe paths, file collisions, missing move sources, and ambiguous destinations stop the operation; existing files are never overwritten. Configuration remains editable while paused. Credentials and the operation journal remain device-local. AI request folders belong to TPS AI Gateway and have a separate setting.
+
+The hub/default route, existing disclosures and controls remain unchanged. The new native text field and action stay in Advanced; paired clients show the current folder with an Update pairing code action. Focused transport regressions cover custom/legacy pairing, pending operations across a move, Unicode paths, unsafe paths/collisions, disk failure, restart after rename, and disabled-service editing.
+
+Validation on 2026-09-18: all 20 focused finance transport checks pass. The full suite passes 479 checks with three existing optional historical-comparison skips. TypeScript and the production build pass. The versioned test runtime was reloaded; Advanced shows the editable folder while user-role hosting stays disabled. A synthetic real-adapter connection moved its collection beneath an Inbox fixture while paused, preserving the journal and status file; the fixture was archived afterward. No bank provider was called. Original device-local pairing and runtime data hashes were unchanged. Narrow layout behavior uses the existing settings CSS; physical mobile acceptance is not inferred from desktop QA.
 
 ## Shared finance server — 1.4.0
 

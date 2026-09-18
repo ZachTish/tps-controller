@@ -3,7 +3,15 @@ import { App, Platform } from 'obsidian';
 const CONFIG = 'tps-finance-relay-v1';
 const KEY = 'tps-finance-relay-key';
 const JOURNAL = 'tps-finance-relay-journal';
-const ROOT = '_assets/TPS Finance Relay';
+export const DEFAULT_FINANCE_FOLDER = '_assets/TPS Finance Relay';
+
+export function financeRequestFolder(value: unknown): string {
+    if (typeof value !== 'string') throw new Error('Enter a vault-relative request folder.');
+    const folder = value.trim();
+    if (!folder || new TextEncoder().encode(folder).length > 300 || folder.split('/').some(part => !part || part.startsWith('.') || part !== part.trim() || /[\\:*?"<>|\p{Cc}]/u.test(part) || /[. ]$/.test(part)))
+        throw new Error('Use a vault-relative folder without hidden folders, empty segments, or traversal.');
+    return folder;
+}
 const TTL = 30 * 60000;
 const RESULT_GRACE = 6 * 60 * 60000;
 const RETAIN = 24 * 60 * 60000;
@@ -53,6 +61,8 @@ interface Config {
     deviceId: string;
     enabled: boolean;
     intervalMinutes: number;
+    folder?: string;
+    folderMove?: { from: string; to: string; hadSource: boolean };
 }
 interface Request {
     id: string;
@@ -174,7 +184,55 @@ export class FinanceRelayService {
         if (raw.version !== 1 || !validID(raw.relayId) || !validID(raw.deviceId) || !['host', 'client'].includes(raw.mode)
             || typeof raw.enabled !== 'boolean' || !Number.isFinite(raw.intervalMinutes) || raw.intervalMinutes < 0 || raw.intervalMinutes > 1440)
             throw new Error('Invalid finance relay configuration.');
+        if (raw.folder !== undefined && financeRequestFolder(raw.folder) !== raw.folder)
+            throw new Error('Invalid finance request folder.');
+        if (raw.folderMove && (raw.mode !== 'host' || typeof raw.folderMove.to !== 'string' || financeRequestFolder(raw.folderMove.to.slice(0, -(raw.relayId.length + 1))) + '/' + raw.relayId !== raw.folderMove.to || raw.folderMove.from.toLowerCase() === raw.folderMove.to.toLowerCase() || raw.folderMove.from.toLowerCase().startsWith(raw.folderMove.to.toLowerCase() + '/') || raw.folderMove.to.toLowerCase().startsWith(raw.folderMove.from.toLowerCase() + '/') || typeof raw.folderMove.hadSource !== 'boolean' || raw.folderMove.from !== `${raw.folder || DEFAULT_FINANCE_FOLDER}/${raw.relayId}` || !raw.folderMove.to.endsWith('/' + raw.relayId)))
+            throw new Error('Invalid finance folder move.');
         return raw;
+    }
+    getRequestFolder(): string { return this.getConfiguration()?.folder || DEFAULT_FINANCE_FOLDER; }
+    async setRequestFolder(value: string): Promise<void> {
+        await this.exclusive(async () => {
+            const folder = financeRequestFolder(value);
+            let c = this.getConfiguration();
+            if (!c || c.mode !== 'host' || Platform.isMobile) throw new Error('Change the request folder on the finance host.');
+            c = await this.finishFolderMove(c);
+            const old = c.folder || DEFAULT_FINANCE_FOLDER;
+            if (old === folder) return;
+            const from = `${old}/${c.relayId}`, to = `${folder}/${c.relayId}`;
+            if (from.toLowerCase() === to.toLowerCase() || from.toLowerCase().startsWith(to.toLowerCase() + '/') || to.toLowerCase().startsWith(from.toLowerCase() + '/')) throw new Error('Choose a separate request folder.');
+            const adapter = this.app.vault.adapter;
+            if (await adapter.exists(to)) throw new Error('The destination already contains this connection. No files were replaced.');
+            const hadSource = await adapter.exists(from);
+            if (hadSource && (await adapter.stat(from))?.type !== 'folder') throw new Error('The finance request location is not a folder.');
+            c = {...this.getConfiguration()!, folderMove: {from, to, hadSource}};
+            this.app.saveLocalStorage(CONFIG, c); // Recover if the app closes after rename but before the new path is saved.
+            await this.finishFolderMove(c);
+        });
+    }
+    private async finishFolderMove(c: Config): Promise<Config> {
+        const move = c.folderMove;
+        if (!move) return c;
+        const adapter = this.app.vault.adapter;
+        const fromExists = await adapter.exists(move.from), toExists = await adapter.exists(move.to);
+        if (fromExists && toExists) throw new Error('Both finance folders exist. Resolve the collision before resuming.');
+        if (!fromExists && !toExists && move.hadSource) throw new Error('The finance folder being moved is missing. Restore it before resuming.');
+        if (fromExists) {
+            if ((await adapter.stat(move.from))?.type !== 'folder') throw new Error('The finance request location is not a folder.');
+            let parent = '';
+            for (const part of move.to.split('/').slice(0, -1)) {
+                parent = parent ? `${parent}/${part}` : part;
+                if (!await adapter.exists(parent)) await adapter.mkdir(parent);
+            }
+            await adapter.rename(move.from, move.to);
+        }
+        const next = {...this.getConfiguration()!, folder: move.to.slice(0, -(c.relayId.length + 1))};
+        delete next.folderMove;
+        this.app.saveLocalStorage(CONFIG, next);
+        this.publishedResponses.clear();
+        this.lastPublished = 0;
+        logger.flow('FinanceRelay', 'folder-moved', {mode:c.mode});
+        return next;
     }
     getStatus(): FinanceRelayStatus {
         const config = this.getConfiguration();
@@ -205,7 +263,8 @@ export class FinanceRelayService {
         return raw;
     }
     private save(journal: Journal): void { this.app.secretStorage.setSecret(JOURNAL, JSON.stringify(journal)); }
-    async configureHost(): Promise<void> {
+    async configureHost(folder = DEFAULT_FINANCE_FOLDER): Promise<void> {
+        folder = financeRequestFolder(folder);
         if (!this.isController() || Platform.isMobile)
             throw new Error('Choose the Controller role on the always-running desktop first.');
         if (this.getConfiguration())
@@ -214,7 +273,7 @@ export class FinanceRelayService {
         if (!backend)
             throw new Error('Enable TPS Finances 1.4.0+ before setting up the host.');
         backend.prepareHost?.();
-        const config: Config = { version: 1, mode: 'host', relayId: uuid(), deviceId: uuid(), enabled: true, intervalMinutes: 15 };
+        const config: Config = { version: 1, mode: 'host', folder, relayId: uuid(), deviceId: uuid(), enabled: true, intervalMinutes: 15 };
         this.app.secretStorage.setSecret(KEY, base64(crypto.getRandomValues(new Uint8Array(32))));
         this.save({ version: 1, relayId: config.relayId, jobs: {}, pending: [], nextSyncAt: this.now() + 15 * 60000, lastSyncAt: 0, lastError: '' });
         this.app.saveLocalStorage(CONFIG, config);
@@ -224,19 +283,28 @@ export class FinanceRelayService {
         const c = this.getConfiguration();
         if (!c || c.mode !== 'host' || !this.isController())
             throw new Error('Export pairing on the finance Controller.');
-        return 'tps-finance-v1:' + base64(new TextEncoder().encode(JSON.stringify({ v: 1, relayId: c.relayId, key: this.secret() })));
+        return 'tps-finance-v1:' + base64(new TextEncoder().encode(JSON.stringify({ v: 1, relayId: c.relayId, key: this.secret(), folder: c.folder || DEFAULT_FINANCE_FOLDER })));
     }
     async importPairing(value: string): Promise<void> {
-        if (this.getConfiguration())
-            throw new Error('This device is already paired. Its existing connection was preserved.');
-        if (!value.trim().startsWith('tps-finance-v1:') || value.length > 1024)
-            throw new Error('Invalid finance pairing code.');
-        const pairing = JSON.parse(new TextDecoder().decode(unbase64(value.trim().slice('tps-finance-v1:'.length))));
-        if (pairing.v !== 1 || !validID(pairing.relayId) || typeof pairing.key !== 'string' || unbase64(pairing.key).length !== 32)
-            throw new Error('Invalid finance pairing code.');
-        this.app.secretStorage.setSecret(KEY, pairing.key);
-        this.save({ version: 1, relayId: pairing.relayId, jobs: {}, pending: [], nextSyncAt: 0, lastSyncAt: 0, lastError: '' });
-        this.app.saveLocalStorage(CONFIG, { version: 1, mode: 'client', relayId: pairing.relayId, deviceId: uuid(), enabled: true, intervalMinutes: 0 });
+        await this.exclusive(async () => {
+            if (!value.trim().startsWith('tps-finance-v1:') || value.length > 2048)
+                throw new Error('Invalid finance pairing code.');
+            const pairing = JSON.parse(new TextDecoder().decode(unbase64(value.trim().slice('tps-finance-v1:'.length))));
+            if (pairing.v !== 1 || !validID(pairing.relayId) || typeof pairing.key !== 'string' || unbase64(pairing.key).length !== 32)
+                throw new Error('Invalid finance pairing code.');
+            const folder = financeRequestFolder(pairing.folder ?? DEFAULT_FINANCE_FOLDER);
+            const current = this.getConfiguration();
+            if (current) {
+                if (current.mode !== 'client' || current.relayId !== pairing.relayId || this.secret() !== pairing.key)
+                    throw new Error('This device belongs to another pairing. Its existing connection was preserved.');
+                this.journal(current); // A folder update must never replace a lost or corrupt journal.
+                this.app.saveLocalStorage(CONFIG, {...current, folder});
+            } else {
+                this.app.secretStorage.setSecret(KEY, pairing.key);
+                this.save({ version: 1, relayId: pairing.relayId, jobs: {}, pending: [], nextSyncAt: 0, lastSyncAt: 0, lastError: '' });
+                this.app.saveLocalStorage(CONFIG, { version: 1, mode: 'client', folder, relayId: pairing.relayId, deviceId: uuid(), enabled: true, intervalMinutes: 0 });
+            }
+        });
         await this.tick();
     }
     setEnabled(enabled: boolean): void { const c = this.getConfiguration(); if (c)
@@ -269,7 +337,8 @@ export class FinanceRelayService {
         window.clearInterval(this.timer); this.timer = null; await this.queue; }
     async request(action: FinanceAction, itemId?: string): Promise<string> {
         const id = await this.exclusive(async () => {
-            const c = this.getConfiguration();
+            let c = this.getConfiguration();
+            if (c?.folderMove) c = await this.finishFolderMove(c);
             if (!c || !c.enabled)
                 throw new Error('Set up or resume the finance Controller connection first.');
             this.secret();
@@ -301,7 +370,7 @@ export class FinanceRelayService {
         this.running = this.exclusive(() => this.reconcile()).catch(() => { this.status = { ...this.status, online: false, message: 'Finance relay paused: pairing, encrypted messages, or local journal could not be read. Check vault sync and restore local state.' }; }).finally(() => { this.running = null; });
         return this.running;
     }
-    private path(c: Config, name: string): string { return `${ROOT}/${c.relayId}/${name}.md`; }
+    private path(c: Config, name: string): string { return `${c.folder || DEFAULT_FINANCE_FOLDER}/${c.relayId}/${name}.md`; }
     private async read(c: Config, name: string): Promise<any | null> {
         const path = this.path(c, name);
         if (!await this.app.vault.adapter.exists(path))
@@ -330,9 +399,10 @@ export class FinanceRelayService {
             && (!['reconnect', 'disconnect'].includes(r.action) || !!r.itemId);
     }
     private async reconcile(): Promise<void> {
-        const c = this.getConfiguration();
+        let c = this.getConfiguration();
         if (!c)
             return;
+        if (c.folderMove) c = await this.finishFolderMove(c);
         if (!c.enabled) {
             this.status = { ...this.status, online: false, message: 'Finance connection paused.' };
             return;
@@ -381,7 +451,7 @@ export class FinanceRelayService {
             this.status = { ...this.status, online: false, message: 'Enable or update TPS Finances on the Controller.' };
             return;
         }
-        const requestFolder = `${ROOT}/${c.relayId}/requests`;
+        const requestFolder = `${c.folder || DEFAULT_FINANCE_FOLDER}/${c.relayId}/requests`;
         if (await this.app.vault.adapter.exists(requestFolder)) {
             const { files } = await this.app.vault.adapter.list(requestFolder);
             for (const path of files) {

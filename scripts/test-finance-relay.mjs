@@ -5,14 +5,15 @@ import { build } from 'esbuild';
 const result=await build({entryPoints:['src/services/finance-relay.ts'],bundle:true,platform:'browser',format:'cjs',write:false,external:['obsidian']});
 const module={exports:{}};
 new Function('module','exports','require','crypto',result.outputFiles[0].text)(module,module.exports,()=>({Platform:{isMobile:false}}),webcrypto);
-const {FinanceRelayService,encodeRelay,decodeRelay,validHostedLink}=module.exports;
+const {FinanceRelayService,encodeRelay,decodeRelay,validHostedLink,financeRequestFolder}=module.exports;
 const CONFIG='tps-finance-relay-v1',JOURNAL='tps-finance-relay-journal',KEY='tps-finance-relay-key';
 const wait=()=>new Promise(resolve=>setImmediate(resolve));
 function filesystem(){
  const files=new Map(), folders=new Set();let failWrites=false;
  return {files,folders,set failWrites(v){failWrites=v;},
-  exists:async p=>files.has(p)||folders.has(p),stat:async p=>files.has(p)?{size:files.get(p).length}:null,
+  exists:async p=>files.has(p)||folders.has(p),stat:async p=>files.has(p)?{type:'file',size:files.get(p).length}:folders.has(p)?{type:'folder',size:0}:null,
   read:async p=>files.get(p),write:async(p,s)=>{if(failWrites)throw Error('disk failure');files.set(p,s);},
+  rename:async(from,to)=>{if(failWrites)throw Error('disk failure');for(const [p,v] of [...files])if(p===from||p.startsWith(from+'/')){files.delete(p);files.set(to+p.slice(from.length),v);}for(const p of [...folders])if(p===from||p.startsWith(from+'/')){folders.delete(p);folders.add(to+p.slice(from.length));}},
   mkdir:async p=>{folders.add(p);},remove:async p=>files.delete(p),
   list:async dir=>({files:[...files.keys()].filter(p=>p.startsWith(dir+'/')&&!p.slice(dir.length+1).includes('/')),folders:[]})};
 }
@@ -146,4 +147,40 @@ test('unpair clears only the client transport, allowing a corrected pairing with
 test('malformed local waiting session is rejected before calling the bank',async()=>{
  const {host,client,b}=await setup();const id=await client.relay.request('connect');await deliver(host,client);const before=b.calls.length;
  const j=JSON.parse(host.secrets.get(JOURNAL));delete j.jobs[id].session;host.secrets.set(JOURNAL,JSON.stringify(j));await host.relay.tick();assert.equal(b.calls.length,before);assert.equal(host.relay.getStatus().online,false);
+});
+
+
+test('custom finance folders travel in pairing codes and legacy codes retain the old default',async()=>{
+ const clock={time:1_800_000_000_000},b=backend(clock),host=device(clock,b),client=device(clock);
+ await host.relay.configureHost('_system/銀行 requests');await client.relay.importPairing(host.relay.exportPairing());
+ assert.equal(client.relay.getRequestFolder(),'_system/銀行 requests');await client.relay.request('sync');await deliver(host,client);assert.equal(b.calls.filter(c=>c==='sync').length,1);
+ assert.ok([...host.fs.files.keys()].every(p=>p.startsWith('_system/銀行 requests/')));
+ const old=JSON.parse(Buffer.from(host.relay.exportPairing().split(':')[1],'base64'));delete old.folder;
+ const legacy=device(clock);await legacy.relay.importPairing('tps-finance-v1:'+Buffer.from(JSON.stringify(old)).toString('base64'));assert.equal(legacy.relay.getRequestFolder(),'_assets/TPS Finance Relay');
+});
+
+test('moving a finance collection preserves pending work, keys, receipts and unrelated files',async()=>{
+ const {host,client,b,clock}=await setup();const id=await client.relay.request('connect');await deliver(host,client);
+ const key=host.secrets.get(KEY),clientJournal=client.secrets.get(JOURNAL),deviceId=client.relay.getConfiguration().deviceId;
+ host.fs.files.set('_assets/personal.md','keep');
+ await host.relay.setRequestFolder('_system/TPS Finance Relay');assert.equal(host.secrets.get(KEY),key);assert.equal(host.fs.files.get('_assets/personal.md'),'keep');
+ await client.relay.importPairing(host.relay.exportPairing());assert.equal(client.secrets.get(JOURNAL),clientJournal);assert.equal(client.relay.getConfiguration().deviceId,deviceId);
+ b.completed=true;clock.time+=10_000;await deliver(host,client);assert.equal(client.relay.getOperations().find(o=>o.id===id).state,'complete');assert.equal(b.calls.filter(c=>c==='exchange').length,1);
+ await host.relay.tick();assert.equal(b.calls.filter(c=>c==='exchange').length,1);
+});
+
+test('folder changes reject unsafe paths and collisions without replacing files',async()=>{
+ for(const p of ['', '../outside','/absolute','a/../b','.obsidian/queue','a//b','a\\b','C:/outside','a./b'])assert.throws(()=>financeRequestFolder(p));
+ const {host,client}=await setup(),c=host.relay.getConfiguration();host.fs.files.set('_system/'+c.relayId,'unrelated');
+ await assert.rejects(()=>host.relay.setRequestFolder('_system'),/already contains/);assert.equal(host.fs.files.get('_system/'+c.relayId),'unrelated');assert.equal(host.relay.getRequestFolder(),'_assets/TPS Finance Relay');
+ await assert.rejects(()=>client.relay.setRequestFolder('_system'),/host/);
+});
+
+test('an interrupted folder rename resumes before any provider work, including while paused',async()=>{
+ const {host,client,b}=await setup();await client.relay.request('sync');await client.relay.tick();transfer(client,host);
+ const original=host.fs.rename;host.fs.rename=async()=>{throw Error('disk failure');};await assert.rejects(()=>host.relay.setRequestFolder('_system'),/disk failure/);
+ assert.ok(host.relay.getConfiguration().folderMove);await host.relay.tick();assert.equal(b.calls.length,0);
+ host.fs.rename=async(...args)=>{await original(...args);throw Error('crash after rename');};await assert.rejects(()=>host.relay.setRequestFolder('_system'),/crash/);
+ await host.relay.stop();host.fs.rename=original;host.relay=host.make();await host.relay.tick();assert.equal(host.relay.getRequestFolder(),'_system');assert.equal(b.calls.filter(c=>c==='sync').length,1);
+ host.relay.setEnabled(false);await host.relay.setRequestFolder('_system/paused');assert.equal(host.relay.getRequestFolder(),'_system/paused');assert.equal(host.relay.getConfiguration().enabled,false);
 });

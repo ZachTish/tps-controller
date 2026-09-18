@@ -16,6 +16,18 @@ export function renderFinanceRelaySettings(parent: HTMLElement, app: App, relay:
             return;
         }
         const config = configuration;
+        let requestFolder = relay.getRequestFolder();
+        const folderSetting = new Setting(root).setName('Request files folder')
+            .setDesc(config?.mode === 'client' ? requestFolder : 'Keep this folder included in vault sync. After moving it, update the pairing code on your other devices.');
+        if (config?.mode !== 'client') {
+            folderSetting.addText(text => text.setValue(requestFolder).setPlaceholder('_system/TPS Finance Relay')
+                .onChange(value => { requestFolder = value; }));
+            if (config) folderSetting.addButton(button => button.setButtonText('Move files').onClick(async () => {
+                button.setDisabled(true);
+                try { await relay.setRequestFolder(requestFolder); render(); root.querySelector<HTMLInputElement>('input')?.focus({preventScroll:true}); }
+                catch (error) { new Notice(String(error)); button.setDisabled(false); }
+            }));
+        } else folderSetting.addButton(button => button.setButtonText('Update pairing code').onClick(() => new PairingModal(app, relay, false, render).open()));
         new Setting(root).setName(config?.mode === 'host' ? 'This device hosts finance sync' : config ? 'Paired with the finance Controller' : 'Share one bank connection across devices')
             .setDesc(config ? status.message : 'Keep the Controller desktop and vault sync running. Pair other devices once; credentials stay on the Controller.')
             .addButton(button => button.setButtonText('Refresh status').onClick(async () => { await relay.tick(); render(); }));
@@ -24,7 +36,7 @@ export function renderFinanceRelaySettings(parent: HTMLElement, app: App, relay:
                 .addButton(button => button.setButtonText('Use this Controller').setDisabled(!isController || Platform.isMobile).onClick(async () => {
                 button.setDisabled(true);
                 try {
-                    await relay.configureHost();
+                    await relay.configureHost(requestFolder);
                     render();
                 }
                 catch (error) {
