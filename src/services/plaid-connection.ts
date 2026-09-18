@@ -9,7 +9,7 @@ export interface PlaidConfiguration {
 }
 const KEY = 'tps-controller-plaid-v1';
 const HOSTS = {sandbox:'https://sandbox.plaid.com',development:'https://development.plaid.com',production:'https://production.plaid.com'};
-const PATHS = new Set(['/link/token/create','/item/public_token/exchange','/item/remove','/accounts/get','/transactions/sync','/investments/holdings/get','/investments/transactions/get']);
+const PATHS = new Set(['/link/token/create','/link/token/get','/item/public_token/exchange','/item/remove','/accounts/get','/transactions/sync','/investments/holdings/get','/investments/transactions/get']);
 export class PlaidConnectionService {
     readonly version = 1;
     constructor(private app: App) {}
@@ -51,5 +51,5 @@ export function renderPlaidConnectionSettings(container: HTMLElement, app: App, 
         new Setting(container).setName(`${label} · This device`).addComponent(el => new SecretComponent(app,el).setValue(config[key]).onChange(value => { config[key] = value; service.saveConfiguration(config); }));
     }
     new Setting(container).setName('OAuth redirect URI · This device').addText(text => text.setValue(config.oauthRedirectUri).onChange(value => {config.oauthRedirectUri=value.trim();service.saveConfiguration(config);}));
-    new Setting(container).setName('Accounts and transactions').setDesc('Manage institutions, sync, and ledger records in TPS Finances.').addButton(button => button.setButtonText('Open Finances settings').onClick(() => {const settings=(app as any).setting;settings?.open();settings?.openTabById('tps-finances');}));
+    new Setting(container).setName('Accounts and transactions').setDesc('Manage institutions, sync, and ledger records in TPS Finances.').addButton(button => button.setButtonText('Open Finances settings').onClick(() => {const finances=(app as any).plugins?.plugins?.['tps-finances']?.api;if(finances?.openConnectionSettings){finances.openConnectionSettings();return;}const settings=(app as any).setting;settings?.open();settings?.openTabById('tps-finances');}));
 }

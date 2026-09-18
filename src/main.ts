@@ -1,3 +1,4 @@
+import { FinanceRelayService } from "./services/finance-relay";
 import { PlaidConnectionService } from "./services/plaid-connection";
 ﻿import { App, Plugin, Notice, Platform, TFile, TextFileView, moment, normalizePath } from "obsidian";
 import { AttachmentSyncService } from "./services/attachment-sync/service";
@@ -361,8 +362,13 @@ export default class TPSControllerPlugin extends Plugin {
 
         // API
         this.plaidConnection = new PlaidConnectionService(this.app);
+        this.financeRelay = new FinanceRelayService(this.app, () => this.deviceRoleManager.isController(), () => (this.app as any).plugins?.plugins?.["tps-finances"]?.api?.controllerFinanceBackend);
+        let financeRelayLoaded = true;
+        this.register(() => { financeRelayLoaded = false; });
+        this.app.workspace.onLayoutReady(() => { if (financeRelayLoaded) this.financeRelay.start(); });
         (this as any).api = {
             plaid: this.plaidConnection,
+            financeRelay: this.financeRelay,
             openPlaidSettings: () => {
                 const settings = (this.app as any).setting;
                 settings?.open(); settings?.openTabById(this.manifest.id);
@@ -536,6 +542,7 @@ export default class TPSControllerPlugin extends Plugin {
     }
 
     async onunload() {
+        await this.financeRelay?.stop();
         logger.flow("Lifecycle", "unload");
         this.controllerPeriodicReloadService?.dispose();
         if (this.tishOSNotificationRefreshTimeoutId !== null) {
@@ -558,6 +565,7 @@ export default class TPSControllerPlugin extends Plugin {
     // ========================================================================
 
     plaidConnection!: PlaidConnectionService;
+    financeRelay!: FinanceRelayService;
 
     async loadSettings() {
         logger.flow("Settings", "load:start");

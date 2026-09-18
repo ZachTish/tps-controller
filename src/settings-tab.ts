@@ -1,3 +1,4 @@
+import { renderFinanceRelaySettings } from "./services/finance-relay-settings";
 import { renderPlaidConnectionSettings } from "./services/plaid-connection";
 import { buildReminderDeliveryStatusText } from "./services/reminder-delivery-status";
 import { renderAttachmentSyncSettings } from "./services/attachment-sync/settings-ui";
@@ -515,6 +516,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             'Advanced',
             'Change shared field names or use troubleshooting controls. Normal calendar and reminder rules do not require these options.'
         );
+        renderFinanceRelaySettings(containerEl, this.app, this.plugin.financeRelay, this.plugin.deviceRoleManager.isController());
         renderPlaidConnectionSettings(containerEl, this.app, this.plugin.plaidConnection);
         const fmContent = createSettingsSection(
             containerEl,

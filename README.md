@@ -2,7 +2,7 @@
 
 Device roles, calendar synchronization, reminders, encrypted attachment sync, and shared Plaid transport.
 
-Current release: [1.3.0](https://github.com/ZachTish/tps-controller/releases/tag/1.3.0) · Obsidian 1.12.3+ · Desktop and mobile.
+Current release: [1.4.0](https://github.com/ZachTish/tps-controller/releases/tag/1.4.0) · Obsidian 1.12.3+ · Desktop and mobile.
 
 ## Install with BRAT
 
@@ -17,9 +17,27 @@ The settings hub keeps Overview, Automations, Reminders, and Advanced separate. 
 - Configure **Advanced → Plaid** for TPS Finances 1.3.0+. Environment, credential references, and OAuth redirect URI are marked **This device**. Secret values stay in Obsidian SecretStorage. Finances owns institution linking, account records, and ledger reconciliation.
 - Attachment sync preserves local files and ordinary links. It uses encrypted GCS objects, device enrollment, and a recovery key; it is independent of Controller/User role. Markdown, Canvas, Bases, configuration, hidden files, and excluded paths stay outside this attachment collection.
 
+## Shared finance server — 1.4.0
+
+Install **Controller 1.4.0 and Finances 1.4.0** on every participating device. On the always-running desktop, choose the **Controller** role in Overview, configure **Advanced → Plaid**, then choose **Advanced → Finance server → Use this Controller**. Use the desktop that already owns your bank connections; its tokens and identity map stay in local SecretStorage. Do not independently reconnect the same banks on other devices.
+
+Choose **Show pairing code**, then enter that code under the same Finance server settings on your iPhone, iPad, or other desktop. Pairing is explicit and local to each device. The code grants control of the shared finance connection; keep it private. Clients need no Plaid secret. Finances → Connections handles Connect, Reconnect, Sync, Disconnect, and resumable sign-in requests. The Controller settings handoff opens that destination directly.
+
+The Controller remains the only bank importer. Phones open [Plaid Hosted Link](https://plaid.com/docs/link/hosted-link/) in their browser and return to Obsidian after signing in; the desktop retrieves completion through `/link/token/get`. No localhost callback, listening port, public tunnel, webhook receiver, or additional hosted server is required. The default scheduled refresh is every 15 minutes; manual-only, 30-minute, hourly, six-hour, and daily intervals are available. This retrieves data Plaid has available; it does not force the bank itself to update or request a paid Transactions Refresh.
+
+**Transport and recovery:** vault sync carries AES-256-GCM-encrypted Markdown envelopes under `_assets/TPS Finance Relay/<collection-id>/`. Keep that folder included in the vault's sync. The queue works with ordinary Markdown synchronization; there is no direct device-to-device network dependency. Unique per-message nonces authenticate collection and path. Each client owns immutable request files; one pinned host owns responses and presence. Credentials, access tokens, Link tokens, and the durable operation journal stay in device-local SecretStorage. Envelopes contain encrypted actions, shared institution summaries, and short-lived hosted sign-in URLs—not plaintext bank tokens. Ledger notes still use your normal vault sync and its privacy settings.
+
+Reconciliation polls every four seconds after the workspace is ready, has one active operation chain per local app (including reloads), and preserves pending requests before publishing them. Presence updates every 30 seconds and becomes stale after 90 seconds. Missing/corrupt local state or failed authentication pauses processing. Imports retain existing finance identities/cursors and refresh shared Finances settings before each run. Reconnect retains the existing Item. An uncertain public-token exchange is never automatically repeated: the host checks its saved receipt, otherwise reports an uncertain result for review. Network retries use bounded backoff; an already-created sign-in survives polling outages within its six-hour result-recovery window. Unstarted requests expire after 30 minutes; completed transport files are retired after their retention window. Receipt expiry prevents old synced requests from resurrecting.
+
+**Limits:** Obsidian and vault sync must be running on the awake Controller. This is not an OS background daemon, instant push channel, high-availability cluster, or automatic host failover. Mobile must receive the encrypted response through vault sync before its sign-in button appears. Bank login/consent happens in the user's browser, not inside Obsidian. Restore the host's local bank state after loss; do not recreate a connection over an empty identity map. A client can unpair and enter a corrected code; unpairing does not disconnect banks or cancel requests already delivered. Existing independent connections on other desktops are not migrated or merged automatically. Production OAuth access still depends on the user's Plaid account and institution support.
+
+**Settings contract:** the existing Overview, Calendar rules, Reminder rules, Automations, and Advanced hub is retained, with Overview the default. Finance setup extends Advanced without another nested disclosure. Host setup, pairing export/import, pause/resume, interval, status refresh, client unpair, and the Finances handoff are device-local controls; existing Plaid environment/secret references/OAuth controls remain. Pairing text is shown only in a dedicated modal. Buttons and inputs are native and keyboard accessible; existing narrow settings layout applies. No existing shared settings, commands, or note property names are removed.
+
+**Validation:** 16 isolated transport tests cover independent devices, encrypted payloads, path replay/tampering, double taps, bounded retry, resume, late completion, uncertain exchanges, missing/corrupt state, role/pause guards, response repair, cleanup, unpair, and reload serialization. Finances adds hosted-provider and complete mobile-bundle coverage. A real Sandbox Hosted Link browser run completed the synthetic First Platypus OAuth flow and imported four account notes and 241 transaction notes in an isolated Inbox fixture. Desktop and mobile-emulated settings/request UI are checked after the final versioned build. Physical iPhone/iPad and real-bank acceptance remain device testing, not a claim made from desktop emulation. Test artifacts deploy only to the test vault; production installation is the user's BRAT pull.
+
 ## Integration and limits
 
-The enabled plugin exposes `api.plaid` version 1 and `api.openPlaidSettings()`. Plaid requests are restricted to supported environments and endpoints. The service does not introduce scheduled finance calls.
+The enabled plugin exposes `api.plaid` version 1 and `api.openPlaidSettings()`. Plaid requests are restricted to supported environments and endpoints. Unpaired devices retain the earlier direct Plaid transport. An explicitly configured finance host adds the shared service described below.
 
 TishOS companion pairing is separate on every device. A published reminder schedule is not proof of physical notification delivery. Attachment sync's required large-file iPhone/iPad transfer acceptance remains a release gate; desktop or simulated tests do not establish mobile readiness. Bucket retention/soft-delete policies are independent of Controller cleanup. The old public-link uploader is retired.
 
