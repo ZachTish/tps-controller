@@ -1,3 +1,5 @@
+import { validateNoteRules } from "./services/note-rules";
+import { NoteRuleEditor, NoteRulePreviewModal } from "./services/note-rule-ui";
 import { renderFinanceRelaySettings } from "./services/finance-relay-settings";
 import { renderPlaidConnectionSettings } from "./services/plaid-connection";
 import { buildReminderDeliveryStatusText } from "./services/reminder-delivery-status";
@@ -13,7 +15,7 @@ import {
 } from './services/notification-delivery-provider';
 
 const createCalendarId = () => `calendar-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
-export type ControllerSettingsPage = 'overview' | 'calendar' | 'reminders' | 'automations' | 'advanced';
+export type ControllerSettingsPage = 'overview' | 'calendar' | 'reminders' | 'automations' | 'advanced' | 'note-rules';
 type ControllerAutomationPage = 'archive' | 'attachments';
 
 const CONTROLLER_SETTINGS_DESTINATIONS: Array<{
@@ -23,6 +25,7 @@ const CONTROLLER_SETTINGS_DESTINATIONS: Array<{
 }> = [
     { id: 'overview', label: 'Overview', description: 'Device role and quick links.' },
     { id: 'calendar', label: 'Calendar rules', description: 'Feeds, destinations, and sync safety.' },
+    { id: 'note-rules', label: 'Note rules', description: 'Preview and apply rules with a command.' },
     { id: 'reminders', label: 'Reminder rules', description: 'Notification timing, matching, and snooze defaults.' },
     { id: 'automations', label: 'Automations', description: 'Archive and attachment workflows.' },
     { id: 'advanced', label: 'Advanced', description: 'Field names and troubleshooting.' },
@@ -64,6 +67,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
     private reminderDeliveryStatusTimer: number | null = null;
     private activePage: ControllerSettingsPage = 'overview';
     private activeAutomation: ControllerAutomationPage = 'archive';
+    private noteRuleEditor: NoteRuleEditor | null = null;
     private selectedCalendarId: string | null = null;
     private reminderRuleViewState = new Map<string, boolean>();
     private reminderRuleFilterQuery = '';
@@ -264,7 +268,6 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                             autoCreateTaskTargetPath: "",
                             autoCreateTypeFolder: "",
                             autoCreateFolder: "",
-                            autoCreateTag: "",
                             autoCreateTemplate: "",
                         };
                         this.plugin.settings.externalCalendars.push(calendar);
@@ -508,6 +511,26 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     this.plugin.settings.canceledStatusValue = value;
                     await this.plugin.saveSettings();
                 }));
+        }
+
+        if (this.activePage === 'note-rules') {
+            if (!this.noteRuleEditor) this.noteRuleEditor = new NoteRuleEditor(
+                () => this.plugin.settings.noteRules,
+                async (rules) => {
+                    const previous = this.plugin.settings.noteRules;
+                    if (JSON.stringify((await this.plugin.loadData())?.noteRules) !== JSON.stringify(previous)) throw new Error('Saved rules changed on disk. Reload saved rules first.');
+                    this.plugin.settings.noteRules = rules;
+                    try { await this.plugin.saveSettings(); }
+                    catch (error) { this.plugin.settings.noteRules = previous; throw error; }
+                },
+                () => new NoteRulePreviewModal(this.app, this.plugin.noteRuleRunner, { kind: 'note', path: this.app.workspace.getActiveFile()?.path || '' }).open(),
+                async () => {
+                    const saved = (await this.plugin.loadData())?.noteRules;
+                    validateNoteRules(saved);
+                    this.plugin.settings.noteRules = saved;
+                },
+            );
+            this.noteRuleEditor.render(containerEl.createDiv());
         }
 
         if (this.activePage === 'advanced') {
@@ -2030,17 +2053,6 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                         await save();
                     }));
             }
-
-            new Setting(acContent)
-                .setName("Tag")
-                .setDesc("Tag to append (e.g. #meeting)")
-                .addText(t => t
-                    .setValue(calendar.autoCreateTag || "")
-                    .setPlaceholder("#tag")
-                    .onChange(async (val) => {
-                        calendar.autoCreateTag = val;
-                        await save();
-                    }));
 
             if (this.plugin.settings.calendarStorageMode === "native-records" || (calendar.autoCreateMode || "note") === "note") {
                 new Setting(acContent)

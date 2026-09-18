@@ -2,7 +2,7 @@ import { App, Notice, normalizePath } from "obsidian";
 import { AutoCreateService } from "./auto-create-service";
 import { ExternalCalendarService } from "./external-calendar-service";
 import type { TPSControllerSettings, ExternalCalendarConfig } from "../types";
-import { normalizeCalendarUrl, normalizeCalendarTag } from "../utils";
+import { normalizeCalendarUrl } from "../utils";
 import * as logger from "../logger";
 import { TPS_EVENTS } from "../tps-events";
 import { NativeCalendarRecordService } from "./native-calendar-record-service";
@@ -201,7 +201,7 @@ export class CalendarAutomationService {
                             taskNoteFolder: c.autoCreateTaskNoteFolder || "Calendar Events",
                             typeFolder: c.autoCreateTypeFolder || "",
                             folder: c.autoCreateFolder || "",
-                            tag: normalizeCalendarTag(c.autoCreateTag || ""),
+                            tag: null, // Tags now belong to command-driven Note rules.
                             template: c.autoCreateTemplate || "",
                             autoCreateEnabled: c.autoCreateEnabled !== false,
                         },

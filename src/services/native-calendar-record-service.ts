@@ -893,7 +893,7 @@ export class NativeCalendarRecordService {
         const associatedNote = existing ? this.existingAssociatedNote(existing) : null;
         const tags = mergeCalendarRecordTags(
             readPropertyCaseInsensitive(existing?.frontmatter || creationProperties, "tags"),
-            calendar.autoCreateTag,
+            undefined, // The retired calendar tag option never runs during sync.
         );
         const description = nonBlankText(event.description);
         const location = nonBlankText(event.location);

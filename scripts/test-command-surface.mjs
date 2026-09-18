@@ -370,7 +370,7 @@ test("Controller settings integration awaits saves and unload only drains reques
   assert.doesNotMatch(settingsTabSource, /import\s*\{[^}]*\bdebounce\b/);
 });
 
-test("Controller settings use one routed page with an explicit five-destination hub", () => {
+test("Controller settings use one routed page with an explicit six-destination hub", () => {
   const displaySource = settingsTabSource.slice(
     settingsTabSource.indexOf("display(): void"),
     settingsTabSource.indexOf("// Helpers"),
@@ -389,10 +389,10 @@ test("Controller settings use one routed page with an explicit five-destination 
   assert.match(settingsTabSource, /private activeAutomation: ControllerAutomationPage = 'archive'/);
   assert.match(settingsTabSource, /Choose what to configure/);
   assert.match(settingsTabSource, /setAttr\('aria-pressed', String\(this\.activePage === destination\.id\)\)/);
-  for (const destination of ["Overview", "Calendar rules", "Reminder rules", "Automations", "Advanced"]) {
+  for (const destination of ["Overview", "Calendar rules", "Note rules", "Reminder rules", "Automations", "Advanced"]) {
     assert.match(settingsTabSource, new RegExp(`label: '${destination}'`));
   }
-  assert.equal((settingsTabSource.match(/\{ id: '(?:overview|calendar|reminders|automations|advanced)'/g) || []).length, 5);
+  assert.equal((settingsTabSource.match(/\{ id: '(?:overview|calendar|note-rules|reminders|automations|advanced)'/g) || []).length, 6);
   assert.doesNotMatch(displaySource, /createEl\(['"]details['"]/);
   assert.match(settingsTabSource, /createEl\('details', \{ cls: 'tps-controller-reminder-rule' \}\)/);
   assert.match(settingsTabSource, /private navigateToPage[\s\S]*heading\?\.focus\(\{ preventScroll: false \}\)/);
@@ -453,7 +453,7 @@ test("Controller settings use one routed page with an explicit five-destination 
   assert.match(settingsStylesSource, /\.tps-settings-inline-selector-button\[aria-pressed="true"\]/);
   assert.match(settingsStylesSource, /\.tps-settings-destination-button:focus-visible/);
   assert.match(settingsStylesSource, /\.tps-settings-destination-button \{[\s\S]*\n  height: auto;/);
-  assert.match(settingsStylesSource, /@media \(max-width: 900px\)[\s\S]*grid-template-columns: repeat\(5, minmax\(132px, 1fr\)\)[\s\S]*overflow-x: auto/);
+  assert.match(settingsStylesSource, /@media \(max-width: 900px\)[\s\S]*grid-template-columns: repeat\(6, minmax\(132px, 1fr\)\)[\s\S]*overflow-x: auto/);
   assert.match(settingsStylesSource, /@media \(max-width: 520px\)[\s\S]*\.tps-settings-destination-description \{[\s\S]*display: none/);
 });
 

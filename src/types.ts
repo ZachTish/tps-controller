@@ -1,3 +1,4 @@
+import { emptyNoteRules, type NoteRuleSettings } from "./services/note-rules";
 import { TFile } from "obsidian";
 import type { NotificationDeliveryProvider } from "./services/notification-delivery-provider";
 import { DEFAULT_ATTACHMENT_SYNC_SETTINGS, type AttachmentSyncSettings } from "./services/attachment-sync/settings";
@@ -175,6 +176,7 @@ export interface OverdueItem {
 // ============================================================================
 
 export interface TPSControllerSettings {
+    noteRules: NoteRuleSettings;
     // Calendar Sync
     calendarStorageMode: CalendarStorageMode;
     syncIntervalMinutes: number;
@@ -239,6 +241,7 @@ export interface NativeCalendarCancellationState {
 }
 
 export const DEFAULT_CONTROLLER_SETTINGS: TPSControllerSettings = {
+    noteRules: emptyNoteRules(),
     // Calendar Sync
     calendarStorageMode: "legacy",
     syncIntervalMinutes: 5,

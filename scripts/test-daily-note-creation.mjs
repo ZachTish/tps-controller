@@ -1083,6 +1083,8 @@ test("Controller waits when an exact Daily Note was freshly created by another c
         return snapshot.replace("<% external-controller-body %>", "External controller body resolved");
       },
     });
+    // Compile before starting the freshness clock and simulated auto-trigger.
+    const { AutoCreateService } = loadAutoCreateService();
     harness.seedExternalCreation("Inbox/Daily/2027/01/21.md", [
       "---",
       "title: Fresh external Controller Daily",
@@ -1091,7 +1093,6 @@ test("Controller waits when an exact Daily Note was freshly created by another c
       "",
       "<% external-controller-body %>",
     ].join("\n"));
-    const { AutoCreateService } = loadAutoCreateService();
     const service = new AutoCreateService(harness.app);
     const startDate = new Date(2027, 0, 21, 9, 0, 0);
 

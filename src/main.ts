@@ -1,3 +1,6 @@
+import { migrateCalendarTagRules } from "./services/note-rules";
+import { NoteRuleRunner } from "./services/note-rule-runner";
+import { NoteRulePreviewModal } from "./services/note-rule-ui";
 import { FinanceRelayService } from "./services/finance-relay";
 import { PlaidConnectionService } from "./services/plaid-connection";
 ﻿import { App, Plugin, Notice, Platform, TFile, TextFileView, moment, normalizePath } from "obsidian";
@@ -172,6 +175,8 @@ export default class TPSControllerPlugin extends Plugin {
     private controllerPeriodicReloadPreference: ControllerPeriodicReloadPreference;
     private controllerPeriodicReloadService: ControllerPeriodicReloadService;
 
+    noteRuleRunner: NoteRuleRunner;
+
     async onload() {
         logger.flow("Lifecycle", "load", {
             id: this.manifest.id,
@@ -187,6 +192,8 @@ export default class TPSControllerPlugin extends Plugin {
         );
 
         await this.loadSettings();
+        this.noteRuleRunner = new NoteRuleRunner(this.app, () => this.settings, async () => (await this.loadData())?.noteRules);
+        this.register(() => this.noteRuleRunner.dispose());
         this.statusBarEl = this.addStatusBarItem();
         this.deviceRoleManager = new DeviceRoleManager(this.app, (role) => this.onRoleChanged(role));
         this.controllerPeriodicReloadPreference = new ControllerPeriodicReloadPreference(this.app.vault.getName());
@@ -354,6 +361,20 @@ export default class TPSControllerPlugin extends Plugin {
                     ? `Refreshed ${result.commandCount} TishOS Shortcut commands.`
                     : `TishOS Shortcut commands are current (${result.commandCount}).`);
             }),
+        });
+
+        this.addCommand({
+            id: "run-note-rules-current-note", name: "Preview Note Rules on Current Note",
+            checkCallback: (checking) => {
+                const file = this.app.workspace.getActiveFile();
+                if (!file || file.extension !== "md") return false;
+                if (!checking) new NoteRulePreviewModal(this.app, this.noteRuleRunner, { kind: "note", path: file.path }).open();
+                return true;
+            },
+        });
+        this.addCommand({
+            id: "run-note-rules", name: "Preview Note Rules on Notes",
+            callback: () => new NoteRulePreviewModal(this.app, this.noteRuleRunner, { kind: "folder", path: this.app.workspace.getActiveFile()?.parent?.path || "" }).open(),
         });
 
         // View + Ribbon
@@ -622,6 +643,14 @@ export default class TPSControllerPlugin extends Plugin {
             await migrateSettingsFromPlugins(this.app, this.settings, data, () => this.saveSettings());
             this.cleanLegacySettings();
         }
+        let noteRulesMigrationChanged = false;
+        try {
+            const migrated = migrateCalendarTagRules(this.settings.noteRules, this.settings.externalCalendars);
+            noteRulesMigrationChanged = JSON.stringify(migrated) !== JSON.stringify(this.settings.noteRules);
+            this.settings.noteRules = migrated;
+        } catch (error) {
+            new Notice("Note rules could not be migrated. Existing configuration was preserved; review Note rules in Controller settings.");
+        }
         const localAlertState = this.loadAlertStateFromLocalStorage();
         if (this.hasAlertStateEntries(localAlertState)) {
             this.settings.alertState = localAlertState;
@@ -635,7 +664,8 @@ export default class TPSControllerPlugin extends Plugin {
         this.sanitizeS3agleAttachmentAutomationSettings();
         logger.setLoggingEnabled(this.settings.enableLogging);
         let finalMigrationSaveSucceeded = true;
-        if (attachmentSyncMigrationChanged
+        if (noteRulesMigrationChanged
+            || attachmentSyncMigrationChanged
             || importedS3agleSettings
             || s3CredentialMigration.changed
             || notificationProviderMigrationChanged
@@ -1107,6 +1137,7 @@ export default class TPSControllerPlugin extends Plugin {
     }
 
     private isPeriodicControllerReloadEligible(): boolean {
+        if (this.noteRuleRunner?.busy) return false;
         return !Platform.isMobile
             && this.deviceRoleManager?.isController?.() === true
             && this.controllerPeriodicReloadPreference?.get() === true;

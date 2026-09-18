@@ -1146,14 +1146,14 @@ test('active legacy migration and later refresh preserve workflow status and ord
   assert.equal(migrated.created, 0);
   let frontmatter = [...h.frontmatters.values()][0];
   assert.equal(frontmatter.status, 'complete');
-  assert.deepEqual(new Set(frontmatter.tags), new Set(['calendar-event', 'customer-important', 'managed-work']));
+  assert.deepEqual(new Set(frontmatter.tags), new Set(['calendar-event', 'customer-important']));
 
   h.setEvents([event({ description: 'Second refresh' })]);
   await h.service.sync([configured], '', true, false);
   frontmatter = [...h.frontmatters.values()][0];
   assert.equal(frontmatter.status, 'complete');
   assert.equal(frontmatter.description, 'Second refresh');
-  assert.deepEqual(new Set(frontmatter.tags), new Set(['calendar-event', 'customer-important', 'managed-work']));
+  assert.deepEqual(new Set(frontmatter.tags), new Set(['calendar-event', 'customer-important']));
 });
 
 test('ordinary active sync preserves an intentionally blank workflow status', async () => {
@@ -1193,7 +1193,6 @@ test('tag-profile legacy migration removes only its owned identity tag and prese
   assert.deepEqual(new Set(frontmatter.tags), new Set([
     `project/calendar-event/${oldId}`,
     'customer-tag',
-    'managed-tag',
   ]));
   assert.equal(frontmatter.tags.some((tag) => tag.startsWith('tps/record/v1/')), false);
   const plan = h.preflightLog[0].entries.find((entry) => entry.reference === oldId);
@@ -1201,24 +1200,15 @@ test('tag-profile legacy migration removes only its owned identity tag and prese
   assert.equal(plannedTags.some((tag) => tag.startsWith('tps/record/v1/')), false);
 });
 
-test('calendar configuration values are snapshotted before async work and apply changes next sync', async () => {
+test('retired calendar tag values never run during automatic sync', async () => {
   const configured = { ...calendar, autoCreateTag: 'planned-tag' };
   const h = harness([event()]);
-  h.setAfterPreflightHook(() => {
-    configured.autoCreateTag = 'next-sync-tag';
-  });
-
+  h.setAfterPreflightHook(() => { configured.autoCreateTag = 'next-sync-tag'; });
   await h.service.sync([configured], '', true, false);
-  let frontmatter = [...h.frontmatters.values()][0];
-  assert.ok(frontmatter.tags.includes('planned-tag'));
-  assert.equal(frontmatter.tags.includes('next-sync-tag'), false);
-  const createPlan = h.preflightLog[0].entries.find((entry) => entry.operation === 'create');
-  assert.deepEqual(createPlan.properties.tags, ['planned-tag']);
-
+  assert.equal([...h.frontmatters.values()][0].tags, undefined);
+  assert.equal(h.preflightLog[0].entries.find(entry => entry.operation === 'create').properties.tags, undefined);
   await h.service.sync([configured], '', true, false);
-  frontmatter = [...h.frontmatters.values()][0];
-  assert.ok(frontmatter.tags.includes('planned-tag'));
-  assert.ok(frontmatter.tags.includes('next-sync-tag'));
+  assert.equal([...h.frontmatters.values()][0].tags, undefined);
 });
 
 test('active missing-ID config backfills the historical fallback and migrates its old record', async () => {
@@ -1351,7 +1341,7 @@ test('delayed stale MetadataCache delivery cannot poison authoritative sync payl
   assert.equal(synced.description, 'Fresh feed description');
   assert.deepEqual(
     new Set(synced.tags),
-    new Set(['calendar-event', 'current-disk-tag', 'managed-calendar']),
+    new Set(['calendar-event', 'current-disk-tag']),
   );
   assert.equal(synced.tags.includes('stale-cache-tag'), false);
 });
@@ -1532,7 +1522,7 @@ test('configured native identity tags are discarded while ordinary migration pro
 
   const result = await h.service.sync([{ ...calendar, autoCreateTag: 'calendar-event tps/record/v1/task/injected' }], '', true, false);
   const createPlan = h.preflightLog[0].entries.find((entry) => entry.operation === 'create');
-  assert.deepEqual(createPlan.properties.tags, ['calendar-event']);
+  assert.equal(createPlan.properties.tags, undefined);
   assert.equal(result.created, 1);
   assert.equal(result.updated, 1);
   assert.equal([...h.frontmatters.values()].some((frontmatter) =>
@@ -2097,7 +2087,7 @@ test('native calendar template contributes public kind, defaults, body and varia
   assert.equal(record.tpsId, canonicalId(calendar.id, incoming.occurrenceIdentity));
   assert.equal(record.scheduled, incoming.startDate.toISOString());
   assert.equal(record.end, incoming.endDate.toISOString());
-  assert.deepEqual(record.tags, ['work', 'calendar-event', 'team']);
+  assert.deepEqual(record.tags, ['work', 'calendar-event']);
   for (const key of ['externalId', 'calendarOccurrenceKey', 'createdDate', 'tpsSchemaVersion']) {
     assert.equal(Object.hasOwn(record, key), false, key);
   }
@@ -2110,7 +2100,7 @@ test('native calendar template contributes public kind, defaults, body and varia
   const [updatedPath, updated] = [...h.frontmatters.entries()][0];
   assert.equal(updated.kind, 'event');
   assert.equal(updated.status, 'complete');
-  assert.deepEqual(updated.tags, ['work', 'calendar-event', 'team']);
+  assert.deepEqual(updated.tags, ['work', 'calendar-event']);
   assert.equal(h.bodies.get(updatedPath), 'My private meeting notes.\n');
   assert.equal(h.files.size, 1);
 });

@@ -211,7 +211,7 @@
 
 .tps-settings-destination-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -368,7 +368,7 @@
 
 @media (max-width: 900px) {
   .tps-settings-destination-grid {
-    grid-template-columns: repeat(5, minmax(132px, 1fr));
+    grid-template-columns: repeat(6, minmax(132px, 1fr));
     overflow-x: auto;
     padding-bottom: 2px;
   }
