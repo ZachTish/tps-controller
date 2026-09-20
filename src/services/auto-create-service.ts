@@ -192,6 +192,10 @@ export class AutoCreateService {
         forceRegenerate = false,
         options: { backfillPastEvents?: boolean } = {},
     ): Promise<void> {
+        if ((this.app as any).plugins?.plugins?.['tps-global-context-menu']?.api?.propertyMappings?.isMigrating?.()) {
+            logger.flow('AutoCreate', 'sync:skip-property-migration');
+            return;
+        }
         if (this.config.allowAutoCreate === false) {
             logger.flow("AutoCreate", "sync:skip-disabled", { urls: urls.length });
             return;

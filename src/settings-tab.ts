@@ -562,15 +562,29 @@ export class TPSControllerSettingTab extends PluginSettingTab {
         ];
 
         for (const fk of fmKeys) {
-            new Setting(fmContent)
-                .setName(fk.label)
-                .addText(text => text
-                    .setPlaceholder(fk.placeholder)
-                    .setValue(String((this.plugin.settings as any)[fk.key] || ''))
-                    .onChange(async (value) => {
-                        (this.plugin.settings as any)[fk.key] = value;
-                        await this.plugin.saveSettings();
-                    }));
+            let value = String((this.plugin.settings as any)[fk.key] || fk.placeholder);
+            new Setting(fmContent).setName(fk.label)
+                .setDesc('Apply previews existing notes and asks before updating their properties.')
+                .addText(text => {
+                  text.setValue(value).onChange(next => { value = next.trim(); });
+                  text.inputEl.setAttribute('aria-label', fk.label);
+                  text.inputEl.dataset.tpsMappingKey = String(fk.key);
+                  text.inputEl.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); (text.inputEl.closest('.setting-item')?.querySelector('button') as HTMLButtonElement)?.click(); } });
+                })
+                .addButton(button => button.setButtonText('Apply').onClick(async () => {
+                    button.setDisabled(true);
+                    try {
+                        const api = (this.app as any).plugins?.plugins?.['tps-global-context-menu']?.api?.propertyMappings;
+                        if (!api?.changeKey) throw new Error('Update and enable TPS GCM to review this mapping change.');
+                        const scrollTop = this.containerEl.scrollTop;
+                        if (await api.changeKey('tps-controller', fk.key, value)) {
+                            this.display();
+                            this.containerEl.scrollTop = scrollTop;
+                            this.containerEl.querySelector<HTMLInputElement>(`[data-tps-mapping-key="${String(fk.key)}"]`)?.focus({preventScroll:true});
+                        }
+                    } catch (error) { new Notice(error instanceof Error ? error.message : String(error)); }
+                    finally { button.setDisabled(false); }
+                }));
         }
         }
 
