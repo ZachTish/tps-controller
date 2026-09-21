@@ -1,8 +1,59 @@
 # TPS Controller
 
+## Apple Wallet import — 2.3.0
+
+**Advanced → Finance server → Import Apple Wallet · This device** enables the
+approved native TishOS iPhone app to send balances and transaction history to this
+Controller. Requires TPS Finances 1.8.0 in Atomic note mode and TishOS 0.17.0.
+Set up the finance host, enable Wallet import, privately copy its pairing code,
+and enter it in TishOS → Apple Wallet on one iPhone. The app separately confirms
+the named vault and asks Apple for the accounts and dates. No Plaid connection
+or credential is needed for Wallet. Existing Plaid connections stay independent.
+
+The configurable finance request folder must remain included in vault sync.
+AES-256-GCM envelopes authenticate the collection and each transfer path. A
+bounded hash manifest, immutable parts, one producer identity and increasing
+sequence prevent incomplete, altered or replayed imports. Controller durably
+claims a batch before writes and acknowledges only after Finances finishes;
+the phone commits its history cursor only after that acknowledgement. Partial
+transfers and note writes resume with the same identities. Receipts live in
+this device's SecretStorage; the Wallet toggle is local, off by default and
+preserved while paused. Missing/corrupt state pauses import rather than starting
+over. Error retries are bounded to at most one attempt per minute; ordinary
+relay polling remains every four seconds. Wallet errors do not stop bank sync.
+
+Apple IDs are device-local: use one exporting iPhone. Replacement-phone and
+lost-state migration are not automatic. Missing accounts or restricted history
+never imply deletion. Explicit deleted/rejected transactions use Finances'
+normal trash behavior. The app retires its acknowledged encrypted parts; notes
+remain ordinary vault content. Pause cannot recall transfers already delivered.
+The existing secret pairing code grants finance connection authority and must
+remain private. macOS, iPad and other vault devices read the resulting notes.
+The native app needs a Files-accessible copy of that vault; it cannot read an
+Obsidian-only iOS container. Neither background iOS refresh nor vault sync has
+a guaranteed delivery deadline.
+
+**Settings inventory:** all six hub destinations, Overview default, existing
+finance controls and commands remain. One local toggle is added alongside host
+refresh/pairing controls. Native toggle keyboard semantics and the existing
+wrapping narrow layout apply; no extra disclosure or shared setting is added.
+
+**Validation:** focused relay tests cover encryption, missing/tampered parts,
+interrupted imports, durable acknowledgement, replay, alternate producers,
+sequence gaps, disable races and a Wallet-only host without Plaid. The full suite reports 532 passes and three existing
+opt-in comparison skips (zero failures). The separate production build deploys
+only to the test vault; CLI reload verifies 2.3.0. The actual Advanced settings
+were inspected with an in-memory, disabled host fixture: all six destinations
+and prior controls remain, the new toggle is keyboard-focusable, and no real
+configuration or outbound automation was enabled. Both plugin data.json hashes
+remained unchanged. Native narrow/accessible Wallet screens were inspected. Real Apple-account authorization
+and comparison remain the user's iPhone acceptance step. This is a minor feature
+release; minimum Obsidian stays 1.12.3. Production installation is the BRAT handoff.
+
+
 Device roles, calendar synchronization, reminders, encrypted attachment sync, and shared Plaid transport.
 
-Current release: [2.2.0](https://github.com/ZachTish/tps-controller/releases/tag/2.2.0) · Obsidian 1.12.3+ · Desktop and mobile.
+Current release: [2.3.0](https://github.com/ZachTish/tps-controller/releases/tag/2.3.0) · Obsidian 1.12.3+ · Desktop and mobile.
 
 ## Install with BRAT
 

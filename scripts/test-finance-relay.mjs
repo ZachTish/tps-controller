@@ -184,3 +184,21 @@ test('an interrupted folder rename resumes before any provider work, including w
  await host.relay.stop();host.fs.rename=original;host.relay=host.make();await host.relay.tick();assert.equal(host.relay.getRequestFolder(),'_system');assert.equal(b.calls.filter(c=>c==='sync').length,1);
  host.relay.setEnabled(false);await host.relay.setRequestFolder('_system/paused');assert.equal(host.relay.getRequestFolder(),'_system/paused');assert.equal(host.relay.getConfiguration().enabled,false);
 });
+
+test('Wallet uses the same encrypted relay, preserves replay receipts, and works without Plaid',async()=>{
+ const clock={time:1_800_000_000_000}, b=backend(clock), host=device(clock,b);
+ b.snapshot=()=>({ready:false,items:[]}); let imports=0;
+ b.importWallet=async parts=>{imports++;assert.equal(parts[0].version,1)};
+ await host.relay.configureHost(); host.relay.setWalletEnabled(true);
+ const c=host.relay.getConfiguration(), key=host.secrets.get(KEY), base=`${c.folder||'_assets/TPS Finance Relay'}/${c.relayId}/`;
+ const producerId='11111111-1111-4111-8111-111111111111',batchId='22222222-2222-4222-8222-222222222222';
+ const part=JSON.stringify({version:1,accounts:[],transactions:[],deletedTransactions:[]});
+ const digest=Buffer.from(await webcrypto.subtle.digest('SHA-256',new TextEncoder().encode(part))).toString('hex');
+ const m={batchId,parts:[digest],producerId,sequence:1,version:1};
+ host.fs.files.set(base+`wallet/${batchId}/0.md`,await encodeRelay(part,key,`${c.relayId}/wallet/${batchId}/0`));
+ host.fs.files.set(base+'wallet/pending.md',await encodeRelay(m,key,`${c.relayId}/wallet/pending`));
+ clock.time+=16*60_000;await host.relay.tick();assert.equal(imports,1);assert.equal(b.calls.length,0);
+ const receipt=await decodeRelay(host.fs.files.get(base+'wallet/receipt.md'),key,c.relayId+'/wallet/receipt');assert.equal(receipt.complete,true);
+ await host.relay.stop();host.relay=host.make();await host.relay.tick();assert.equal(imports,1);
+ host.relay.setWalletEnabled(false);host.relay.setWalletEnabled(true);await host.relay.tick();assert.equal(imports,1);
+});

@@ -62,6 +62,9 @@ export function renderFinanceRelaySettings(parent: HTMLElement, app: App, relay:
                     new Notice(String(error));
                 } });
             });
+            new Setting(root).setName('Import Apple Wallet · This device')
+                .setDesc('Enable on this Controller, then enter its finance pairing code in TishOS on your iPhone and authorize Apple Card or Savings. Imported notes use your Finances property settings.')
+                .addToggle(toggle => toggle.setValue(config.walletEnabled === true).onChange(value => { relay.setWalletEnabled(value); render(); }));
             new Setting(root).setName('Pair another device').setDesc('The pairing code grants access to this shared finance connection. Keep it private.')
                 .addButton(button => button.setButtonText('Show pairing code').onClick(() => new PairingModal(app, relay, true, render).open()));
         }

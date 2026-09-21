@@ -1,8 +1,10 @@
+import { reconcileWallet, walletReceipt } from "./finance-wallet-relay";
 import * as logger from "../logger";
 import { App, Platform } from 'obsidian';
 const CONFIG = 'tps-finance-relay-v1';
 const KEY = 'tps-finance-relay-key';
 const JOURNAL = 'tps-finance-relay-journal';
+const WALLET = 'tps-finance-wallet-receipt-v1';
 export const DEFAULT_FINANCE_FOLDER = '_assets/TPS Finance Relay';
 
 export function financeRequestFolder(value: unknown): string {
@@ -52,6 +54,7 @@ export interface FinanceRelayBackend {
     completeLink(session: FinanceLinkSession, result: FinanceLinkResult, requestId: string): Promise<void>;
     hasCompleted(requestId: string): boolean;
     sync(): Promise<void>;
+    importWallet?(parts: unknown[]): Promise<void>;
     disconnect(itemId: string): Promise<void>;
 }
 interface Config {
@@ -62,6 +65,7 @@ interface Config {
     enabled: boolean;
     intervalMinutes: number;
     folder?: string;
+    walletEnabled?: boolean;
     folderMove?: { from: string; to: string; hadSource: boolean };
 }
 interface Request {
@@ -162,6 +166,8 @@ export class FinanceRelayService {
     private timer: number | null = null;
     private stopped = false;
     private lastPublished = 0;
+    private walletRetryAt = 0;
+    private walletError = '';
     private status: FinanceRelayStatus = { configured: false, enabled: false, online: false, message: 'Set up a finance Controller.', updatedAt: 0, lastSyncAt: 0, items: [] };
     private responses = new Map<string, FinanceOperation>();
     constructor(private app: App, private isController: () => boolean, private backend: () => FinanceRelayBackend | undefined, private now: () => number = Date.now) { }
@@ -182,13 +188,19 @@ export class FinanceRelayService {
         if (raw == null)
             return null;
         if (raw.version !== 1 || !validID(raw.relayId) || !validID(raw.deviceId) || !['host', 'client'].includes(raw.mode)
-            || typeof raw.enabled !== 'boolean' || !Number.isFinite(raw.intervalMinutes) || raw.intervalMinutes < 0 || raw.intervalMinutes > 1440)
+            || (raw.walletEnabled !== undefined && typeof raw.walletEnabled !== 'boolean') || typeof raw.enabled !== 'boolean' || !Number.isFinite(raw.intervalMinutes) || raw.intervalMinutes < 0 || raw.intervalMinutes > 1440)
             throw new Error('Invalid finance relay configuration.');
         if (raw.folder !== undefined && financeRequestFolder(raw.folder) !== raw.folder)
             throw new Error('Invalid finance request folder.');
         if (raw.folderMove && (raw.mode !== 'host' || typeof raw.folderMove.to !== 'string' || financeRequestFolder(raw.folderMove.to.slice(0, -(raw.relayId.length + 1))) + '/' + raw.relayId !== raw.folderMove.to || raw.folderMove.from.toLowerCase() === raw.folderMove.to.toLowerCase() || raw.folderMove.from.toLowerCase().startsWith(raw.folderMove.to.toLowerCase() + '/') || raw.folderMove.to.toLowerCase().startsWith(raw.folderMove.from.toLowerCase() + '/') || typeof raw.folderMove.hadSource !== 'boolean' || raw.folderMove.from !== `${raw.folder || DEFAULT_FINANCE_FOLDER}/${raw.relayId}` || !raw.folderMove.to.endsWith('/' + raw.relayId)))
             throw new Error('Invalid finance folder move.');
         return raw;
+    }
+    setWalletEnabled(enabled: boolean): void {
+        const c = this.getConfiguration();
+        if (!c || c.mode !== 'host' || !this.isController() || Platform.isMobile) throw new Error('Configure Wallet on the finance Controller.');
+        if (c.walletEnabled === undefined) this.app.secretStorage.setSecret(WALLET, 'null');
+        this.app.saveLocalStorage(CONFIG, {...c, walletEnabled: enabled});
     }
     getRequestFolder(): string { return this.getConfiguration()?.folder || DEFAULT_FINANCE_FOLDER; }
     async setRequestFolder(value: string): Promise<void> {
@@ -451,6 +463,27 @@ export class FinanceRelayService {
             this.status = { ...this.status, online: false, message: 'Enable or update TPS Finances on the Controller.' };
             return;
         }
+        if (c.walletEnabled && this.now() >= this.walletRetryAt) {
+            try {
+            if (!backend.importWallet) throw new Error('Update TPS Finances to import Wallet.');
+            await reconcileWallet({
+                read: name => this.read(c, name), write: (name, value) => this.write(c, name, value),
+                load: () => {
+                    const saved = this.app.secretStorage.getSecret(WALLET);
+                    if (saved === null || saved === undefined || saved === '') throw new Error('Wallet receipt is missing.');
+                    return walletReceipt(JSON.parse(saved));
+                },
+                save: value => this.app.secretStorage.setSecret(WALLET, JSON.stringify(value)),
+                active: () => this.active(c) && this.getConfiguration()?.walletEnabled === true,
+                importParts: parts => backend.importWallet!(parts),
+            });
+            this.walletError = ''; this.walletRetryAt = 0;
+            } catch {
+                this.walletError = 'Apple Wallet import paused. Verify Finances uses Atomic note, finish any property migration, and resume the pending transfer on the paired iPhone. Existing bank sync remains available.';
+                this.walletRetryAt = this.now() + 60000;
+            }
+        }
+        if (!c.walletEnabled) this.walletError = '';
         const requestFolder = `${c.folder || DEFAULT_FINANCE_FOLDER}/${c.relayId}/requests`;
         if (await this.app.vault.adapter.exists(requestFolder)) {
             const { files } = await this.app.vault.adapter.list(requestFolder);
@@ -494,7 +527,8 @@ export class FinanceRelayService {
                 continue;
             await this.perform(c, j, job, backend);
         }
-        if (this.active(c) && j.nextSyncAt && j.nextSyncAt <= this.now()) {
+        if (this.active(c) && j.nextSyncAt && j.nextSyncAt <= this.now()
+            && (!c.walletEnabled || backend.snapshot().items.length > 0)) {
             j.nextSyncAt = c.intervalMinutes ? this.now() + c.intervalMinutes * 60000 : 0;
             this.save(j);
             try {
@@ -509,7 +543,7 @@ export class FinanceRelayService {
         }
         if (this.now() - this.lastPublished >= 30000 || this.lastPublished === 0) {
             const snapshot = backend.snapshot();
-            this.status = { configured: true, mode: 'host', enabled: true, online: true, updatedAt: this.now(), lastSyncAt: j.lastSyncAt, items: snapshot.items.map(({ localItemId, institutionName, environment, lastSyncAt }) => ({ localItemId, institutionName, environment, lastSyncAt })), message: j.lastError || (!snapshot.ready ? 'Configure Plaid credentials on this Controller.' : 'Controller ready.') };
+            this.status = { configured: true, mode: 'host', enabled: true, online: true, updatedAt: this.now(), lastSyncAt: j.lastSyncAt, items: snapshot.items.map(({ localItemId, institutionName, environment, lastSyncAt }) => ({ localItemId, institutionName, environment, lastSyncAt })), message: this.walletError || j.lastError || (!snapshot.ready && !c.walletEnabled ? 'Configure Plaid credentials on this Controller.' : 'Controller ready.') };
             await this.write(c, 'status', { version: 1, ...this.status });
             this.lastPublished = this.now();
         }
