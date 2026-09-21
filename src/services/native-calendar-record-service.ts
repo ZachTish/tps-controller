@@ -1,3 +1,4 @@
+import { CALENDAR_SYNC_PROPERTY, calendarScheduleSignature, readCalendarSyncStamp } from './calendar-reschedule';
 import { App, TFile } from "obsidian";
 import type {
     ExternalCalendarConfig,
@@ -66,6 +67,8 @@ interface PlannedCalendarOccurrence {
     context: CalendarContext;
     event: ExternalCalendarEvent;
     id: string;
+    sourceOccurrenceId?: string;
+    retainedRecord?: IndexedCalendarRecord;
     plannedCreateProperties?: Record<string, unknown>;
     plannedEventUpdates?: Record<string, unknown>;
     plannedRecordPath?: string;
@@ -229,6 +232,7 @@ export class NativeCalendarRecordService {
         const authoritativeSnapshot = await api.snapshot!();
         this.rebuildFromHandles(authoritativeSnapshot.records);
         const migrationPlan = await this.prepareLegacyMigration(contexts, authoritativeSnapshot.records);
+        await this.prepareRescheduledOccurrences(prepared, authoritativeSnapshot.records, migrationPlan);
         await this.prepareCreationTemplates(prepared, migrationPlan);
         const mutationPlan = await this.preflightIdentityPlan(
             api,
@@ -356,6 +360,7 @@ export class NativeCalendarRecordService {
             missing: result.missing,
             archived: result.archived,
             failedFeeds: result.failedFeeds,
+            preserved: prepared.occurrences.filter(occurrence => occurrence.retainedRecord).length,
         });
         return result;
     }
@@ -445,6 +450,61 @@ export class NativeCalendarRecordService {
             }
         }
         return { occurrences, seenIds, successfulSourceScopes, fetched: fetchedCount, failedFeeds };
+    }
+
+    private async prepareRescheduledOccurrences(
+        prepared: PreparedCalendarSync,
+        snapshot: GcmNativeRecordHandle[],
+        migrations: PlannedLegacyMigration[],
+    ): Promise<void> {
+        // History stays in the vault with its original identity and path. It is
+        // excluded from future sync, deletion and legacy migration, while a new
+        // generation gets a new ID in the existing calendar source namespace.
+        const migratedById = new Map(migrations.map(migration => [identityKey(migration.targetId), migration.record]));
+        const relatedIds = new Set<string>();
+        const activeByOccurrence = new Map<string, IndexedCalendarRecord[]>();
+        for (const handle of snapshot) {
+            if (!parseCalendarRecordId(handle.id)) continue;
+            const stamp = readCalendarSyncStamp(handle.frontmatter || {});
+            if (stamp && calendarRecordSourceScope(stamp.occurrenceId) !== calendarRecordSourceScope(handle.id)) {
+                throw new Error('Calendar schedule tracking belongs to a different source; no records were changed.');
+            }
+            if (stamp) relatedIds.add(identityKey(stamp.occurrenceId));
+        }
+        for (const record of this.recordsByPath.values()) {
+            const stamp = readCalendarSyncStamp(record.frontmatter);
+            const key = identityKey(stamp?.occurrenceId || record.id);
+            const active = activeByOccurrence.get(key) || [];
+            active.push(record);
+            activeByOccurrence.set(key, active);
+            // Filtered occurrences are still present. Their current generation
+            // must not be treated as missing simply because it has a newer ID.
+            if (prepared.seenIds.has(key)) prepared.seenIds.add(identityKey(record.id));
+        }
+        for (const occurrence of prepared.occurrences) {
+            const sourceId = occurrence.id;
+            occurrence.sourceOccurrenceId = sourceId;
+            const active = [...(activeByOccurrence.get(identityKey(sourceId)) || [])];
+            const migrated = migratedById.get(identityKey(sourceId));
+            if (migrated && !active.some(record => record.file.path === migrated.file.path)) active.push(migrated);
+            if (active.length > 1) throw new Error('More than one active note claims this calendar occurrence; no records were changed.');
+            const existing = active[0];
+            const previous = existing ? readCalendarSyncStamp(existing.frontmatter) : null;
+            const rescheduled = occurrence.context.calendar.preserveNotesOnExternalReschedule === true
+                && !occurrence.event.isCancelled && previous && parseCalendarRecordId(existing.id)
+                && previous.schedule !== calendarScheduleSignature(occurrence.event);
+            if (rescheduled) {
+                occurrence.retainedRecord = existing;
+                prepared.seenIds.add(identityKey(existing.id));
+            }
+            if (rescheduled || (!existing && relatedIds.has(identityKey(sourceId)))) {
+                // A retry after a partial batch may find only the retained old
+                // note. Allocate a fresh generation; never reclaim that note's ID.
+                occurrence.id = await deriveCalendarRecordId(occurrence.context.configId,
+                    `${calendarEventOccurrenceIdentity(occurrence.event)}\u0000generation:${globalThis.crypto.randomUUID()}`);
+            } else if (existing && !migrated) occurrence.id = existing.id;
+            prepared.seenIds.add(identityKey(occurrence.id));
+        }
     }
 
     private async prepareCreationTemplates(
@@ -551,6 +611,9 @@ export class NativeCalendarRecordService {
         const occurrencesById = new Map(
             prepared.occurrences.map((occurrence) => [identityKey(occurrence.id), occurrence]),
         );
+        const retainedByPath = new Map(prepared.occurrences
+            .filter(occurrence => occurrence.retainedRecord)
+            .map(occurrence => [occurrence.retainedRecord!.file.path, occurrence.retainedRecord!]));
         const records = [...this.recordsByPath.values()]
             .sort((left, right) => left.file.path.localeCompare(right.file.path));
 
@@ -626,6 +689,13 @@ export class NativeCalendarRecordService {
             // for the complete batch. Fetched records get their final title in
             // the event payload after authoritative path preview.
             for (const record of records) {
+                if (retainedByPath.has(record.file.path)) {
+                    const stamp = readCalendarSyncStamp(record.frontmatter)!;
+                    addEntry({ operation: "reidentify", reference: record.id, nextId: record.id,
+                        updates: [{ [CALENDAR_SYNC_PROPERTY]: { ...stamp, retired: true } }] });
+                    postApplyCancellationStateUpdatesById.set(record.id, null);
+                    continue;
+                }
                 const migration = migrationsByPath.get(record.file.path);
                 const targetId = migration?.targetId || record.id;
                 if (!parseCalendarRecordId(targetId)) continue;
@@ -669,6 +739,7 @@ export class NativeCalendarRecordService {
                         atPlannedPath,
                         cancellationStatus,
                         cancellationStateForId(cancellationState, occurrence.id),
+                        {}, occurrence.sourceOccurrenceId, occurrence.id,
                     );
                     const properties = projection.properties;
                     if (projection.preApplyCancellationStateUpdate !== undefined) {
@@ -697,7 +768,7 @@ export class NativeCalendarRecordService {
                     null,
                     cancellationStatus,
                     cancellationStateForId(cancellationState, occurrence.id),
-                    occurrence.templateInstance?.properties,
+                    occurrence.templateInstance?.properties, occurrence.sourceOccurrenceId, occurrence.id,
                 );
                 const properties = applyCaseInsensitiveUpdates(
                     occurrence.templateInstance?.properties || {},
@@ -886,7 +957,12 @@ export class NativeCalendarRecordService {
         cancellationStatus: string,
         cancellationState: NativeCalendarCancellationState | null,
         creationProperties: Record<string, unknown> = {},
+        sourceOccurrenceId?: string,
+        recordId?: string,
     ): ProjectedCalendarEventProperties {
+        const tracking = (sourceOccurrenceId && recordId !== sourceOccurrenceId)
+            || calendar.preserveNotesOnExternalReschedule === true
+            || (existing && readCalendarSyncStamp(existing.frontmatter) !== null);
         const scheduled = event.isAllDay ? localDateKey(event.startDate) : event.startDate.toISOString();
         const end = event.isAllDay ? localDateKey(event.endDate) : event.endDate.toISOString();
         const displayTitle = normalizeCalendarEventTitle(event.title);
@@ -902,6 +978,9 @@ export class NativeCalendarRecordService {
         const attendees = (event.attendees || []).map((value) => String(value || "").trim()).filter(Boolean);
         const projected: ProjectedCalendarEventProperties = {
             properties: {
+                ...(tracking && sourceOccurrenceId ? {
+                    [CALENDAR_SYNC_PROPERTY]: { occurrenceId: sourceOccurrenceId, schedule: calendarScheduleSignature(event) },
+                } : {}),
                 title: displayTitle,
                 scheduled,
                 end,
@@ -1069,6 +1148,12 @@ export class NativeCalendarRecordService {
         if (!parseCalendarRecordId(id)
             && (String(inspected?.kind || resolved?.kind || "") !== "calendar-event"
                 || Number(inspected?.schemaVersion || resolved?.tpsSchemaVersion) !== 1)) return;
+        try {
+            if (readCalendarSyncStamp(canonical || {})?.retired) return;
+        } catch {
+            // Keep malformed tracking indexed. The authoritative sync plan
+            // rejects it before writes, without breaking plugin load/cache events.
+        }
         this.recordsByPath.set(file.path, {
             file,
             frontmatter: { ...canonical },

@@ -1,3 +1,4 @@
+import calendarReschedule from "./load-calendar-reschedule.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -53,6 +54,7 @@ function loadAutoCreateService(stats) {
         return normalizePathValue(value);
     };
     const requireImpl = (specifier) => {
+    if (specifier === "./calendar-reschedule") return calendarReschedule;
         if (specifier === "obsidian") {
             return {
                 App: class {},
@@ -517,3 +519,17 @@ async function runBenchmark() {
 if (process.env.TPS_INDEX_BENCHMARK === "1" || process.argv.includes("--benchmark")) {
     await runBenchmark();
 }
+
+test('retained reschedule history is excluded from legacy matching and orphan cleanup', async () => {
+    const path = 'Calendar/Previous appointment.md';
+    const h = createIndexHarness({
+        files: [makeFile(path)], scanRootFolders: ['Calendar'],
+        frontmatter: { [path]: { externalId: 'old-import', url: 'https://event.example/old',
+            tpsCalendarSync: { occurrenceId: `calendar:v1:${'A'.repeat(16)}:${'B'.repeat(27)}`, schedule: 'time|before|after', retired: true },
+        } },
+    });
+    const { index } = await h.run();
+    assert.equal(index.allNotes.length, 0);
+    assert.equal(index.byEventKey.size, 0);
+    assert.equal(index.byEventUrl.size, 0);
+});

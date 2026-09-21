@@ -2,7 +2,7 @@
 
 Device roles, calendar synchronization, reminders, encrypted attachment sync, and shared Plaid transport.
 
-Current release: [2.1.0](https://github.com/ZachTish/tps-controller/releases/tag/2.1.0) · Obsidian 1.12.3+ · Desktop and mobile.
+Current release: [2.2.0](https://github.com/ZachTish/tps-controller/releases/tag/2.2.0) · Obsidian 1.12.3+ · Desktop and mobile.
 
 ## Install with BRAT
 
@@ -16,6 +16,18 @@ The settings hub contains Overview (default), Calendar rules, Note rules, Remind
 - Configure reminder rules in Reminder rules. Inline-task eligibility can follow GCM's Atomic note/Atomic line mode, require the task's own scheduled value, or use an explicit override.
 - Configure **Advanced → Plaid** for TPS Finances 1.3.0+. Environment, credential references, and OAuth redirect URI are marked **This device**. Secret values stay in Obsidian SecretStorage. Finances owns institution linking, account records, and ledger reconciliation.
 - Attachment sync preserves local files and ordinary links. It uses encrypted GCS objects, device enrollment, and a recovery key; it is independent of Controller/User role. Markdown, Canvas, Bases, configuration, hidden files, and excluded paths stay outside this attachment collection.
+
+## Preserve externally rescheduled notes — 2.2.0
+
+In **Calendar rules**, select a calendar and enable **Keep old note when externally rescheduled**. This optional per-calendar setting defaults off and applies to **Native TPS event records**. Legacy note imports and inline Daily Note tasks retain their existing behavior. Native synchronization requires TPS GCM native-record mode/API v6; minimum Obsidian remains 1.12.3. This is a backward-compatible minor release.
+
+After a baseline sync, a feed change to an occurrence's start, end, or all-day timing keeps the previous note at its existing path with its existing identity, authored properties, status and body, and creates a fresh note for the new schedule. The new note uses the calendar's current template/defaults. Title-only changes, local note date edits and cancellation notifications do not create history. Normal feed synchronization can still overwrite a locally edited date. Existing notes without a saved baseline establish it on their first sync after enabling; Controller does not guess at earlier reschedules. Matching relies on the provider retaining the event UID and, for recurring exceptions, the recurrence identity. A changed UID is treated as a different event.
+
+Only the current generation receives subsequent updates, cancellation and missing-event handling. Retained notes stay ordinary visible notes; they are not archived automatically. Turning the option off resumes in-place updates on the current generation while leaving history alone. Moving an event back to an earlier time creates another distinct note. GCM allocates collision-safe filenames. The reserved `tpsCalendarSync` frontmatter object stores the opaque logical occurrence ID and last imported timing; `retired: true` marks retained history. Do not remove or edit this tracking data. It follows vault sync, survives restarts, and is stripped from copied template defaults. Ambiguous active generations or cross-source ownership stop the batch before mutation.
+
+Creation/template/property planning completes before retiring a note. GCM's existing snapshot-bound batch protects against concurrent edits; if an interruption occurs after retirement, a later sync creates the missing current generation without reclaiming history. This is not a cross-device transaction: use the designated Controller device for automatic sync. The setting is editable alongside the calendar's existing controls without adding a new route, disclosure, command or navigation state; the existing mobile settings layout applies. Physical iPhone acceptance remains user testing.
+
+Focused regression coverage includes external versus local edits, default-off and baseline behavior, repeated moves, cancellation/restoration, template preservation, recurring exceptions, filtered events, missing-event handling, disabling the option, interrupted retries and ambiguous ownership. Validation on 2026-09-20: 523 checks passed, with three existing optional skips; TypeScript, the separate production build, test-vault deployment and plugin reload passed. The actual settings checkbox was toggled on a synthetic disabled calendar using an isolated save handler, leaving real settings unchanged. A synthetic feed exercised the real Controller and GCM services against Inbox files: a local date edit created no duplicate, an external reschedule preserved the old note's body/status/path/ID and created a new note, and a repeat sync remained idempotent. Existing unrelated identity-conflict fixtures blocked a whole-vault snapshot, so file-level QA scoped GCM discovery to the synthetic folder; normal global conflict safeguards remain unchanged. Background filename automation was allowed to settle between checks. All fixtures were archived directly into _archive. No external feed or production vault was accessed. Artifact hashes are recorded in the release notes.
 
 ## Command-driven note rules — 2.0.0
 

@@ -232,7 +232,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
         );
         new Setting(architectureSection)
             .setName('Calendar storage')
-            .setDesc('Native TPS records requires GCM native-record mode. It updates scheduled/status properties in place and does not move or synthesize Daily Note task lines.')
+            .setDesc('Native TPS records requires GCM native-record mode. Syncs event notes with optional history for external reschedules. Does not write Daily Note task lines.')
             .addDropdown((dropdown) => dropdown
                 .addOption('legacy', 'Legacy notes and inline tasks')
                 .addOption('native-records', 'Native TPS event records')
@@ -1946,6 +1946,18 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                         summary.textContent = this.buildCalendarOutputSummary(calendar);
                         await save();
                     }));
+
+            new Setting(acContent)
+                .setName("Keep old note when externally rescheduled")
+                .setDesc("Native event notes only. When the feed changes an event's start, end, or all-day timing, keep the previous note and create a new one. Local date edits and title-only changes do not create another note. Existing notes begin tracking on their next sync.")
+                .addToggle(toggle => {
+                    toggle.toggleEl.setAttribute("aria-label", "Keep old note when externally rescheduled");
+                    toggle.setValue(calendar.preserveNotesOnExternalReschedule === true)
+                        .onChange(async value => {
+                            calendar.preserveNotesOnExternalReschedule = value;
+                            await save();
+                        });
+                });
 
             new Setting(acContent)
                 .setName("Create as")

@@ -1,3 +1,4 @@
+import { readCalendarSyncStamp } from "./calendar-reschedule";
 import { getIntegrationNoteField, setIntegrationNoteField } from '../tps-gcm-api';
 import { App, Notice, TFile, normalizePath } from "obsidian";
 import * as logger from "../logger";
@@ -392,7 +393,7 @@ export class AutoCreateService {
         const candidates: TFile[] = [];
         for (const file of await this.getScopedMarkdownFiles()) {
             const fm = await this.getFrontmatterForFile(file);
-            if (!fm) continue;
+            if (!fm || readCalendarSyncStamp(fm)?.retired) continue;
             if (this.normalizeIdentityValue(this.findKeyInsensitive(fm, this.config.orphanCandidateAtKey))) {
                 candidates.push(file);
             }
@@ -473,7 +474,7 @@ export class AutoCreateService {
                     if (!byTitleDay.has(key)) byTitleDay.set(key, note);
                 }
             }
-            if (!fm) continue;
+            if (!fm || readCalendarSyncStamp(fm)?.retired) continue;
             const eventId = this.normalizeIdentityValue(this.findKeyInsensitive(fm, this.config.eventIdKey));
             const externalId = getExternalId(this.app, fm);
             const uidRaw = this.normalizeIdentityValue(this.findKeyInsensitive(fm, this.config.uidKey));

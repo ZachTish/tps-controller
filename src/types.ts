@@ -49,6 +49,8 @@ export interface ExternalCalendarConfig {
     autoCreateFolder?: string;
     autoCreateTag?: string;
     autoCreateTemplate?: string;
+    /** Native event notes: retain the previous note when the imported schedule changes. */
+    preserveNotesOnExternalReschedule?: boolean;
 }
 
 export interface TwoStageArchiveRule {

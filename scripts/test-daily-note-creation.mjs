@@ -1,3 +1,4 @@
+import calendarReschedule from "./load-calendar-reschedule.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
@@ -51,6 +52,7 @@ function loadExternalCalendarTaskNoteModule() {
   });
   const module = { exports: {} };
   const requireImpl = (specifier) => {
+    if (specifier === "./calendar-reschedule") return calendarReschedule;
     if (specifier === "obsidian") return { normalizePath };
     if (specifier === "../utils") {
       return { normalizeCalendarUrl: (value) => String(value || "").trim().replace(/\/+$/u, "") };
@@ -80,6 +82,7 @@ function loadAutoCreateService() {
   };
   const noOp = () => null;
   const requireImpl = (specifier) => {
+    if (specifier === "./calendar-reschedule") return calendarReschedule;
     if (specifier === "obsidian") {
       return {
         App: class {},

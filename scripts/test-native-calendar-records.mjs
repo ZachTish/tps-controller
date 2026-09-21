@@ -2197,3 +2197,193 @@ test('native calendar template setting remains reachable with a saved legacy tas
   assert.match(source, /Quote variables in YAML values/u);
   assert.match(source, /Executable Templater commands are not supported/u);
 });
+
+const preserveCalendar = { ...calendar, preserveNotesOnExternalReschedule: true };
+const currentNotes = h => [...h.frontmatters.entries()].filter(([, fm]) => !fm.tpsCalendarSync?.retired);
+
+test('external reschedule retains the original identity, path, authored body and properties; only the new note stays active', async () => {
+  const h = harness([event()]);
+  await h.service.sync([preserveCalendar], '', true, false);
+  const [oldPath, oldFm] = currentNotes(h)[0];
+  h.bodies.set(oldPath, 'Meeting notes and [[links]] stay here.');
+  h.mutateBusinessFieldOnDisk(oldPath, { status: 'complete', project: 'A' });
+  const original = structuredClone(h.frontmatters.get(oldPath));
+  h.setEvents([event({ startDate: futureDate(4), title: 'Moved meeting' })]);
+  const moved = await h.service.sync([preserveCalendar], '', true, false);
+  assert.equal(moved.created, 1);
+  assert.equal(h.files.size, 2);
+  assert.deepEqual(h.frontmatters.get(oldPath), { ...original, tpsCalendarSync: { ...original.tpsCalendarSync, retired: true } });
+  assert.equal(h.bodies.get(oldPath), 'Meeting notes and [[links]] stay here.');
+  const [newPath, newFm] = currentNotes(h)[0];
+  assert.notEqual(newPath, oldPath);
+  assert.notEqual(newFm.tpsId, oldFm.tpsId);
+  assert.equal(newFm.tpsCalendarSync.occurrenceId, oldFm.tpsId);
+  assert.equal(newFm.scheduled, futureDate(4).toISOString());
+  assert.equal(newFm.project, undefined);
+  assert.notEqual(newFm.status, 'complete');
+  h.service.recordsByPath.clear();
+  h.service.pathsById.clear();
+  const repeat = await h.service.sync([preserveCalendar], '', true, false);
+  assert.equal(repeat.created, 0);
+  assert.equal(repeat.updated, 0);
+  assert.equal(h.files.size, 2);
+});
+
+test('local schedule edits and feed title-only edits never create history', async () => {
+  const h = harness([event()]);
+  await h.service.sync([preserveCalendar], '', true, false);
+  const [path] = currentNotes(h)[0];
+  h.mutateBusinessFieldOnDisk(path, { scheduled: futureDate(5).toISOString(), end: futureDate(6).toISOString(), allDay: true });
+  h.setEvents([event({ title: 'Renamed only' })]);
+  assert.equal((await h.service.sync([preserveCalendar], '', true, false)).created, 0);
+  assert.equal(h.files.size, 1);
+  assert.equal(currentNotes(h)[0][1].scheduled, event().startDate.toISOString());
+  assert.equal(currentNotes(h)[0][1].title, 'Renamed only');
+});
+
+test('existing untracked notes establish a feed baseline without guessing at a prior reschedule', async () => {
+  const h = harness([event()]);
+  await h.service.sync([calendar], '', true, false);
+  h.setEvents([event({ startDate: futureDate(3) })]);
+  assert.equal((await h.service.sync([preserveCalendar], '', true, false)).created, 0);
+  assert.equal(h.files.size, 1);
+  assert.ok(currentNotes(h)[0][1].tpsCalendarSync);
+  h.setEvents([event({ startDate: futureDate(4) })]);
+  assert.equal((await h.service.sync([preserveCalendar], '', true, false)).created, 1);
+});
+
+test('end-only changes and all-day conversions create history, including a return to an earlier schedule', async () => {
+  const original = event();
+  const h = harness([original]);
+  await h.service.sync([preserveCalendar], '', true, false);
+  for (const next of [event({ endDate: new Date(original.endDate.getTime() + 60_000) }), event({ isAllDay: true }), original]) {
+    h.setEvents([next]);
+    assert.equal((await h.service.sync([preserveCalendar], '', true, false)).created, 1);
+  }
+  assert.equal(h.files.size, 4);
+  assert.equal(currentNotes(h).length, 1);
+  assert.equal(new Set([...h.frontmatters.values()].map(fm => fm.tpsId)).size, 4);
+});
+
+test('cancellation does not fork and later cancellation restoration only affects the current generation', async () => {
+  const h = harness([event()]);
+  await h.service.sync([preserveCalendar], '', true, false);
+  h.setEvents([event({ startDate: futureDate(3), isCancelled: true })]);
+  assert.equal((await h.service.sync([preserveCalendar], '', true, false)).created, 0);
+  h.setEvents([event({ startDate: futureDate(3) })]);
+  assert.equal((await h.service.sync([preserveCalendar], '', true, false)).created, 0);
+  h.setEvents([event({ startDate: futureDate(4) })]);
+  await h.service.sync([preserveCalendar], '', true, false);
+  const history = [...h.frontmatters.entries()].find(([, fm]) => fm.tpsCalendarSync.retired);
+  const saved = structuredClone(history[1]);
+  h.setEvents([event({ startDate: futureDate(4), isCancelled: true })]);
+  await h.service.sync([preserveCalendar], '', true, false);
+  h.setEvents([event({ startDate: futureDate(4) })]);
+  await h.service.sync([preserveCalendar], '', true, false);
+  assert.equal(h.files.size, 2);
+  assert.deepEqual(h.frontmatters.get(history[0]), saved);
+});
+
+test('disabling preservation still follows the current generation; filtering does not mark it missing', async () => {
+  const h = harness([event()]);
+  await h.service.sync([preserveCalendar], '', true, false);
+  h.setEvents([event({ startDate: futureDate(3) })]);
+  await h.service.sync([preserveCalendar], '', true, false);
+  const currentId = currentNotes(h)[0][1].tpsId;
+  const history = [...h.frontmatters.entries()].find(([, fm]) => fm.tpsCalendarSync.retired);
+  const saved = structuredClone(history[1]);
+  h.setEvents([event({ startDate: futureDate(4) })]);
+  assert.equal((await h.service.sync([calendar], '', true, false)).created, 0);
+  assert.equal(currentNotes(h)[0][1].tpsId, currentId);
+  h.settings.syncOnEventDelete = 'archive';
+  const filtered = await h.service.sync([calendar], 'standup', true, false);
+  assert.equal(filtered.archived, 0);
+  h.setEvents([]);
+  assert.equal((await h.service.sync([calendar], '', true, false)).archived, 1);
+  assert.deepEqual(h.frontmatters.get(history[0]), saved);
+});
+
+test('an interrupted retirement retries safely even if preservation was disabled before retry', async () => {
+  const h = harness([event()]);
+  await h.service.sync([preserveCalendar], '', true, false);
+  h.setEvents([event({ startDate: futureDate(3) })]);
+  h.setAfterBatchEntryHook(() => h.seedPlainFile('Unrelated interruption.md'));
+  await assert.rejects(h.service.sync([preserveCalendar], '', true, false), /interrupted/u);
+  assert.equal(currentNotes(h).length, 0);
+  await h.service.sync([calendar], '', true, false);
+  assert.equal(currentNotes(h).length, 1);
+  assert.ok(currentNotes(h)[0][1].tpsCalendarSync);
+  assert.equal((await h.service.sync([calendar], '', true, false)).created, 0);
+  assert.equal(h.frontmatters.size, 2);
+});
+
+test('the new generation gets a fresh template and never inherits template sync ownership', async () => {
+  const path = 'Templates/Meeting.md';
+  const h = harness([event()], { templates: { [path]: '---\nstatus: planned\nproject: template\ntpsCalendarSync:\n  retired: true\n---\nAgenda for {{title}}' } });
+  const config = { ...preserveCalendar, autoCreateTemplate: path };
+  await h.service.sync([config], '', true, false);
+  const [oldPath] = currentNotes(h)[0];
+  h.bodies.set(oldPath, 'Completed agenda');
+  h.setEvents([event({ startDate: futureDate(3), title: 'New appointment' })]);
+  await h.service.sync([config], '', true, false);
+  const [newPath, fm] = currentNotes(h)[0];
+  assert.equal(h.bodies.get(oldPath), 'Completed agenda');
+  assert.match(h.bodies.get(newPath), /Agenda for New appointment/u);
+  assert.equal(fm.project, 'template');
+  assert.equal(fm.tpsCalendarSync.retired, undefined);
+});
+
+test('invalid creation template rejects a reschedule before retiring or modifying the old note', async () => {
+  const h = harness([event()]);
+  await h.service.sync([preserveCalendar], '', true, false);
+  const snapshot = structuredClone([...h.frontmatters]);
+  h.setEvents([event({ startDate: futureDate(3) })]);
+  await assert.rejects(h.service.sync([{ ...preserveCalendar, autoCreateTemplate: 'Missing.md' }], '', true, false), /not found/u);
+  assert.deepEqual([...h.frontmatters], snapshot);
+});
+
+test('recurring exception reschedules retain only the matching occurrence', async () => {
+  const first = event({ occurrenceIdentity: 'series#first', isRecurring: true });
+  const second = event({ occurrenceIdentity: 'series#second', startDate: futureDate(3), isRecurring: true });
+  const h = harness([first, second]);
+  await h.service.sync([preserveCalendar], '', true, false);
+  const secondId = canonicalId(calendar.id, second.occurrenceIdentity);
+  const secondBefore = structuredClone([...h.frontmatters].find(([, fm]) => fm.tpsId === secondId));
+  h.setEvents([{ ...first, startDate: futureDate(4), endDate: futureDate(4, 10) }, second]);
+  assert.equal((await h.service.sync([preserveCalendar], '', true, false)).created, 1);
+  assert.deepEqual([...h.frontmatters].find(([, fm]) => fm.tpsId === secondId), secondBefore);
+  assert.equal(h.files.size, 3);
+});
+
+test('reschedule option persists as an explicit boolean and settings describe its scope', () => {
+  const rows = normalizeExternalCalendarsInPlace([{ ...calendar }, { ...calendar, preserveNotesOnExternalReschedule: true }, { ...calendar, preserveNotesOnExternalReschedule: 'true' }], value => value);
+  assert.deepEqual(rows.map(row => row.preserveNotesOnExternalReschedule), [false, true, false]);
+  const ui = readFileSync(new URL('../src/settings-tab.ts', import.meta.url), 'utf8');
+  assert.match(ui, /Keep old note when externally rescheduled/u);
+  assert.match(ui, /Native event notes only/u);
+  assert.match(ui, /Local date edits and title-only changes do not create another note/u);
+});
+
+test('duplicate active generations and cross-source tracking fail before changing any note', async () => {
+  for (const foreign of [false, true]) {
+    const h = harness([event()]);
+    await h.service.sync([preserveCalendar], '', true, false);
+    const [, fm] = currentNotes(h)[0];
+    h.seedRecordOnDisk('Conflicting generation.md', { ...fm, tpsId: canonicalId(foreign ? 'different-calendar' : calendar.id, 'other-generation') });
+    const snapshot = structuredClone([...h.frontmatters]);
+    h.setEvents([event({ startDate: futureDate(3) })]);
+    await assert.rejects(h.service.sync([preserveCalendar], '', true, false), foreign ? /different source/u : /More than one active/u);
+    assert.deepEqual([...h.frontmatters], snapshot);
+  }
+});
+
+test('malformed tracking does not break startup indexing but blocks sync before writes', async () => {
+  const h = harness([event()]);
+  const id = canonicalId(calendar.id, 'uid-1');
+  assert.doesNotThrow(() => h.seedRecord('Malformed tracking.md', {
+    ...canonicalFrontmatter(event(), id, 'Malformed tracking.md'), tpsCalendarSync: { retired: true },
+  }));
+  const before = structuredClone([...h.frontmatters]);
+  await assert.rejects(h.service.sync([preserveCalendar], '', true, false), /Invalid calendar schedule tracking/u);
+  assert.deepEqual([...h.frontmatters], before);
+});

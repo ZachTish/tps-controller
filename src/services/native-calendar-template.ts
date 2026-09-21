@@ -15,7 +15,7 @@ const COPIED_IDENTITY_KEYS = new Set([
     "tpsid", "tpsschemaversion", "createddate", "modifieddate", "externalid",
     "externaleventid", "tpscalendaruid", "tpscalendarsourceurl", "calendarid",
     "calendarsourceid", "calendaruid", "calendaroccurrenceid", "calendaroccurrenceidentity",
-    "calendaroccurrencekey", "calendarrecurring", "calendarsyncstate", "calendarmissingat",
+    "calendaroccurrencekey", "calendarrecurring", "calendarsyncstate", "calendarmissingat", "tpscalendarsync",
 ]);
 
 export async function readNativeCalendarTemplate(app: App, path: string): Promise<string> {

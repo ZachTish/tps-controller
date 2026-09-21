@@ -1,3 +1,4 @@
+import { readCalendarSyncStamp } from "./calendar-reschedule";
 import { App, TFile, normalizePath } from "obsidian";
 import type { TPSControllerSettings } from "../types";
 import * as logger from "../logger";
@@ -62,7 +63,7 @@ export class ExternalCalendarDuplicateCleanupService {
             if (this.shouldSkipFile(file, settings)) continue;
 
             const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
-            if (!frontmatter) continue;
+            if (!frontmatter || readCalendarSyncStamp(frontmatter)?.retired) continue;
 
             const externalId = this.findStringCaseInsensitive(frontmatter, "externalId");
             const eventId = this.findStringCaseInsensitive(frontmatter, settings.eventIdKey);
