@@ -1,5 +1,15 @@
 # TPS Controller
 
+## Initial Wallet handoff recovery — 2.5.1
+
+A first-time legacy handoff can retry its acknowledgement after a disk or sync
+failure even if Controller never imported Wallet records. Once the writer is
+durably retired, that exact saved owner is sufficient to resend its receipt;
+active legacy imports still require their original history. A regression test
+reproduces the failure and verifies restart recovery with bank sync paused.
+All 2.5.0 setup/UI behavior remains unchanged. Use 2.5.1 or newer for setup.
+
+
 ## Wallet setup on iPhone — 2.5.0
 
 Advanced now separates **Apple Card & Savings** from **Bank connections**.

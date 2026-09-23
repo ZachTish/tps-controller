@@ -1,6 +1,6 @@
 {
     "name": "tps-controller",
-    "version": "2.5.0",
+    "version": "2.5.1",
     "description": "Centralized controller management for TPS plugins.",
     "main": "main.js",
     "scripts": {

@@ -427,6 +427,7 @@ export class FinanceRelayService {
                 read: name => this.read(expected, name), write: (name, value) => this.write(expected, name, value),
                 owner: () => this.getConfiguration()?.walletLocalOwner,
                 previousProducer: () => {
+                    if (expected.walletLocalOwner) return expected.walletLocalOwner.producerId;
                     if (expected.walletEnabled === undefined) return undefined;
                     const saved = this.app.secretStorage.getSecret(WALLET);
                     if (!saved) throw new Error('Wallet history is missing.');

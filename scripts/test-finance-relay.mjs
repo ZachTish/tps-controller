@@ -232,3 +232,18 @@ test('handoff is acknowledged only after an already running legacy import leaves
  release();await working;await overlapping;await host.relay.tick();assert.equal(completed,true);
  assert.equal(host.relay.getConfiguration().walletEnabled,false);assert.ok(host.fs.files.has(path('wallet/local-import-receipt')));
 });
+
+test('first handoff without a legacy import receipt recovers a lost reply after restart',async()=>{
+ const {host}=await setup();host.relay.setEnabled(false);
+ const c=host.relay.getConfiguration(),request={version:1,producerId:'11111111-1111-4111-8111-111111111111',requestId:'33333333-3333-4333-8333-333333333333'};
+ assert.equal(c.walletEnabled,undefined);
+ const path=n=>`${c.folder}/${c.relayId}/${n}.md`,key=host.secrets.get(KEY);
+ host.fs.files.set(path('wallet/local-import'),await encodeRelay(request,key,`${c.relayId}/wallet/local-import`));
+ host.fs.failWrites=true;await host.relay.tick();
+ assert.deepEqual(host.relay.getConfiguration().walletLocalOwner,request);
+ assert.equal(host.fs.files.has(path('wallet/local-import-receipt')),false);
+ await host.relay.stop();host.fs.failWrites=false;host.relay=host.make();await host.relay.tick();
+ const text=host.fs.files.get(path('wallet/local-import-receipt'));assert.ok(text,'durable retirement must be enough to retry the acknowledgement');
+ assert.deepEqual(await decodeRelay(text,key,`${c.relayId}/wallet/local-import-receipt`),{...request,complete:true});
+ assert.equal(host.relay.getConfiguration().enabled,false);
+});
