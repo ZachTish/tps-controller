@@ -1,5 +1,21 @@
 # TPS Controller
 
+## Calendar creation recovery — 2.4.2
+
+Calendar reconciliation now uses GCM's optional conflict-aware snapshot capability
+(available in GCM 3.2.0). Invalid unrelated records no longer prevent all event
+creation. GCM still reserves every conflicting identity globally; Controller stops
+on canonical calendar IDs, calendar kinds, legacy calendar ownership, schedule
+stamps, or unreadable conflict evidence. It never repairs or rewrites unrelated
+notes. Older GCM versions retain the existing strict snapshot behavior; update both
+plugins for this fix. No saved setting or default changes.
+
+The snapshot and every recovery/post-write snapshot use the same guard. Regression
+coverage includes unrelated invalid records, calendar conflicts, missing diagnostic
+payloads, duplicate/blocked owners, identity reservations, and repeat-sync stability.
+Malformed YAML and unreadable vault files still stop reconciliation.
+
+
 ## Calendar reliability follow-up — 2.4.1
 
 Extended testing of 2.4.0 reproduced four issues: a one-hour error near DST
@@ -42,6 +58,15 @@ intentional conflict fixtures. Existing test-vault filename automation stayed ac
 All fixtures were moved directly from Inbox to `_archive`; Controller and GCM
 settings hashes stayed unchanged and outbound automation stayed disabled. Production
 was not accessed. Release notes include the tested artifact hashes for BRAT.
+
+Validation (2026-09-23): the full declared suite, focused identity-conflict tests,
+TypeScript, and final production build pass. Test-vault CLI reload verifies the
+versioned artifacts. Installed Controller/GCM QA creates an event beside an
+incomplete unrelated record, repeats with zero creates and unchanged bytes, and
+rejects a duplicate calendar owner before writing. The unrelated note stays
+byte-identical. Synthetic fixtures were archived directly from Inbox; settings
+and outbound automation were preserved. This is a BRAT handoff, not evidence of
+production installation or user acceptance.
 
 ## Deterministic calendar reschedules — 2.4.0
 

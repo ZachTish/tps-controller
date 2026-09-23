@@ -194,6 +194,28 @@ export class NativeCalendarRecordService {
         return run;
     }
 
+    private async calendarSnapshot(api: GcmNativeRecordsApi): Promise<GcmNativeRecordSnapshot> {
+        const aware = api.capabilities?.conflictAwareSnapshots === true;
+        const snapshot = await api.snapshot!(undefined, aware ? { includeConflicts: true } : undefined);
+        if (aware && !Array.isArray(snapshot.conflicts)) {
+            throw new Error("TPS GCM did not return calendar conflict diagnostics; no records were changed.");
+        }
+        const conflicts = snapshot.conflicts || [];
+        const relevant = conflicts.filter(conflict => {
+            const raw = conflict.frontmatter;
+            return !raw
+                || conflict.ids.length === 0
+                || conflict.ids.some(id => String(id).toLocaleLowerCase().startsWith('calendar:'))
+                || conflict.kinds.some(kind => kind.trim().toLocaleLowerCase() === 'calendar-event')
+                || [CALENDAR_SYNC_PROPERTY, ...LEGACY_IDENTITY_PROPERTIES].some(key => hasPropertyCaseInsensitive(raw, key));
+        });
+        if (relevant.length) {
+            throw new Error(`Calendar sync is blocked by ${relevant.length} conflicting calendar record(s); no records were changed. Repair their identities in TPS GCM.`);
+        }
+        if (conflicts.length) logger.flowWarn('NativeCalendarRecords', 'sync:unrelated-conflicts-isolated', { records: conflicts.length });
+        return snapshot;
+    }
+
     private async executeSync(
         calendars: ExternalCalendarConfig[],
         filter: string,
@@ -237,7 +259,7 @@ export class NativeCalendarRecordService {
         // fetch and immediately before the complete migration/create plan. A
         // legacy note that arrives through Sync while fetching is therefore
         // migrated instead of duplicated under the canonical ID.
-        const authoritativeSnapshot = await api.snapshot!();
+        const authoritativeSnapshot = await this.calendarSnapshot(api);
         this.rebuildFromHandles(authoritativeSnapshot.records);
         const migrationPlan = await this.prepareLegacyMigration(contexts, authoritativeSnapshot.records);
         await this.prepareRescheduledOccurrences(prepared, authoritativeSnapshot.records, migrationPlan);
@@ -271,7 +293,7 @@ export class NativeCalendarRecordService {
                 this.cause("controller-calendar-sync"),
             );
             if (!appliedResult.ok || appliedResult.handles.length !== mutationPlan.entries.length) {
-                const recoverySnapshot = await api.snapshot!();
+                const recoverySnapshot = await this.calendarSnapshot(api);
                 this.rebuildFromHandles(recoverySnapshot.records);
                 await this.commitCancellationStateUpdates(
                     cancellationStateUpdatesForAppliedPrefix(
@@ -301,7 +323,7 @@ export class NativeCalendarRecordService {
             // Refresh first so even an impossible contract mismatch below does
             // not leave Controller's incremental index pointed at pre-batch
             // paths or identities.
-            const appliedSnapshot = await api.snapshot!();
+            const appliedSnapshot = await this.calendarSnapshot(api);
             this.rebuildFromHandles(appliedSnapshot.records);
             for (let index = 0; index < applied.length; index += 1) {
                 const handle = applied[index];

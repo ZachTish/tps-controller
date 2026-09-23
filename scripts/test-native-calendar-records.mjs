@@ -2519,3 +2519,35 @@ test('unchanged imported semantics preserve a filename settled by another plugin
  h.setEvents([{...incoming,title:'External renamed title',sourceRevision:[2,0,2]}]);await h.service.sync([calendar],'',true,false);
  assert.equal(currentNotes(h)[0][0],buildNativeCalendarRecordFileName({...incoming,title:'External renamed title'})+'.md');assert.equal(h.files.has('User filename rule.md'),false);
 });
+
+test('calendar sync isolates unrelated invalid records and remains idempotent',async()=>{
+ const h=harness([event()]);h.api.capabilities.conflictAwareSnapshots=true;
+ const snapshot=h.api.snapshot.bind(h.api);
+ h.api.snapshot=async(kind,options)=>{assert.equal(options.includeConflicts,true);return {...await snapshot(),conflicts:[
+  {path:'item.md',ids:['item-1'],kinds:[],frontmatter:{tpsId:'item-1',entityKind:'food'}},
+  {path:'holding.md',ids:['holding-1'],kinds:['holding'],frontmatter:{tpsId:'holding-1',kind:'holding'}}]};};
+ assert.equal((await h.service.sync([calendar],'',true,false)).created,1);
+ assert.equal((await h.service.sync([calendar],'',true,false)).created,0);
+ assert.equal(h.frontmatters.size,1);
+});
+
+for(const conflict of [
+ {ids:['calendar:v1:bad'],kinds:[],frontmatter:{kind:'note'}},
+ {ids:['legacy-id'],kinds:['calendar-event'],frontmatter:{kind:'calendar-event'}},
+ {ids:['legacy-id'],kinds:[],frontmatter:{calendarOccurrenceIdentity:'provider-event'}},
+ {ids:['legacy-id'],kinds:[],frontmatter:{tpsCalendarSync:{occurrenceId:'test'}}},
+ {ids:[],kinds:[],frontmatter:null},
+ {ids:[],kinds:[],frontmatter:{kind:'other'}},
+]) test('calendar-related or unreadable conflict blocks before every write '+JSON.stringify(conflict),async()=>{
+ const h=harness([event()]);h.api.capabilities.conflictAwareSnapshots=true;
+ const snapshot=h.api.snapshot.bind(h.api);
+ h.api.snapshot=async()=>({...await snapshot(),conflicts:[{path:'conflict.md',...conflict}]});
+ await assert.rejects(()=>h.service.sync([calendar],'',true,false),/conflicting calendar/);
+ assert.equal(h.mutationLog.length,0);
+});
+
+test('advertised conflict-aware snapshots must actually include conflict diagnostics',async()=>{
+ const h=harness([event()]);h.api.capabilities.conflictAwareSnapshots=true;
+ await assert.rejects(()=>h.service.sync([calendar],'',true,false),/did not return calendar conflict diagnostics/);
+ assert.equal(h.mutationLog.length,0);
+});

@@ -75,11 +75,12 @@ export interface GcmNativeRecordSnapshot {
   token: number;
   revision: number;
   records: GcmNativeRecordHandle[];
+  conflicts?: Array<{ path: string; ids: string[]; kinds: string[]; frontmatter: Record<string, unknown> | null }>;
 }
 
 export interface GcmNativeRecordsApi {
   version?: number;
-  capabilities?: { calendarTemplateRecords?: boolean };
+  capabilities?: { calendarTemplateRecords?: boolean; conflictAwareSnapshots?: boolean };
   isEnabled?: () => boolean;
   create?: (
     kind: 'calendar-event',
@@ -104,7 +105,7 @@ export interface GcmNativeRecordsApi {
   /** API v6: authoritative on-disk enumeration; virtual compatibility fields may be projected in handles. */
   list?: (kind?: string) => Promise<GcmNativeRecordHandle[]>;
   /** API v6: authoritative records plus identity and mutation revisions for plan validation. */
-  snapshot?: (kind?: string) => Promise<GcmNativeRecordSnapshot>;
+  snapshot?: (kind?: string, options?: { includeConflicts?: boolean }) => Promise<GcmNativeRecordSnapshot>;
   resolve?: (reference: TFile | string) => Promise<GcmNativeRecordHandle | null>;
   /** API v6: preflight exact ordered payloads against one authoritative index. */
   canApplyIdentityPlan?: (entries: Array<{
