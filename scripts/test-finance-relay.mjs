@@ -202,3 +202,33 @@ test('Wallet uses the same encrypted relay, preserves replay receipts, and works
  await host.relay.stop();host.relay=host.make();await host.relay.tick();assert.equal(imports,1);
  host.relay.setWalletEnabled(false);host.relay.setWalletEnabled(true);await host.relay.tick();assert.equal(imports,1);
 });
+
+test('phone handoff retires Wallet even when bank service is paused and forbids re-enabling',async()=>{
+ const {host}=await setup();host.relay.setWalletEnabled(true);host.relay.setEnabled(false);
+ const c=host.relay.getConfiguration(),request={version:1,producerId:'11111111-1111-4111-8111-111111111111',requestId:'22222222-2222-4222-8222-222222222222'};
+ const path=n=>`${c.folder}/${c.relayId}/${n}.md`,key=host.secrets.get(KEY);
+ host.fs.files.set(path('wallet/local-import'),await encodeRelay(request,key,`${c.relayId}/wallet/local-import`));
+ await host.relay.tick();
+ assert.equal(host.relay.getConfiguration().enabled,false);assert.equal(host.relay.getConfiguration().walletEnabled,false);
+ assert.deepEqual(host.relay.getConfiguration().walletLocalOwner,request);
+ const receipt=await decodeRelay(host.fs.files.get(path('wallet/local-import-receipt')),key,`${c.relayId}/wallet/local-import-receipt`);
+ assert.deepEqual(receipt,{...request,complete:true});assert.throws(()=>host.relay.setWalletEnabled(true),/iPhone/);
+ await host.relay.stop();host.relay=host.make();await host.relay.tick();assert.equal(host.relay.getConfiguration().walletEnabled,false);
+});
+
+test('handoff is acknowledged only after an already running legacy import leaves its queue',async()=>{
+ const {host,b}=await setup();host.relay.setWalletEnabled(true);
+ const c=host.relay.getConfiguration(),key=host.secrets.get(KEY),producerId='11111111-1111-4111-8111-111111111111',batchId='22222222-2222-4222-8222-222222222222';
+ const path=n=>`${c.folder}/${c.relayId}/${n}.md`;
+ const publish=async(n,v)=>host.fs.files.set(path(n),await encodeRelay(v,key,`${c.relayId}/${n}`));
+ let entered,release;const started=new Promise(r=>entered=r),held=new Promise(r=>release=r);let completed=false;
+ b.importWallet=async()=>{entered();await held;completed=true;};
+ const part=JSON.stringify({version:1,accounts:[],transactions:[],deletedTransactions:[]});
+ const digest=Buffer.from(await webcrypto.subtle.digest('SHA-256',new TextEncoder().encode(part))).toString('hex');
+ await publish(`wallet/${batchId}/0`,part);await publish('wallet/pending',{version:1,producerId,sequence:1,batchId,parts:[digest]});
+ const working=host.relay.tick();await started;
+ await publish('wallet/local-import',{version:1,producerId,requestId:batchId});
+ const overlapping=host.relay.tick();assert.equal(host.fs.files.has(path('wallet/local-import-receipt')),false);
+ release();await working;await overlapping;await host.relay.tick();assert.equal(completed,true);
+ assert.equal(host.relay.getConfiguration().walletEnabled,false);assert.ok(host.fs.files.has(path('wallet/local-import-receipt')));
+});

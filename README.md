@@ -1,5 +1,44 @@
 # TPS Controller
 
+## Wallet setup on iPhone — 2.5.0
+
+Advanced now separates **Apple Card & Savings** from **Bank connections**.
+Open Apple Wallet goes directly to TishOS 0.18.1 (151)'s Wallet screen. New
+connections need no finance-host pairing: confirm the vault, choose Apple
+accounts/history, and the iPhone starts the initial note import automatically.
+Bank hosting and bank pairing remain independent.
+
+Existing relay users choose **Finish setup and import** on the iPhone. It sends
+an authenticated one-time request. The original Controller completes any active
+legacy write, durably retires its Wallet importer, and then acknowledges; the
+phone resumes the same journal and imports automatically. Keep Controller 2.5.0+
+open for this handoff once. It can retire the writer while bank service is paused
+without enabling bank sync or requiring the Finances backend. Lost replies are
+retried, wrong producers/requests and corrupt state stop the handoff, and a
+retired writer cannot be enabled again. Rollback to a pre-2.5.0 Controller after
+handoff is unsupported. Real Apple permission remains a user action on iPhone.
+
+Settings inventory: all six hub routes and Overview default remain. Apple Wallet
+has one direct setup entry, separate from bank pairing. Desktop folder editing,
+bank refresh, service pause/resume, host setup, pairing, unpairing and Open
+Finances remain. Mobile omits desktop-only hosting/folder editing; paired clients
+can still replace their pairing code and unpair on either platform. The previous Wallet enable toggle is intentionally retired; an already
+enabled importer retains **Stop old importer**. No UI route/disclosure state is
+persisted. Native Setting buttons keep keyboard semantics and existing wrapping
+mobile CSS. Runtime retirement is stored in the device-local finance config;
+its encrypted request/receipt use the existing paired request folder.
+
+Focused tests cover mobile/desktop actions, independent handoff/retry state and
+an in-flight legacy write. Full tests, final build/deploy/reload, visual QA and
+public release evidence are recorded in `release-notes/2.5.0.md`. Test-vault QA
+reloaded 2.5.0, inspected all six destinations, the separate bank pairing dialog,
+and the Wallet entry on desktop and a 393 px panel using Obsidian mobile
+emulation. Focus restoration and native button semantics remain intact. The
+original runtime data hash and unconfigured finance service were preserved.
+Native phone renderings and synthetic first imports were verified in TishOS;
+physical Apple account authorization remains a user/device acceptance step.
+
+
 ## Calendar write-batch reduction — 2.4.3
 
 Full identity and destination checks still run, but unchanged calendar notes no
@@ -172,7 +211,7 @@ remained off. No production feed, notes or settings were accessed. Artifact hash
 are recorded in the public release notes; 2.4.0 is ready for the user's BRAT pull,
 not installed in production by this task.
 
-## Apple Wallet import — 2.3.0
+## Previous Wallet relay — 2.3.0 (superseded by direct iPhone import)
 
 **Advanced → Finance server → Import Apple Wallet · This device** enables the
 approved native TishOS iPhone app to send balances and transaction history to this

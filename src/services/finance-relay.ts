@@ -1,4 +1,4 @@
-import { reconcileWallet, walletReceipt } from "./finance-wallet-relay";
+import { reconcileWallet, walletReceipt, walletLocalOwner, WalletLocalOwner, retireWalletImporter } from "./finance-wallet-relay";
 import * as logger from "../logger";
 import { App, Platform } from 'obsidian';
 const CONFIG = 'tps-finance-relay-v1';
@@ -66,6 +66,7 @@ interface Config {
     intervalMinutes: number;
     folder?: string;
     walletEnabled?: boolean;
+    walletLocalOwner?: WalletLocalOwner;
     folderMove?: { from: string; to: string; hadSource: boolean };
 }
 interface Request {
@@ -192,6 +193,10 @@ export class FinanceRelayService {
             throw new Error('Invalid finance relay configuration.');
         if (raw.folder !== undefined && financeRequestFolder(raw.folder) !== raw.folder)
             throw new Error('Invalid finance request folder.');
+        if (raw.walletLocalOwner !== undefined) {
+            walletLocalOwner(raw.walletLocalOwner);
+            if (raw.walletEnabled !== false) throw new Error('The retired Wallet importer must remain disabled.');
+        }
         if (raw.folderMove && (raw.mode !== 'host' || typeof raw.folderMove.to !== 'string' || financeRequestFolder(raw.folderMove.to.slice(0, -(raw.relayId.length + 1))) + '/' + raw.relayId !== raw.folderMove.to || raw.folderMove.from.toLowerCase() === raw.folderMove.to.toLowerCase() || raw.folderMove.from.toLowerCase().startsWith(raw.folderMove.to.toLowerCase() + '/') || raw.folderMove.to.toLowerCase().startsWith(raw.folderMove.from.toLowerCase() + '/') || typeof raw.folderMove.hadSource !== 'boolean' || raw.folderMove.from !== `${raw.folder || DEFAULT_FINANCE_FOLDER}/${raw.relayId}` || !raw.folderMove.to.endsWith('/' + raw.relayId)))
             throw new Error('Invalid finance folder move.');
         return raw;
@@ -199,6 +204,7 @@ export class FinanceRelayService {
     setWalletEnabled(enabled: boolean): void {
         const c = this.getConfiguration();
         if (!c || c.mode !== 'host' || !this.isController() || Platform.isMobile) throw new Error('Configure Wallet on the finance Controller.');
+        if (enabled && c.walletLocalOwner) throw new Error('Apple Wallet is imported directly by the iPhone.');
         if (c.walletEnabled === undefined) this.app.secretStorage.setSecret(WALLET, 'null');
         this.app.saveLocalStorage(CONFIG, {...c, walletEnabled: enabled});
     }
@@ -415,6 +421,28 @@ export class FinanceRelayService {
         if (!c)
             return;
         if (c.folderMove) c = await this.finishFolderMove(c);
+        if (c.mode === 'host' && this.isController() && !Platform.isMobile) {
+            const expected = c;
+            await retireWalletImporter({
+                read: name => this.read(expected, name), write: (name, value) => this.write(expected, name, value),
+                owner: () => this.getConfiguration()?.walletLocalOwner,
+                previousProducer: () => {
+                    if (expected.walletEnabled === undefined) return undefined;
+                    const saved = this.app.secretStorage.getSecret(WALLET);
+                    if (!saved) throw new Error('Wallet history is missing.');
+                    return walletReceipt(JSON.parse(saved))?.producerId;
+                },
+                retire: owner => {
+                    const current = this.getConfiguration();
+                    if (!current || current.relayId !== expected.relayId || current.deviceId !== expected.deviceId || current.mode !== 'host') throw new Error('Finance connection changed.');
+                    this.app.saveLocalStorage(CONFIG, {...current, walletEnabled: false, walletLocalOwner: owner});
+                    if (this.getConfiguration()?.walletEnabled !== false) throw new Error('Wallet retirement was not saved.');
+                    logger.flow('FinanceRelay', 'wallet-handed-to-phone', {});
+                },
+                active: () => !this.stopped && this.isController() && !Platform.isMobile && this.getConfiguration()?.relayId === expected.relayId && this.getConfiguration()?.deviceId === expected.deviceId && this.getConfiguration()?.mode === 'host',
+            });
+            c = this.getConfiguration()!;
+        }
         if (!c.enabled) {
             this.status = { ...this.status, online: false, message: 'Finance connection paused.' };
             return;

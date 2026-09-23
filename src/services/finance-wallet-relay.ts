@@ -16,6 +16,34 @@ export interface WalletManifest {
 }
 const id = (v: unknown): v is string => typeof v === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(v);
 const hash = (v: unknown): v is string => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v);
+export interface WalletLocalOwner { version: 1; producerId: string; requestId: string; }
+export function walletLocalOwner(value: unknown): WalletLocalOwner {
+    const r = value as WalletLocalOwner;
+    if (!r || r.version !== 1 || !id(r.producerId) || !id(r.requestId)) throw new Error('Invalid Wallet handoff.');
+    return {version: 1, producerId: r.producerId, requestId: r.requestId};
+}
+/** Called in the same exclusive queue as legacy Wallet writes, even if bank refresh is paused. */
+export async function retireWalletImporter(io: {
+    read(name: string): Promise<unknown | null>;
+    write(name: string, value: unknown): Promise<void>;
+    owner(): WalletLocalOwner | undefined;
+    previousProducer(): string | undefined;
+    retire(owner: WalletLocalOwner): void;
+    active(): boolean;
+}): Promise<void> {
+    const raw = await io.read('wallet/local-import');
+    if (raw === null || !io.active()) return;
+    const request = walletLocalOwner(raw), owner = io.owner(), previous = io.previousProducer();
+    if ((owner && (owner.producerId !== request.producerId || owner.requestId !== request.requestId)) || (previous && previous !== request.producerId))
+        throw new Error('Wallet handoff belongs to another connection.');
+    if (!owner) io.retire(request); // Durable stop precedes acknowledgement, including after a crash.
+    const saved = io.owner();
+    if (!io.active() || !saved || saved.producerId !== request.producerId || saved.requestId !== request.requestId)
+        throw new Error('Wallet retirement was not saved.');
+    const receipt = await io.read('wallet/local-import-receipt') as (WalletLocalOwner & {complete: boolean}) | null;
+    if (receipt?.version === 1 && receipt.complete === true && receipt.producerId === request.producerId && receipt.requestId === request.requestId) return;
+    if (io.active()) await io.write('wallet/local-import-receipt', {...request, complete: true});
+}
 export async function walletDigest(value: unknown): Promise<string> {
     const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(typeof value === 'string' ? value : JSON.stringify(value)));
     return Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
