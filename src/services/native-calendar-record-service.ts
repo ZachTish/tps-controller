@@ -693,7 +693,7 @@ export class NativeCalendarRecordService {
                     reference: migration.record.id,
                     nextId: migration.targetId,
                     updates,
-                    ...(occurrence ? { fileName: buildNativeCalendarRecordFileName(occurrence.event) } : {}),
+                    ...(occurrence ? calendarRecordRename(occurrence.event, migration.record) : {}),
                 });
                 const projectedFrontmatter = applyCaseInsensitiveUpdates(
                     migration.record.frontmatter,
@@ -743,7 +743,7 @@ export class NativeCalendarRecordService {
                         reference: record.id,
                         nextId: targetId,
                         updates: [],
-                        ...(occurrence ? { fileName: buildNativeCalendarRecordFileName(occurrence.event) } : {}),
+                        ...(occurrence ? calendarRecordRename(occurrence.event, record) : {}),
                     });
                 }
                 projectedByPath.set(record.file.path, projected);
@@ -789,7 +789,7 @@ export class NativeCalendarRecordService {
                         reference: source.id,
                         nextId: migration?.targetId || source.id,
                         updates: Object.keys(eventUpdates).length ? [eventUpdates] : [],
-                        fileName,
+                        ...calendarRecordRename(occurrence.event, source),
                     });
                     continue;
                 }
@@ -1564,6 +1564,28 @@ export function buildNativeCalendarRecordFileName(event: Pick<ExternalCalendarEv
         .slice(0, 150)
         || "Untitled event";
     return `${localDateKey(event.startDate)} - ${title}`;
+}
+
+/** Keep an already correct collision suffix when a sibling renames or disappears.
+ * Reallocating its filename each sync otherwise compacts suffixes over many writes.
+ */
+function calendarRecordRename(event: ExternalCalendarEvent, record: IndexedCalendarRecord): { fileName: string } {
+    const file = record.file;
+    const previous = readCalendarSyncStamp(record.frontmatter);
+    if (previous?.schedule === calendarScheduleSignature(event)
+        && normalizeCalendarEventTitle(readPropertyCaseInsensitive(record.frontmatter, 'title')) === normalizeCalendarEventTitle(event.title)) {
+        // A completed import already supplied these semantics. Adopt a filename
+        // settled by the user's renamer instead of fighting it every sync.
+        return { fileName: file.basename };
+    }
+    const fileName = buildNativeCalendarRecordFileName(event);
+    const stem = fileName.replace(/\.md$/iu, '').replace(/\.{2,}/gu, '-').replace(/^[.\s-]+|[.\s-]+$/gu, '');
+    if (file.basename === stem) return { fileName: file.basename };
+    if (file.basename.startsWith(stem)) {
+        const suffix = file.basename.slice(stem.length).match(/^ \((\d+)\)$/u);
+        if (suffix && Number(suffix[1]) >= 2 && Number(suffix[1]) <= 999) return { fileName: file.basename };
+    }
+    return { fileName };
 }
 
 function unresolvedMarkdownLink(path: string): string {

@@ -125,6 +125,7 @@ function harness(initialEvents = [], options = {}) {
   let afterSnapshotHook = null;
   let afterPreflightHook = null;
   let afterBatchEntryHook = null;
+  let afterBatchEntryIndex = 0;
   let afterAuthoritativeRebuildHook = null;
   let metadataChangedListener = null;
   let settingsSaveCount = 0;
@@ -399,7 +400,7 @@ function harness(initialEvents = [], options = {}) {
       };
       const interruptAfterCommittedEntry = async (index) => {
         const hook = afterBatchEntryHook;
-        if (!hook) return null;
+        if (!hook || index !== afterBatchEntryIndex) return null;
         afterBatchEntryHook = null;
         commitPendingState();
         await hook({ index, handle: handles[index] });
@@ -658,7 +659,7 @@ function harness(initialEvents = [], options = {}) {
     setFetchHook: (hook) => { fetchHook = hook; },
     setAfterSnapshotHook: (hook) => { afterSnapshotHook = hook; },
     setAfterPreflightHook: (hook) => { afterPreflightHook = hook; },
-    setAfterBatchEntryHook: (hook) => { afterBatchEntryHook = hook; },
+    setAfterBatchEntryHook: (hook, index = 0) => { afterBatchEntryHook = hook; afterBatchEntryIndex = index; },
     setAfterAuthoritativeRebuildHook: (hook) => { afterAuthoritativeRebuildHook = hook; },
     setFailSettingsSave: (value) => { failSettingsSave = value; },
     emitMetadataChanged: (path, frontmatter) => {
@@ -2469,4 +2470,52 @@ test('template recurrence instructions are stripped before external occurrence c
  const h=harness([event()],{templates:{'Templates/Recurring.md':'---\nrecurrenceRule: FREQ=DAILY\nrecurrence: daily\nrrule: FREQ=DAILY\nproject: keep\n---\nBody'}});
  await h.service.sync([{...calendar,autoCreateTemplate:'Templates/Recurring.md'}],'',true,false);
  const fm=currentNotes(h)[0][1];assert.equal(fm.project,'keep');assert.equal(fm.recurrenceRule,undefined);assert.equal(fm.recurrence,undefined);assert.equal(fm.rrule,undefined);
+});
+
+
+test('120-step replay mixes moves, cancellations, failures, manual edits and repeated syncs without duplicate active records',async()=>{
+ const events=Array.from({length:12},(_,i)=>event({id:`replay-${i}`,uid:`replay-${i}`,occurrenceIdentity:`replay-${i}`,sourceRevision:[1,0,1],sourceRevisionOrigin:'master'}));
+ const config={...preserveCalendar,rescheduleActions:[{target:'previous',key:'status',value:'rescheduled'},{target:'current',key:'project',value:'from-move'}]};
+ const h=harness(events);h.settings.syncOnEventDelete='archive';await h.service.sync([config],'',true,false);
+ let expected=12,failed=0,moves=0;
+ const snapshot=()=>structuredClone([...h.frontmatters].sort(([a],[b])=>a.localeCompare(b)));
+ for(let step=0;step<120;step++){
+  const index=step%12, prior=events[index], next={...prior,sourceRevision:[step+2,0,step+2]};
+  const op=step%5;
+  if(op===0){next.startDate=new Date(+prior.startDate+3600000);next.endDate=new Date(+prior.endDate+3600000);if(!prior.isCancelled){expected++;moves++;}}
+  if(op===1)next.title=`Title ${step}`;
+  if(op===2)next.isCancelled=true;
+  if(op===3)next.isCancelled=false;
+  events[index]=next;h.setEvents([...events].reverse());
+  if(op===4){const before=snapshot();h.setFetchOk(false);await h.service.sync([config],'',true,false);assert.deepEqual(snapshot(),before);h.setFetchOk(true);await h.service.sync([config],'',true,false);failed++;}
+  else await h.service.sync([config],'',true,false);
+  assert.equal(h.frontmatters.size,expected,`file count at step ${step}`);
+  const active=currentNotes(h);assert.equal(active.length,12);assert.equal(new Set(active.map(([,fm])=>fm.tpsCalendarSync.occurrenceId)).size,12);
+  const [path]=active[step%active.length];h.mutateBusinessFieldOnDisk(path,{project:`manual-${step}`});
+  const before=snapshot();await h.service.sync([config],'',true,false);assert.deepEqual(snapshot(),before,`repeat at step ${step}`);
+ }
+ assert.ok(moves>0);assert.equal(failed,24);
+});
+
+test('each write boundary in a three-occurrence reschedule recovers to exactly the originally planned generations',async()=>{
+ for(let boundary=0;boundary<6;boundary++){
+  const events=Array.from({length:3},(_,i)=>event({id:`boundary-${i}`,uid:`boundary-${i}`,occurrenceIdentity:`boundary-${i}`}));
+  const h=harness(events);await h.service.sync([preserveCalendar],'',true,false);
+  h.setEvents(events.map(e=>({...e,startDate:new Date(+e.startDate+3600000),endDate:new Date(+e.endDate+3600000)})));
+  h.setAfterBatchEntryHook(()=>{},boundary);await assert.rejects(h.service.sync([preserveCalendar],'',true,false),/interrupted/);
+  const expected=h.preflightLog.at(-1).entries.filter(e=>e.operation==='create').map(e=>e.nextId).sort();
+  assert.equal(expected.length,3);await h.service.sync([preserveCalendar],'',true,false);
+  assert.equal(h.frontmatters.size,6);assert.deepEqual(currentNotes(h).map(([,fm])=>fm.tpsId).sort(),expected);
+  assert.equal((await h.service.sync([preserveCalendar],'',true,false)).created,0);
+ }
+});
+
+
+test('unchanged imported semantics preserve a filename settled by another plugin; an external title change still renames',async()=>{
+ const incoming=event({sourceRevision:[1,0,1],sourceRevisionOrigin:'master'});
+ const h=harness([incoming]);await h.service.sync([calendar],'',true,false);const id=currentNotes(h)[0][1].tpsId;
+ await h.api.rename(id,'User filename rule');const snapshot=structuredClone([...h.frontmatters]);
+ await h.service.sync([calendar],'',true,false);assert.deepEqual([...h.frontmatters],snapshot);assert.equal(h.files.has('User filename rule.md'),true);
+ h.setEvents([{...incoming,title:'External renamed title',sourceRevision:[2,0,2]}]);await h.service.sync([calendar],'',true,false);
+ assert.equal(currentNotes(h)[0][0],buildNativeCalendarRecordFileName({...incoming,title:'External renamed title'})+'.md');assert.equal(h.files.has('User filename rule.md'),false);
 });

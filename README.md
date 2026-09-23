@@ -1,5 +1,48 @@
 # TPS Controller
 
+## Calendar reliability follow-up — 2.4.1
+
+Extended testing of 2.4.0 reproduced four issues: a one-hour error near DST
+transitions without Moment Timezone, a DTEND in a different timezone using the
+start zone, unknown explicit zones becoming machine-local times, and numbered
+calendar filenames being compacted repeatedly after a sibling renamed. Real-vault
+QA also caught Controller undoing another plugin's settled filename on repeat sync.
+
+The timezone fallback now validates candidate instants on both sides of a
+transition, chooses the first repeated wall time and the pre-gap offset for an
+explicit nonexistent time, and formats midnight as hour 00. Feed-local VTIMEZONE
+remains available to detached exceptions. Unresolved explicit zones fail the feed
+rather than change meaning on another device. DURATION keeps nominal days/weeks
+separate from elapsed hours/minutes/seconds; DTEND supplies a fixed duration for
+recurrences. Existing correct filenames, including collision suffixes, remain
+stable while GCM still owns root/layout resolution. Once the imported title and
+schedule match the saved baseline, Controller adopts the settled filename instead
+of repeatedly overriding the vault's filename automation. An external title or
+schedule change still requests the new readable name. No settings or defaults change.
+The first sync can correct an affected previously imported time; with keep-old
+history enabled, that correction can retain an additional historical note.
+This is a backward-compatible patch; minimum Obsidian remains 1.12.3.
+
+The expanded [calendar reliability record](docs/calendar-sync-validation.md)
+contains the regression matrix, replay coverage, results and remaining limits.
+It includes 100 seeded permutations of 25 series; a 120-step native-record replay
+with moves, cancellations/restoration, failed downloads and manual edits; failure
+injection after all six writes of a three-event reschedule; four device timezones;
+and a 2,600-occurrence timezone/recurrence fixture. Synthetic results do not replace
+real-provider and physical-device acceptance. The app migration remains a proposal;
+this release changes Controller only.
+
+Final validation: 567 tests pass, three existing optional comparison skips, zero
+failures; TypeScript and the separate production build pass. The final 2.4.1 runtime
+was reloaded via the named test-vault CLI. Real Controller/GCM file checks passed for
+six colliding event names, title-only changes, three byte-identical repeat syncs,
+failed-feed archive safety, reschedule actions, one replacement and stale-response
+protection. GCM discovery was scoped to the synthetic folder to exclude unrelated
+intentional conflict fixtures. Existing test-vault filename automation stayed active.
+All fixtures were moved directly from Inbox to `_archive`; Controller and GCM
+settings hashes stayed unchanged and outbound automation stayed disabled. Production
+was not accessed. Release notes include the tested artifact hashes for BRAT.
+
 ## Deterministic calendar reschedules — 2.4.0
 
 **Calendar rules → select a calendar → On external reschedule** configures property
@@ -129,7 +172,7 @@ release; minimum Obsidian stays 1.12.3. Production installation is the BRAT hand
 
 Device roles, calendar synchronization, reminders, encrypted attachment sync, and shared Plaid transport.
 
-Current release: [2.4.0](https://github.com/ZachTish/tps-controller/releases/tag/2.4.0) · Obsidian 1.12.3+ · Desktop and mobile.
+Current release: [2.4.1](https://github.com/ZachTish/tps-controller/releases/tag/2.4.1) · Obsidian 1.12.3+ · Desktop and mobile.
 
 ## Install with BRAT
 

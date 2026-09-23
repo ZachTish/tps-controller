@@ -7,6 +7,7 @@ import { isCancelledCalendarTitle } from "./external-calendar-cancellation";
 
 export class ICalParserService {
     public static warnedZones: Set<string> = new Set();
+    private timeZoneFormatters = new Map<string, Intl.DateTimeFormat>();
 
     // Mapping for common Windows/Outlook timezone names to IANA identifiers
     private static readonly WINDOWS_TZ_MAPPING: Record<string, string> = {
@@ -26,6 +27,7 @@ export class ICalParserService {
         icalData: string, rangeStart?: Date, rangeEnd?: Date,
         includeCancelled = false, strict = false,
     ): ExternalCalendarEvent[] {
+        this.timeZoneFormatters.clear();
         const startedAt = Date.now();
         const stats = { components: 0, series: 0, recurringMasters: 0, exceptions: 0, revisionsDiscarded: 0 };
         logger.flow("ICalParser", "parse:start", { includeCancelled, strict });
@@ -69,6 +71,7 @@ export class ICalParserService {
                 const exceptionEvents = selected.map(({ key, component }) => {
                     // Work on a clone: zone/clock normalization must not mutate revision evidence.
                     const copy = new ICAL.Component(JSON.parse(JSON.stringify(component.toJSON())));
+                    copy.parent = component.parent; // Retain access to feed-local VTIMEZONE definitions.
                     const event = new ICAL.Event(copy, { exceptions: [] });
                     if (!event.startDate && this.isCancelled(copy)) event.startDate = event.recurrenceId.clone();
                     if (!event.startDate) throw new Error('Calendar exception is missing DTSTART.');
@@ -76,10 +79,17 @@ export class ICalParserService {
                     if (range && range !== 'THISANDFUTURE') throw new Error('Unsupported recurrence exception range.');
                     if (master) {
                         const start = this.inMasterClock(event.startDate, this.timezone(copy, 'dtstart'), master, masterZone);
-                        const end = this.inMasterClock(event.endDate, this.timezone(copy, 'dtend') || this.timezone(copy, 'dtstart'), master, masterZone);
+                        const duration = copy.getFirstPropertyValue('duration') as ICAL.Duration | null;
+                        const end = this.inMasterClock(event.endDate, this.timezone(copy, copy.hasProperty('dtend') ? 'dtend' : 'dtstart'), master, masterZone);
                         event.recurrenceId = this.inMasterClock(event.recurrenceId, this.timezone(copy, 'recurrence-id'), master, masterZone);
                         event.startDate = start;
                         event.endDate = end;
+                        if (duration) event.duration = duration;
+                        for (const name of ['dtstart', 'dtend', 'recurrence-id']) {
+                            const property = copy.getFirstProperty(name);
+                            if (masterZone) property?.setParameter('tzid', masterZone);
+                            else property?.removeParameter('tzid');
+                        }
                     }
                     return { key, event, range };
                 });
@@ -175,6 +185,16 @@ export class ICalParserService {
             const instant = this.normalizeTime(time, zone);
             if (masterZone) {
                 const target = ICalParserService.WINDOWS_TZ_MAPPING[masterZone] || masterZone;
+                if (master.startDate.zone.component) {
+                    const probe = ICAL.Time.fromJSDate(instant, true);
+                    probe.zone = master.startDate.zone;
+                    for (const offset of this.embeddedOffsets(probe)) {
+                        const candidate = ICAL.Time.fromJSDate(new Date(instant.getTime() + offset * 1000), true);
+                        candidate.zone = master.startDate.zone;
+                        if (this.normalizeTime(candidate, masterZone).getTime() === instant.getTime()) return candidate;
+                    }
+                    throw new Error('Cannot represent the recurrence time in its embedded timezone.');
+                }
                 const parts = new Intl.DateTimeFormat('en-US', { timeZone: target, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(instant);
                 const fields = Object.fromEntries(parts.map(part => [part.type, Number(part.value)]));
                 result = new ICAL.Time({ year: fields.year, month: fields.month, day: fields.day, hour: fields.hour, minute: fields.minute, second: fields.second }, master.startDate.zone);
@@ -200,7 +220,7 @@ export class ICalParserService {
         const isCancelled = this.isCancelled(component, fallback);
         if (isCancelled && !includeCancelled) return;
         const startDate = this.normalizeTime(start, zone);
-        const endDate = this.normalizeTime(end, zone);
+        const endDate = this.occurrenceEnd(component, start, startDate, end, zone);
         if (!Number.isFinite(startDate.getTime()) || !Number.isFinite(endDate.getTime()) || endDate < startDate) {
             throw new Error('Calendar occurrence has invalid timing.');
         }
@@ -216,9 +236,50 @@ export class ICalParserService {
         }, rangeStart, rangeEnd);
     }
 
+    private occurrenceEnd(component: ICAL.Component, start: ICAL.Time, startDate: Date, end: ICAL.Time, zone: string | null): Date {
+        const duration = component.getFirstPropertyValue('duration') as ICAL.Duration | null;
+        if (duration) {
+            // RFC 5545: days/weeks are nominal wall-clock units; hours/minutes/seconds
+            // are elapsed time. PT24H and P1D can differ across a DST transition.
+            const dayEnd = start.clone();
+            dayEnd.adjust((duration.weeks * 7 + duration.days) * (duration.isNegative ? -1 : 1), 0, 0, 0);
+            const elapsed = (duration.hours * 3600 + duration.minutes * 60 + duration.seconds) * 1000 * (duration.isNegative ? -1 : 1);
+            return new Date(this.normalizeTime(dayEnd, zone).getTime() + elapsed);
+        }
+        const sourceStart = component.getFirstPropertyValue('dtstart') as ICAL.Time | null;
+        const sourceEnd = component.getFirstPropertyValue('dtend') as ICAL.Time | null;
+        if (sourceStart && sourceEnd) {
+            if (sourceStart.isDate) {
+                const dayEnd = start.clone();
+                dayEnd.addDuration(sourceEnd.subtractDate(sourceStart));
+                return this.normalizeTime(dayEnd, zone);
+            }
+            // DTEND defines an exact duration for every recurrence, even when its
+            // own timezone differs or a later occurrence crosses a DST boundary.
+            const elapsed = this.normalizeTime(sourceEnd, this.timezone(component, 'dtend')).getTime()
+                - this.normalizeTime(sourceStart, this.timezone(component, 'dtstart')).getTime();
+            return new Date(startDate.getTime() + elapsed);
+        }
+        return this.normalizeTime(end, zone);
+    }
+
     private normalizeTime(icalTime: ICAL.Time, explicitTzid: string | null): Date {
         if (icalTime.isDate) {
             return icalTime.toJSDate();
+        }
+
+        if (icalTime.zone.component) {
+            const [before, , after] = this.embeddedOffsets(icalTime);
+            let offset = icalTime.zone.utcOffset(icalTime);
+            if (before !== after && offset === after) {
+                // ICAL.js prefers standard time in a fold. RFC 5545 instead uses
+                // the first occurrence, and the pre-transition offset in a gap.
+                const earlier = icalTime.clone();
+                earlier.adjust(0, 0, 0, -Math.abs(after - before));
+                if (earlier.zone.utcOffset(earlier) === before) offset = before;
+            }
+            return new Date(Date.UTC(icalTime.year, icalTime.month - 1, icalTime.day,
+                icalTime.hour, icalTime.minute, icalTime.second) - offset * 1000);
         }
 
         if (icalTime.zone && icalTime.zone.toString() !== 'floating' && !explicitTzid) {
@@ -274,64 +335,42 @@ export class ICalParserService {
             }
         }
 
+        if (explicitTzid) throw new Error('Calendar timezone cannot be resolved; refusing a machine-local fallback.');
         return icalTime.toJSDate();
+    }
+
+    private embeddedOffsets(time: ICAL.Time): number[] {
+        return [-2, 0, 2].map(days => {
+            const probe = time.clone();
+            probe.adjust(days, 0, 0, 0);
+            return probe.zone.utcOffset(probe);
+        });
     }
 
     private parseDateInTimezone(dateStr: string, tzid: string): Date | null {
         try {
             const match = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/);
             if (!match) return null;
-
-            const [, yearStr, monthStr, dayStr, hourStr, minuteStr, secondStr] = match;
-            const year = parseInt(yearStr);
-            const month = parseInt(monthStr);
-            const day = parseInt(dayStr);
-            const hour = parseInt(hourStr);
-            const minute = parseInt(minuteStr);
-            const second = parseInt(secondStr);
-
-            try {
-                const utcDate = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
-                const formatter = new Intl.DateTimeFormat('en-US', {
-                    timeZone: tzid,
-                    year: 'numeric',
-                    month: '2-digit',
-                    day: '2-digit',
-                    hour: '2-digit',
-                    minute: '2-digit',
-                    second: '2-digit',
-                    hour12: false
-                });
-
-                const parts = formatter.formatToParts(utcDate);
-                const formatted: Record<string, string> = {};
-                for (const part of parts) {
-                    if (part.type !== 'literal') {
-                        formatted[part.type] = part.value;
-                    }
-                }
-
-                const displayedMs = Date.UTC(
-                    parseInt(formatted.year),
-                    parseInt(formatted.month) - 1,
-                    parseInt(formatted.day),
-                    parseInt(formatted.hour),
-                    parseInt(formatted.minute),
-                    parseInt(formatted.second)
-                );
-
-                const utcMs = utcDate.getTime();
-                const offset = displayedMs - utcMs;
-                const desiredMs = Date.UTC(year, month - 1, day, hour, minute, second);
-                const correctUTC = desiredMs - offset;
-
-                return new Date(correctUTC);
-
-            } catch (e) {
-                return null;
+            const [year, month, day, hour, minute, second] = match.slice(1).map(Number);
+            const wall = Date.UTC(year, month - 1, day, hour, minute, second);
+            let formatter = this.timeZoneFormatters.get(tzid);
+            if (!formatter) {
+                formatter = new Intl.DateTimeFormat('en-US', { timeZone: tzid, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
+                this.timeZoneFormatters.set(tzid, formatter);
             }
-
-        } catch (error) {
+            const offsetAt = (instant: number): number => {
+                const fields = Object.fromEntries(formatter!.formatToParts(new Date(instant)).map(part => [part.type, Number(part.value)]));
+                return Date.UTC(fields.year, fields.month - 1, fields.day, fields.hour, fields.minute, fields.second) - instant;
+            };
+            // Collect offsets on both sides of a possible transition. Validate the
+            // resulting instant instead of trusting an offset sampled at UTC wall time.
+            const offsets = new Set([-2, 0, 2].map(days => offsetAt(wall + days * 86400000)));
+            const candidates = [...offsets].map(offset => wall - offset).sort((a, b) => a - b);
+            const exact = candidates.filter(instant => instant + offsetAt(instant) === wall);
+            // RFC 5545: first occurrence of a repeated time; pre-gap offset for a
+            // nonexistent time (the later candidate after a forward clock jump).
+            return new Date(exact.length ? exact[0] : candidates[candidates.length - 1]);
+        } catch {
             return null;
         }
     }
