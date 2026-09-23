@@ -15,6 +15,7 @@ const COPIED_IDENTITY_KEYS = new Set([
     "tpsid", "tpsschemaversion", "createddate", "modifieddate", "externalid",
     "externaleventid", "tpscalendaruid", "tpscalendarsourceurl", "calendarid",
     "calendarsourceid", "calendaruid", "calendaroccurrenceid", "calendaroccurrenceidentity",
+    "recurrencerule", "recurrence", "rrule", // Feed expansion owns recurrence; imported instances cannot spawn local series.
     "calendaroccurrencekey", "calendarrecurring", "calendarsyncstate", "calendarmissingat", "tpscalendarsync",
 ]);
 

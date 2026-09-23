@@ -1,3 +1,4 @@
+import { calendarRescheduleUpdates, cloneCalendarRescheduleActions } from './calendar-reschedule-actions';
 import { CALENDAR_SYNC_PROPERTY, calendarScheduleSignature, readCalendarSyncStamp } from './calendar-reschedule';
 import { App, TFile } from "obsidian";
 import type {
@@ -38,6 +39,9 @@ export const REDUNDANT_CALENDAR_RECORD_PROPERTIES = [
     "associatedNoteStrategy",
     "eventTitle",
     "durationMinutes",
+    "recurrenceRule",
+    "recurrence",
+    "rrule",
 ] as const;
 
 const LEGACY_IDENTITY_PROPERTIES = [
@@ -61,6 +65,8 @@ interface CalendarContext {
     configId: string;
     normalizedUrl: string;
     sourceScope: string;
+    previousRescheduleUpdates: Record<string, unknown>;
+    currentRescheduleUpdates: Record<string, unknown>;
 }
 
 interface PlannedCalendarOccurrence {
@@ -69,6 +75,8 @@ interface PlannedCalendarOccurrence {
     id: string;
     sourceOccurrenceId?: string;
     retainedRecord?: IndexedCalendarRecord;
+    externallyRescheduled?: boolean;
+    staleRevision?: boolean;
     plannedCreateProperties?: Record<string, unknown>;
     plannedEventUpdates?: Record<string, unknown>;
     plannedRecordPath?: string;
@@ -373,7 +381,9 @@ export class NativeCalendarRecordService {
             // Settings editors may replace or mutate their live calendar row
             // while network work is pending. Freeze every value used by this
             // sync so exact preflight payloads remain the execution payloads.
-            const calendarSnapshot: ExternalCalendarConfig = { ...calendar };
+            const calendarSnapshot: ExternalCalendarConfig = { ...calendar, rescheduleActions: cloneCalendarRescheduleActions(calendar) };
+            const previousRescheduleUpdates = this.rescheduleUpdates(calendarSnapshot, 'previous');
+            const currentRescheduleUpdates = this.rescheduleUpdates(calendarSnapshot, 'current');
             const configId = String(calendarSnapshot.id || "").trim();
             if (!configId) {
                 if (!isActiveCalendar(calendarSnapshot)) continue;
@@ -389,6 +399,7 @@ export class NativeCalendarRecordService {
             configIdsByScope.set(sourceScope, configId);
             contexts.push({
                 calendar: calendarSnapshot,
+                previousRescheduleUpdates, currentRescheduleUpdates,
                 configId,
                 normalizedUrl: normalizeCalendarUrl(calendarSnapshot.url),
                 sourceScope,
@@ -435,6 +446,7 @@ export class NativeCalendarRecordService {
                 const event: ExternalCalendarEvent = {
                     ...fetchedEvent,
                     startDate: new Date(fetchedEvent.startDate.getTime()),
+                    sourceRevision: fetchedEvent.sourceRevision ? [...fetchedEvent.sourceRevision] : undefined,
                     endDate: new Date(fetchedEvent.endDate.getTime()),
                     attendees: fetchedEvent.attendees ? [...fetchedEvent.attendees] : undefined,
                 };
@@ -461,7 +473,7 @@ export class NativeCalendarRecordService {
         // excluded from future sync, deletion and legacy migration, while a new
         // generation gets a new ID in the existing calendar source namespace.
         const migratedById = new Map(migrations.map(migration => [identityKey(migration.targetId), migration.record]));
-        const relatedIds = new Set<string>();
+        const relatedIds = new Map<string, Set<string>>();
         const activeByOccurrence = new Map<string, IndexedCalendarRecord[]>();
         for (const handle of snapshot) {
             if (!parseCalendarRecordId(handle.id)) continue;
@@ -469,7 +481,12 @@ export class NativeCalendarRecordService {
             if (stamp && calendarRecordSourceScope(stamp.occurrenceId) !== calendarRecordSourceScope(handle.id)) {
                 throw new Error('Calendar schedule tracking belongs to a different source; no records were changed.');
             }
-            if (stamp) relatedIds.add(identityKey(stamp.occurrenceId));
+            if (stamp) {
+                const key = identityKey(stamp.occurrenceId);
+                const ids = relatedIds.get(key) || new Set<string>();
+                ids.add(handle.id);
+                relatedIds.set(key, ids);
+            }
         }
         for (const record of this.recordsByPath.values()) {
             const stamp = readCalendarSyncStamp(record.frontmatter);
@@ -490,21 +507,35 @@ export class NativeCalendarRecordService {
             if (active.length > 1) throw new Error('More than one active note claims this calendar occurrence; no records were changed.');
             const existing = active[0];
             const previous = existing ? readCalendarSyncStamp(existing.frontmatter) : null;
-            const rescheduled = occurrence.context.calendar.preserveNotesOnExternalReschedule === true
-                && !occurrence.event.isCancelled && previous && parseCalendarRecordId(existing.id)
-                && previous.schedule !== calendarScheduleSignature(occurrence.event);
-            if (rescheduled) {
+            const revision = occurrence.event.sourceRevision;
+            if (previous?.revision && revision && previous.revisionOrigin === occurrence.event.sourceRevisionOrigin) {
+                const comparison = previous.revision[0] - revision[0]
+                    || previous.revision[1] - revision[1] || previous.revision[2] - revision[2];
+                if (comparison > 0) {
+                    occurrence.staleRevision = true;
+                    logger.flow('NativeCalendarRecords', 'sync:stale-revision-skipped', { sourceScope: occurrence.context.sourceScope });
+                    continue;
+                }
+            }
+            const rescheduled = !!(!occurrence.event.isCancelled && previous && parseCalendarRecordId(existing.id)
+                && previous.schedule !== calendarScheduleSignature(occurrence.event));
+            const recovering = !existing && relatedIds.has(identityKey(sourceId));
+            occurrence.externallyRescheduled = rescheduled || (recovering && !occurrence.event.isCancelled);
+            const preserve = rescheduled && occurrence.context.calendar.preserveNotesOnExternalReschedule === true;
+            if (preserve) {
                 occurrence.retainedRecord = existing;
                 prepared.seenIds.add(identityKey(existing.id));
             }
-            if (rescheduled || (!existing && relatedIds.has(identityKey(sourceId)))) {
-                // A retry after a partial batch may find only the retained old
-                // note. Allocate a fresh generation; never reclaim that note's ID.
+            if (preserve || recovering) {
+                // The same lineage and feed schedule produce the same next ID, even
+                // after retirement was written but creation was interrupted.
+                const lineage = [...(relatedIds.get(identityKey(sourceId)) || [])].sort();
                 occurrence.id = await deriveCalendarRecordId(occurrence.context.configId,
-                    `${calendarEventOccurrenceIdentity(occurrence.event)}\u0000generation:${globalThis.crypto.randomUUID()}`);
+                    JSON.stringify([calendarEventOccurrenceIdentity(occurrence.event), 'generation', lineage, calendarScheduleSignature(occurrence.event)]));
             } else if (existing && !migrated) occurrence.id = existing.id;
             prepared.seenIds.add(identityKey(occurrence.id));
         }
+        prepared.occurrences = prepared.occurrences.filter(occurrence => !occurrence.staleRevision);
     }
 
     private async prepareCreationTemplates(
@@ -613,7 +644,7 @@ export class NativeCalendarRecordService {
         );
         const retainedByPath = new Map(prepared.occurrences
             .filter(occurrence => occurrence.retainedRecord)
-            .map(occurrence => [occurrence.retainedRecord!.file.path, occurrence.retainedRecord!]));
+            .map(occurrence => [occurrence.retainedRecord!.file.path, occurrence]));
         const records = [...this.recordsByPath.values()]
             .sort((left, right) => left.file.path.localeCompare(right.file.path));
 
@@ -692,7 +723,7 @@ export class NativeCalendarRecordService {
                 if (retainedByPath.has(record.file.path)) {
                     const stamp = readCalendarSyncStamp(record.frontmatter)!;
                     addEntry({ operation: "reidentify", reference: record.id, nextId: record.id,
-                        updates: [{ [CALENDAR_SYNC_PROPERTY]: { ...stamp, retired: true } }] });
+                        updates: [{ ...retainedByPath.get(record.file.path)!.context.previousRescheduleUpdates, [CALENDAR_SYNC_PROPERTY]: { ...stamp, retired: true } }] });
                     postApplyCancellationStateUpdatesById.set(record.id, null);
                     continue;
                 }
@@ -741,7 +772,7 @@ export class NativeCalendarRecordService {
                         cancellationStateForId(cancellationState, occurrence.id),
                         {}, occurrence.sourceOccurrenceId, occurrence.id,
                     );
-                    const properties = projection.properties;
+                    const properties = { ...projection.properties, ...(occurrence.externallyRescheduled ? occurrence.context.currentRescheduleUpdates : {}) };
                     if (projection.preApplyCancellationStateUpdate !== undefined) {
                         preApplyCancellationStateUpdatesById.set(occurrence.id, projection.preApplyCancellationStateUpdate);
                     }
@@ -772,7 +803,7 @@ export class NativeCalendarRecordService {
                 );
                 const properties = applyCaseInsensitiveUpdates(
                     occurrence.templateInstance?.properties || {},
-                    projection.properties,
+                    { ...projection.properties, ...(occurrence.externallyRescheduled ? occurrence.context.currentRescheduleUpdates : {}) },
                 );
                 if (projection.preApplyCancellationStateUpdate !== undefined) {
                     preApplyCancellationStateUpdatesById.set(occurrence.id, projection.preApplyCancellationStateUpdate);
@@ -950,6 +981,28 @@ export class NativeCalendarRecordService {
         return asMarkdownFile(direct);
     }
 
+    private rescheduleUpdates(calendar: ExternalCalendarConfig, target: 'previous' | 'current'): Record<string, unknown> {
+        const settings = this.getSettings();
+        const gcm = (this.app as any).plugins?.plugins?.['tps-global-context-menu']?.settings;
+        const aliases = Array.isArray(gcm?.nativeRecordStorageAliases) ? gcm.nativeRecordStorageAliases : [];
+        const protectedKeys = [settings.eventIdKey, settings.uidKey, settings.titleKey,
+            settings.startProperty, settings.endProperty,
+            gcm?.nativeRecordIdentityPropertyKey, gcm?.nativeRecordSchemaPropertyKey,
+            gcm?.nativeRecordKindPropertyKey, ...Object.values(gcm?.nativeRecordKindPropertyKeys || {}),
+            gcm?.nativeRecordTitlePropertyKey, gcm?.nativeRecordCreatedPropertyKey, gcm?.nativeRecordModifiedPropertyKey,
+            ...aliases.flatMap((profile: any) => [profile.identityPropertyKey, profile.schemaPropertyKey]),
+        ].filter((key): key is string => typeof key === 'string' && !!key);
+        const updates = calendarRescheduleUpdates(calendar.rescheduleActions, target, protectedKeys);
+        const statusKey = String(settings.statusKey || 'status').toLowerCase();
+        const actualStatus = Object.keys(updates).find(key => key.toLowerCase() === statusKey);
+        if (actualStatus && actualStatus !== 'status') {
+            if (Object.keys(updates).some(key => key !== actualStatus && key.toLowerCase() === 'status')) throw new Error('Reschedule actions target both status and its configured property key.');
+            updates.status = updates[actualStatus];
+            delete updates[actualStatus];
+        }
+        return updates;
+    }
+
     private eventProperties(
         calendar: ExternalCalendarConfig,
         event: ExternalCalendarEvent,
@@ -962,6 +1015,8 @@ export class NativeCalendarRecordService {
     ): ProjectedCalendarEventProperties {
         const tracking = (sourceOccurrenceId && recordId !== sourceOccurrenceId)
             || calendar.preserveNotesOnExternalReschedule === true
+            || !!calendar.rescheduleActions?.length
+            || !!event.sourceRevision
             || (existing && readCalendarSyncStamp(existing.frontmatter) !== null);
         const scheduled = event.isAllDay ? localDateKey(event.startDate) : event.startDate.toISOString();
         const end = event.isAllDay ? localDateKey(event.endDate) : event.endDate.toISOString();
@@ -979,7 +1034,7 @@ export class NativeCalendarRecordService {
         const projected: ProjectedCalendarEventProperties = {
             properties: {
                 ...(tracking && sourceOccurrenceId ? {
-                    [CALENDAR_SYNC_PROPERTY]: { occurrenceId: sourceOccurrenceId, schedule: calendarScheduleSignature(event) },
+                    [CALENDAR_SYNC_PROPERTY]: { occurrenceId: sourceOccurrenceId, schedule: calendarScheduleSignature(event), ...(event.sourceRevision ? { revision: [...event.sourceRevision], ...(event.sourceRevisionOrigin ? { revisionOrigin: event.sourceRevisionOrigin } : {}) } : {}) },
                 } : {}),
                 title: displayTitle,
                 scheduled,

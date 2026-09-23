@@ -118,7 +118,7 @@ export class ExternalCalendarService {
         };
       }
 
-      const events = this.parser.parseICalData(response.text, rangeStart, rangeEnd, includeCancelled).map((evt) => ({
+      const events = this.parser.parseICalData(response.text, rangeStart, rangeEnd, includeCancelled, true).map((evt) => ({
         ...evt,
         sourceUrl: normalizedUrl,
       }));

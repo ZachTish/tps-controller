@@ -10,7 +10,7 @@ if (!globalThis.crypto) Object.defineProperty(globalThis, 'crypto', { value: web
 
 async function loadModule() {
   const result = await build({
-    entryPoints: [fileURLToPath(new URL('../src/services/native-calendar-record-service.ts', import.meta.url))],
+    stdin: { contents: "export * from './src/services/native-calendar-record-service.ts'; export * from './src/services/ical-parser-service.ts';", resolveDir: process.cwd(), loader: 'ts' },
     bundle: true,
     write: false,
     platform: 'node',
@@ -23,7 +23,7 @@ async function loadModule() {
         builder.onLoad({ filter: /.*/, namespace: 'native-calendar-test' }, () => ({
           loader: 'js',
           resolveDir: process.cwd(),
-          contents: `import { load } from 'js-yaml'; export const parseYaml = load; export const normalizePath = value => value.replace(/\\\\/g, '/'); export class App {} export class TFile { static [Symbol.hasInstance](value) { return value?.extension === 'md' && typeof value.path === 'string'; } constructor(path) { this.path = path; this.name = path.split('/').pop(); this.basename = this.name.replace(/\\.md$/u, ''); this.extension = 'md'; } }`,
+          contents: `export const moment = {}; import { load } from 'js-yaml'; export const parseYaml = load; export const normalizePath = value => value.replace(/\\\\/g, '/'); export class App {} export class TFile { static [Symbol.hasInstance](value) { return value?.extension === 'md' && typeof value.path === 'string'; } constructor(path) { this.path = path; this.name = path.split('/').pop(); this.basename = this.name.replace(/\\.md$/u, ''); this.extension = 'md'; } }`,
         }));
       },
     }],
@@ -45,6 +45,7 @@ async function loadSettingsModule() {
 
 const {
   NativeCalendarRecordService,
+  ICalParserService,
   REDUNDANT_CALENDAR_RECORD_PROPERTIES,
   buildNativeCalendarRecordFileName,
 } = await loadModule();
@@ -2386,4 +2387,86 @@ test('malformed tracking does not break startup indexing but blocks sync before 
   const before = structuredClone([...h.frontmatters]);
   await assert.rejects(h.service.sync([preserveCalendar], '', true, false), /Invalid calendar schedule tracking/u);
   assert.deepEqual([...h.frontmatters], before);
+});
+
+test('reschedule actions upsert previous/current properties once and retain unrelated user data', async () => {
+  const config={...preserveCalendar,rescheduleActions:[{target:'previous',key:'status',value:'rescheduled'},{target:'previous',key:'reason',value:'Moved externally'},{target:'current',key:'review',value:'true'},{target:'current',key:'score',value:'2'}]};
+  const h=harness([event()]);
+  await h.service.sync([config],'',true,false);
+  const [oldPath]=currentNotes(h)[0];
+  assert.equal(h.frontmatters.get(oldPath).reason,undefined);
+  h.setEvents([event({startDate:futureDate(3)})]);
+  await h.service.sync([config],'',true,false);
+  assert.equal(h.frontmatters.get(oldPath).status,'rescheduled');assert.equal(h.frontmatters.get(oldPath).reason,'Moved externally');
+  const [path,fm]=currentNotes(h)[0];assert.equal(fm.review,true);assert.equal(fm.score,2);
+  h.mutateBusinessFieldOnDisk(path,{review:false,score:99});
+  const repeat=await h.service.sync([config],'',true,false);assert.equal(repeat.created,0);assert.equal(repeat.updated,0);
+  assert.equal(h.frontmatters.get(path).score,99);
+});
+test('in-place reschedule actions need a baseline and ignore local/date and title-only edits', async()=>{
+ const config={...calendar,rescheduleActions:[{target:'current',key:'status',value:'rescheduled'},{target:'current',key:'labels',value:'["moved","review"]'}]};
+ const h=harness([event()]);await h.service.sync([config],'',true,false);const[path]=currentNotes(h)[0];
+ h.mutateBusinessFieldOnDisk(path,{scheduled:futureDate(5).toISOString()});
+ h.setEvents([event({title:'Renamed'})]);await h.service.sync([config],'',true,false);assert.equal(currentNotes(h)[0][1].labels,undefined);
+ h.setEvents([event({startDate:futureDate(3)})]);const result=await h.service.sync([config],'',true,false);
+ assert.equal(result.created,0);assert.equal(h.files.size,1);assert.equal(currentNotes(h)[0][1].status,'rescheduled');assert.deepEqual(currentNotes(h)[0][1].labels,['moved','review']);
+});
+test('interrupted retirement retries the exact generation identity and applies the new-note actions', async()=>{
+ const config={...preserveCalendar,rescheduleActions:[{target:'current',key:'reason',value:'moved'}]};
+ const h=harness([event()]);await h.service.sync([config],'',true,false);
+ h.setEvents([event({startDate:futureDate(3)})]);h.setAfterBatchEntryHook(()=>h.seedPlainFile('Interrupt.md'));
+ await assert.rejects(h.service.sync([config],'',true,false),/interrupted/);
+ const intended=h.preflightLog.at(-1).entries.find(entry=>entry.operation==='create').nextId;
+ await h.service.sync([config],'',true,false);
+ assert.equal(currentNotes(h)[0][1].tpsId,intended);assert.equal(currentNotes(h)[0][1].reason,'moved');
+});
+test('invalid/reserved/duplicate reschedule keys fail before note mutation', async()=>{
+ for(const actions of [
+  [{target:'current',key:'tpsId',value:'oops'}], [{target:'current',key:'recurrenceRule',value:'FREQ=DAILY'}],
+  [{target:'current',key:'scheduled',value:'2026-01-01'}], [{target:'current',key:'tpsCalendarSync',value:'oops'}],
+  [{target:'current',key:'project',value:'a'},{target:'current',key:'Project',value:'b'}],
+  [{target:'current',key:'project',value:'{"bad":true}'}],
+ ]){const h=harness([event()]);await assert.rejects(h.service.sync([{...calendar,rescheduleActions:actions}],'',true,false));assert.equal(h.files.size,0);}
+});
+test('actions are frozen before fetch even when the settings editor changes the live object', async()=>{
+ const config={...calendar,rescheduleActions:[{target:'current',key:'reason',value:'original'}]};
+ const h=harness([event()]);await h.service.sync([config],'',true,false);
+ h.setEvents([event({startDate:futureDate(3)})]);h.setFetchHook((url)=>{config.rescheduleActions[0].value='changed';return {ok:true,events:[event({startDate:futureDate(3)})],normalizedUrl:url,fromCache:false};});
+ await h.service.sync([config],'',true,false);assert.equal(currentNotes(h)[0][1].reason,'original');
+});
+test('external instance templates and existing managed records cannot spawn a second local recurrence series', async()=>{
+ const h=harness([event()]);await h.service.sync([calendar],'',true,false);
+ const [path]=currentNotes(h)[0];h.mutateBusinessFieldOnDisk(path,{recurrenceRule:'FREQ=DAILY',recurrence:'daily',rrule:'FREQ=DAILY',project:'keep'});
+ await h.service.sync([calendar],'',true,false);const fm=currentNotes(h)[0][1];
+ assert.equal(fm.recurrenceRule,undefined);assert.equal(fm.recurrence,undefined);assert.equal(fm.rrule,undefined);assert.equal(fm.project,'keep');
+});
+
+test('stale feed revisions cannot move an occurrence back, rerun actions, or archive its active generation',async()=>{
+ const config={...preserveCalendar,rescheduleActions:[{target:'current',key:'reason',value:'moved'}]};
+ const first=event({sourceRevision:[1,0,100]});const h=harness([first]);await h.service.sync([config],'',true,false);
+ h.setEvents([event({startDate:futureDate(3),sourceRevision:[2,0,200]})]);await h.service.sync([config],'',true,false);
+ const snapshot=structuredClone([...h.frontmatters]);h.settings.syncOnEventDelete='archive';h.setEvents([first]);
+ const result=await h.service.sync([config],'',true,false);assert.equal(result.created,0);assert.equal(result.archived,0);assert.deepEqual([...h.frontmatters].sort(([a],[b])=>a.localeCompare(b)),snapshot.sort(([a],[b])=>a.localeCompare(b)));
+});
+
+
+test('real recurring feed reconciliation creates only the moved generation and remains stable after reordering',async()=>{
+ const stamp=date=>date.toISOString().replace(/[-:]/g,'').replace(/\.\d{3}Z$/,'Z');
+ const start=futureDate(2), end=new Date(start.getTime()+3600000), original=new Date(start.getTime()+86400000), moved=new Date(original.getTime()+7200000);
+ const vevent=fields=>['BEGIN:VEVENT','UID:integrated-series','DTSTAMP:20260901T000000Z',...fields,'END:VEVENT'].join('\r\n');
+ const master=vevent([`DTSTART:${stamp(start)}`,`DTEND:${stamp(end)}`,'RRULE:FREQ=DAILY;COUNT=3','SUMMARY:Series','SEQUENCE:1']);
+ const exception=vevent([`RECURRENCE-ID:${stamp(original)}`,`DTSTART:${stamp(moved)}`,`DTEND:${stamp(new Date(moved.getTime()+3600000))}`,'SUMMARY:Moved','SEQUENCE:2']);
+ const parse=parts=>new ICalParserService().parseICalData(['BEGIN:VCALENDAR','VERSION:2.0',...parts,'END:VCALENDAR'].join('\r\n'),futureDate(0),futureDate(8),true,true);
+ const config={...preserveCalendar,rescheduleActions:[{target:'previous',key:'status',value:'rescheduled'},{target:'current',key:'project',value:'xyz'}]};
+ const h=harness(parse([master]));await h.service.sync([config],'',true,false);assert.equal(h.files.size,3);
+ h.setEvents(parse([master,exception]));let result=await h.service.sync([config],'',true,false);assert.equal(result.created,1);assert.equal(h.files.size,4);
+ const retired=[...h.frontmatters].filter(([,fm])=>fm.tpsCalendarSync?.retired);assert.equal(retired.length,1);assert.equal(retired[0][1].status,'rescheduled');assert.equal(currentNotes(h).filter(([,fm])=>fm.project==='xyz').length,1);
+ const snapshot=structuredClone([...h.frontmatters]);h.setEvents(parse([exception,master,master]));result=await h.service.sync([config],'',true,false);
+ assert.equal(result.created,0);assert.deepEqual([...h.frontmatters].sort(([a],[b])=>a.localeCompare(b)),snapshot.sort(([a],[b])=>a.localeCompare(b)));
+});
+
+test('template recurrence instructions are stripped before external occurrence creation',async()=>{
+ const h=harness([event()],{templates:{'Templates/Recurring.md':'---\nrecurrenceRule: FREQ=DAILY\nrecurrence: daily\nrrule: FREQ=DAILY\nproject: keep\n---\nBody'}});
+ await h.service.sync([{...calendar,autoCreateTemplate:'Templates/Recurring.md'}],'',true,false);
+ const fm=currentNotes(h)[0][1];assert.equal(fm.project,'keep');assert.equal(fm.recurrenceRule,undefined);assert.equal(fm.recurrence,undefined);assert.equal(fm.rrule,undefined);
 });

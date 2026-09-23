@@ -9,8 +9,8 @@ const fetchSource = readFileSync(new URL('../src/services/external-calendar-serv
 test('controller calendar sync keeps bounded recurrence and deterministic occurrence identity', () => {
   assert.match(parserSource, /const HARD_MAX_ITERATIONS = 10000/);
   assert.match(parserSource, /Math\.min\(HARD_MAX_ITERATIONS, Math\.max\(baseMax, estimated\)\)/);
-  assert.match(parserSource, /icalTimeToStableString\(event\.startDate\)/);
-  assert.match(parserSource, /icalTimeToStableString\(event\.recurrenceId\)/);
+  assert.match(parserSource, /icalTimeToStableString\(start\)/);
+  assert.match(parserSource, /icalTimeToStableString\(original\)/);
 });
 
 test('controller fetch service retains structured status required by sync decisions', () => {

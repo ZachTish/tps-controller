@@ -1,5 +1,81 @@
 # TPS Controller
 
+## Deterministic calendar reschedules — 2.4.0
+
+**Calendar rules → select a calendar → On external reschedule** configures property
+updates for the **Current note** and **Retained old note** independently. Add an
+update, enter a property and value, then **Save property updates**. For example,
+set the retained note's `status` to `rescheduled`, and set the current note's
+`project` to `xyz`. Existing properties are replaced; missing properties are
+inserted. Values accept text, numbers, booleans and JSON lists of text. Updates
+apply to Native TPS event records, with GCM's existing native-record API v6.
+Old-note updates require **Keep old note when externally rescheduled**. Current-note
+updates also work with that option off, updating the existing note in place.
+
+Actions run once when the imported start, end or all-day timing changes after a
+baseline sync. Local edits, title-only changes, first import and cancellation do
+not trigger them. Repeat syncs preserve subsequent manual edits to these custom
+properties. Identity, calendar timing, recurrence and other provider-owned fields
+are protected; custom properties and workflow status are supported. Drafts are
+saved explicitly and running syncs retain their original configuration snapshot.
+No existing setting, default, command or destination was removed. The six existing
+hub destinations and Overview default remain; the editor is flat inside the
+selected calendar, with actions above rows, keyboard labels/focus and wrapping,
+stacked mobile controls. Only per-calendar `rescheduleActions` is persisted.
+
+Calendar parsing now groups components by UID before relating exceptions. The
+previous library default attached exceptions from unrelated series, and repeated
+master components could expand more than once. Controller selects the latest
+SEQUENCE/LAST-MODIFIED/DTSTAMP revision, collapses identical repeats and rejects
+conflicting equal revisions. A moved occurrence retains its original RECURRENCE-ID;
+THISANDFUTURE applies only to its own series, and an exception's copied RRULE never
+starts another series. Reordering a feed does not change the planned occurrences.
+Malformed, incomplete or expansion-limited feeds fail the fetch rather than
+appearing as successful empty/partial calendars to missing-event handling.
+Structured parser logs report components, series, exceptions, discarded revisions,
+outcome and duration without event bodies.
+
+Native records track imported revision information in `tpsCalendarSync`; older
+revisions of the same master/exception are ignored. A master and an exception have
+separate revision origins. Retained-note generation IDs derive from occurrence,
+existing history and imported timing, so retrying an interrupted retirement uses
+the same planned identity. Moving back later still creates a distinct generation.
+The existing snapshot/preflight checks reject ambiguous ownership or concurrent
+edits. Controller strips `recurrenceRule`, `recurrence` and `rrule` from imported
+native templates and reconciles those keys off managed calendar instances: the
+external feed owns their recurrence. Other properties and note content remain.
+
+**Limits:** providers must retain UID and original RECURRENCE-ID for a moved
+occurrence. Replacing a UID or rewriting an entire master schedule without
+recurrence exceptions can describe a new set of occurrences; Controller does not
+infer matching from titles or dates. Equal-rank conflicts within a feed are errors;
+across fetches, changed timing with unchanged revision metadata is still accepted
+for providers that omit revision bumps. Existing production duplicates are not
+deleted or merged. Property actions/history are native-note features; legacy notes
+and inline tasks retain their existing storage behavior. Use one Controller device.
+This backward-compatible feature warrants a minor version; Obsidian remains 1.12.3+.
+
+**Automated validation:** 553 passing tests, three existing optional comparison
+skips, zero failures; TypeScript and the production build pass. Regression tests
+cover cross-series isolation, duplicate revisions and feed order, single/range
+reschedules, UTC/TZID identity, all-day EXDATE/RDATE, failed fetches, actual parser-to-
+record reconciliation, property upserts, templates, stale responses and interrupted
+retries. The build deploys only to the test vault. Runtime/UI verification on 2026-09-23 used the named test vault after a CLI plugin
+reload to 2.4.0. The actual settings editor saved two typed property actions and the
+keep-old toggle against an isolated, disabled fixture with a stub save handler.
+Desktop controls, accessible labels and save feedback were inspected; mobile CSS
+stacks and wraps controls, but physical iPhone acceptance remains user testing.
+The real parser, Controller and GCM wrote three recurring notes in Inbox; moving
+one instance created exactly one replacement, updated the old status, inserted the
+new project, and preserved old content/path/identity. Reordered duplicate input
+created nothing and preserved a subsequent manual project edit. GCM discovery was
+scoped to the fixture folder because historical test fixtures intentionally contain
+identity conflicts. Fixtures were archived directly to `_archive`, runtime settings
+were restored, both Controller/GCM data.json hashes stayed unchanged, and automation
+remained off. No production feed, notes or settings were accessed. Artifact hashes
+are recorded in the public release notes; 2.4.0 is ready for the user's BRAT pull,
+not installed in production by this task.
+
 ## Apple Wallet import — 2.3.0
 
 **Advanced → Finance server → Import Apple Wallet · This device** enables the
@@ -53,7 +129,7 @@ release; minimum Obsidian stays 1.12.3. Production installation is the BRAT hand
 
 Device roles, calendar synchronization, reminders, encrypted attachment sync, and shared Plaid transport.
 
-Current release: [2.3.0](https://github.com/ZachTish/tps-controller/releases/tag/2.3.0) · Obsidian 1.12.3+ · Desktop and mobile.
+Current release: [2.4.0](https://github.com/ZachTish/tps-controller/releases/tag/2.4.0) · Obsidian 1.12.3+ · Desktop and mobile.
 
 ## Install with BRAT
 

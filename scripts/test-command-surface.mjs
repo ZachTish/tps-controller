@@ -744,13 +744,13 @@ test("external calendar fetch and parser logging records provider and event-shap
   assert.match(externalCalendarServiceSource, /logger\.flowError\("ExternalCalendar", "fetch:failed"/);
   assert.match(externalCalendarServiceSource, /logger\.flow\("ExternalCalendar", "cache:cleared"/);
 
-  assert.match(iCalParserServiceSource, /interface ICalParseStats/);
-  assert.match(iCalParserServiceSource, /logger\.flowWarn\("ICalParser", "parse:invalid-input"/);
-  assert.match(iCalParserServiceSource, /logger\.flowWarn\("ICalParser", "parse:not-calendar"/);
   assert.match(iCalParserServiceSource, /logger\.flow\("ICalParser", "parse:start"/);
   assert.match(iCalParserServiceSource, /logger\.flow\("ICalParser", "parse:done"/);
   assert.match(iCalParserServiceSource, /logger\.flowError\("ICalParser", "parse:failed"/);
-  assert.match(iCalParserServiceSource, /logger\.flowWarn\("ICalParser", "event:parse-failed"/);
   assert.match(iCalParserServiceSource, /logger\.flowWarn\("ICalParser", "timezone:zone-unavailable"/);
-  assert.match(iCalParserServiceSource, /outOfRangeSkipped/);
+  assert.match(iCalParserServiceSource, /revisionsDiscarded/);
+  assert.match(iCalParserServiceSource, /recurringMasters/);
+  assert.match(iCalParserServiceSource, /durationMs: Date.now\(\) - startedAt/);
+  assert.match(iCalParserServiceSource, /incomplete: true/);
+
 });

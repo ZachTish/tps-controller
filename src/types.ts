@@ -30,9 +30,18 @@ export interface ExternalCalendarEvent {
     /** Stable logical occurrence identity. A single event keeps its UID across reschedules. */
     occurrenceIdentity?: string;
     isRecurring?: boolean;
+    sourceRevision?: [number, number, number];
+    sourceRevisionOrigin?: string;
 }
 
 export type CalendarStorageMode = "legacy" | "native-records";
+
+export interface CalendarRescheduleAction {
+    target: 'previous' | 'current';
+    key: string;
+    /** Typed literal: text, number, boolean, or JSON list of text. */
+    value: string;
+}
 
 export interface ExternalCalendarConfig {
     id: string;
@@ -51,6 +60,7 @@ export interface ExternalCalendarConfig {
     autoCreateTemplate?: string;
     /** Native event notes: retain the previous note when the imported schedule changes. */
     preserveNotesOnExternalReschedule?: boolean;
+    rescheduleActions?: CalendarRescheduleAction[];
 }
 
 export interface TwoStageArchiveRule {

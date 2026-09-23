@@ -5,18 +5,6 @@ import * as logger from "../logger";
 import { ExternalCalendarEvent } from "../types";
 import { isCancelledCalendarTitle } from "./external-calendar-cancellation";
 
-interface ICalParseStats {
-    vevents: number;
-    parsedComponents: number;
-    recurrenceExceptions: number;
-    recurringMasters: number;
-    cancelledSkipped: number;
-    outOfRangeSkipped: number;
-    preparseErrors: number;
-    eventErrors: number;
-    pushedEvents: number;
-}
-
 export class ICalParserService {
     public static warnedZones: Set<string> = new Set();
 
@@ -35,310 +23,197 @@ export class ICalParserService {
     };
 
     public parseICalData(
-        icalData: string,
-        rangeStart?: Date,
-        rangeEnd?: Date,
-        includeCancelled: boolean = false
+        icalData: string, rangeStart?: Date, rangeEnd?: Date,
+        includeCancelled = false, strict = false,
     ): ExternalCalendarEvent[] {
-        const events: ExternalCalendarEvent[] = [];
-        const stats: ICalParseStats = {
-            vevents: 0,
-            parsedComponents: 0,
-            recurrenceExceptions: 0,
-            recurringMasters: 0,
-            cancelledSkipped: 0,
-            outOfRangeSkipped: 0,
-            preparseErrors: 0,
-            eventErrors: 0,
-            pushedEvents: 0,
-        };
-        const context = {
-            rangeStart: rangeStart?.toISOString() || "",
-            rangeEnd: rangeEnd?.toISOString() || "",
-            includeCancelled,
-        };
+        const startedAt = Date.now();
+        const stats = { components: 0, series: 0, recurringMasters: 0, exceptions: 0, revisionsDiscarded: 0 };
+        logger.flow("ICalParser", "parse:start", { includeCancelled, strict });
         try {
-            if (!icalData || typeof icalData !== 'string') {
-                logger.flowWarn("ICalParser", "parse:invalid-input", {
-                    ...context,
-                    type: typeof icalData,
-                });
-                return [];
+            if (typeof icalData !== 'string' || (!icalData.trim().toUpperCase().startsWith('BEGIN:VCALENDAR') || !icalData.trim().toUpperCase().endsWith('END:VCALENDAR'))) {
+                throw new Error('The calendar response is not an iCalendar document.');
             }
-
-            const trimmed = icalData.trim();
-            if (!trimmed.toUpperCase().includes('BEGIN:VCALENDAR')) {
-                logger.flowWarn("ICalParser", "parse:not-calendar", {
-                    ...context,
-                    bytes: icalData.length,
-                });
-                return [];
+            const comp = new ICAL.Component(ICAL.parse(icalData.trim()));
+            stats.components = comp.getAllSubcomponents('vevent').length;
+            const groups = new Map<string, ICAL.Component[]>();
+            for (const component of comp.getAllSubcomponents('vevent')) {
+                const uid = this.extractString(component, 'uid', '').trim();
+                if (!uid) throw new Error('Calendar component is missing UID.');
+                const group = groups.get(uid) || [];
+                group.push(component);
+                groups.set(uid, group);
             }
-
-            const jcalData = ICAL.parse(icalData);
-            const comp = new ICAL.Component(jcalData);
-            const vevents = comp.getAllSubcomponents('vevent');
-            stats.vevents = vevents.length;
-            logger.flow("ICalParser", "parse:start", {
-                ...context,
-                bytes: icalData.length,
-                vevents: stats.vevents,
-            });
-
-
-            const exceptions = new Map<string, ICAL.Time[]>();
-            const parsedEvents: { event: ICAL.Event; vevent: ICAL.Component }[] = [];
-
-            // Pass 1: Gather recurrence exceptions and count UIDs
-            for (const vevent of vevents) {
-                try {
-                    const event = new ICAL.Event(vevent);
-                    parsedEvents.push({ event, vevent });
-                    stats.parsedComponents++;
-
-                    const hasRecurrenceRule = !!vevent.getFirstProperty('rrule') || !!vevent.getFirstProperty('rdate');
-                    const isRecurringMaster = (event.isRecurring() || hasRecurrenceRule) && !event.recurrenceId;
-                    if (isRecurringMaster) stats.recurringMasters++;
-
-                    if (event.recurrenceId) {
-                        stats.recurrenceExceptions++;
-                        const uid = event.uid;
-                        if (!exceptions.has(uid)) {
-                            exceptions.set(uid, []);
-                        }
-                        exceptions.get(uid)?.push(event.recurrenceId);
-                    }
-                } catch (e) {
-                    stats.preparseErrors++;
-                    logger.flowWarn("ICalParser", "event:preparse-failed", { error: logger.errorSummary(e) });
+            stats.series = groups.size;
+            const events: ExternalCalendarEvent[] = [];
+            for (const [uid, components] of [...groups].sort(([a], [b]) => a.localeCompare(b))) {
+                const masters = components.filter(component => !component.hasProperty('recurrence-id'));
+                const masterComponent = masters.length ? this.latestRevision(masters) : null;
+                // ICAL.Event otherwise attaches every exception in its parent calendar,
+                // including unrelated UIDs. Only explicitly selected exceptions belong here.
+                const master = masterComponent ? new ICAL.Event(masterComponent, { exceptions: [] }) : null;
+                if (master && !master.startDate) throw new Error('Calendar master is missing DTSTART.');
+                const masterZone = masterComponent ? this.timezone(masterComponent, 'dtstart') : null;
+                const exceptions = new Map<string, ICAL.Component[]>();
+                for (const component of components.filter(item => item.hasProperty('recurrence-id'))) {
+                    const time = component.getFirstPropertyValue('recurrence-id') as ICAL.Time;
+                    const original = master ? this.inMasterClock(time, this.timezone(component, 'recurrence-id'), master, masterZone) : time;
+                    const key = this.icalTimeToStableString(original);
+                    const same = exceptions.get(key) || [];
+                    same.push(component);
+                    exceptions.set(key, same);
                 }
-            }
-
-            // Pass 2: Process events
-            for (const { event, vevent } of parsedEvents) {
-                try {
-                    // Skip cancelled events (handle both spellings)
-                    const statusProp = vevent.getFirstProperty('status');
-                    const rawStatus = this.extractString(vevent, 'status', '');
-                    const status = (typeof rawStatus === 'string' ? rawStatus : '').trim().toUpperCase();
-
-                    const summary = this.extractString(vevent, 'summary', 'Untitled Event');
-                    const isExplicitCancelled = status === 'CANCELLED' || status === 'CANCELED';
-                    const hasRecurrenceRule = !!vevent.getFirstProperty('rrule') || !!vevent.getFirstProperty('rdate');
-                    const isRecurringMaster = (event.isRecurring() || hasRecurrenceRule) && !event.recurrenceId;
-
-                    // Outlook sometimes publishes cancellation only as a summary prefix,
-                    // including on recurring masters, without STATUS:CANCELLED.
-                    const isCancelled = (!!statusProp && isExplicitCancelled && !isRecurringMaster)
-                        || isCancelledCalendarTitle(summary);
-
-                    if (isCancelled && !includeCancelled) {
-                        stats.cancelledSkipped++;
-                        continue;
+                const selected = [...exceptions.entries()].sort(([a], [b]) => a.localeCompare(b))
+                    .map(([key, versions]) => ({ key, component: this.latestRevision(versions) }));
+                stats.exceptions += selected.length;
+                stats.revisionsDiscarded += components.length - selected.length - (master ? 1 : 0);
+                const exceptionEvents = selected.map(({ key, component }) => {
+                    // Work on a clone: zone/clock normalization must not mutate revision evidence.
+                    const copy = new ICAL.Component(JSON.parse(JSON.stringify(component.toJSON())));
+                    const event = new ICAL.Event(copy, { exceptions: [] });
+                    if (!event.startDate && this.isCancelled(copy)) event.startDate = event.recurrenceId.clone();
+                    if (!event.startDate) throw new Error('Calendar exception is missing DTSTART.');
+                    const range = String(copy.getFirstProperty('recurrence-id')?.getParameter('range') || '').toUpperCase();
+                    if (range && range !== 'THISANDFUTURE') throw new Error('Unsupported recurrence exception range.');
+                    if (master) {
+                        const start = this.inMasterClock(event.startDate, this.timezone(copy, 'dtstart'), master, masterZone);
+                        const end = this.inMasterClock(event.endDate, this.timezone(copy, 'dtend') || this.timezone(copy, 'dtstart'), master, masterZone);
+                        event.recurrenceId = this.inMasterClock(event.recurrenceId, this.timezone(copy, 'recurrence-id'), master, masterZone);
+                        event.startDate = start;
+                        event.endDate = end;
                     }
-
-                    const description = this.extractString(vevent, 'description', '');
-                    const location = this.extractString(vevent, 'location', '');
-                    const uid = this.extractString(vevent, 'uid', `${event.startDate.toUnixTime()}`);
-                    const url = this.extractString(vevent, 'url', '');
-
-                    const organizer = this.extractOrganizer(vevent);
-                    const attendees = this.extractAttendees(vevent);
-
-                    // TZID Logic
-                    const dtstartProp = vevent.getFirstProperty('dtstart');
-                    let explicitTzid: string | null = null;
-                    if (dtstartProp) {
-                        const tzidParam = dtstartProp.getParameter('tzid');
-                        if (typeof tzidParam === 'string') {
-                            explicitTzid = tzidParam.replace(/^["']|["']$/g, '');
-                        }
-
-                        // FORCE FLOATING logic
-                        if (explicitTzid) {
-                            const rawValue = dtstartProp.getFirstValue() as ICAL.Time;
-                            if (rawValue && rawValue.zone && rawValue.zone.toString() !== 'floating') {
-                                const floatingStart = new (ICAL.Time as any)({
-                                    year: rawValue.year,
-                                    month: rawValue.month,
-                                    day: rawValue.day,
-                                    hour: rawValue.hour,
-                                    minute: rawValue.minute,
-                                    second: rawValue.second,
-                                    isDate: rawValue.isDate
-                                });
-                                event.startDate = floatingStart;
-
-                                const dtendProp = vevent.getFirstProperty('dtend');
-                                if (dtendProp) {
-                                    const rawEndValue = dtendProp.getFirstValue() as ICAL.Time;
-                                    if (rawEndValue && rawEndValue.zone && rawEndValue.zone.toString() !== 'floating') {
-                                        const floatingEnd = new (ICAL.Time as any)({
-                                            year: rawEndValue.year,
-                                            month: rawEndValue.month,
-                                            day: rawEndValue.day,
-                                            hour: rawEndValue.hour,
-                                            minute: rawEndValue.minute,
-                                            second: rawEndValue.second,
-                                            isDate: rawEndValue.isDate
-                                        });
-                                        event.endDate = floatingEnd;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if (isRecurringMaster) {
-                        const iterator = event.iterator(event.startDate);
-                        let next: ICAL.Time | null = null;
-                        let iterationCount = 0;
-                        const MAX_ITERATIONS = this.getMaxIterations(vevent, event.startDate, rangeEnd);
-                        const rangeStartTime = rangeStart ? ICAL.Time.fromJSDate(rangeStart) : null;
-
+                    return { key, event, range };
+                });
+                if (master) {
+                    for (const item of exceptionEvents) master.relateException(item.event);
+                    const recurring = master.isRecurring() || masterComponent!.hasProperty('rrule') || masterComponent!.hasProperty('rdate');
+                    if (recurring) {
+                        stats.recurringMasters++;
+                        const iterator = master.iterator(master.startDate);
+                        const exceptionKeys = new Set(exceptionEvents.map(item => item.key));
+                        // A range exception can move a future original occurrence back into
+                        // this window. Expand through its maximum shift before filtering output.
+                        const margin = exceptionEvents.reduce((max, item) => Math.max(max,
+                            Math.abs(item.event.startDate.subtractDate(item.event.recurrenceId).toSeconds()) * 1000), 0);
+                        const scanEnd = rangeEnd ? new Date(rangeEnd.getTime() + margin + 2 * 86400000) : undefined;
+                        const maximum = this.getMaxIterations(masterComponent!, master.startDate, scanEnd);
+                        let count = 0;
+                        let next: ICAL.Time | null;
                         while ((next = iterator.next())) {
-                            iterationCount++;
-                            if (iterationCount > MAX_ITERATIONS) break;
-                            if (rangeEnd && next.compare(ICAL.Time.fromJSDate(rangeEnd)) > 0) break;
-                            if (rangeStartTime && next.compare(rangeStartTime) < 0) {
-                                continue;
-                            }
-
-                            // Check exceptions
-                            const eventUid = event.uid;
-
-                            if (exceptions.has(eventUid) && next) {
-                                const exceptionTimes = exceptions.get(eventUid);
-                                const isException = exceptionTimes?.some(exTime => {
-                                    // (Existing debug logs omitted for brevity)
-                                    if (exTime.compare(next!) === 0) return true;
-
-                                    const t1 = exTime.toUnixTime();
-                                    const t2 = next!.toUnixTime();
-                                    if (Math.abs(t1 - t2) < 60) return true;
-
-                                    if (
-                                        exTime.year === next!.year &&
-                                        exTime.month === next!.month &&
-                                        exTime.day === next!.day &&
-                                        exTime.hour === next!.hour &&
-                                        exTime.minute === next!.minute
-                                    ) {
-                                        return true;
-                                    }
-
-                                    return false;
-                                });
-
-                                if (isException) {
-                                    continue;
-                                }
-                            }
-
-                            const occurrence = event.getOccurrenceDetails(next);
-                            const startDate = this.normalizeTime(occurrence.startDate, explicitTzid);
-                            const endDate = this.normalizeTime(occurrence.endDate, explicitTzid);
-
-                            // Stable ID: use raw ICAL.Time components to build a deterministic
-                            // string that doesn't depend on timezone conversion to JS Date.
-                            // This prevents different normalizeTime() fallback paths from
-                            // producing different IDs across syncs.
-                            const occurrenceId = `${uid}-${this.icalTimeToStableString(next)}`;
-
-                            if (!this.pushEvent(
-                                events,
-                                startDate,
-                                endDate,
-                                occurrence.startDate.isDate,
-                                {
-                                    uid,
-                                    id: occurrenceId, // Pass the generated ID
-                                    occurrenceIdentity: occurrenceId,
-                                    isRecurring: true,
-                                    summary,
-                                    description,
-                                    location,
-                                    organizer,
-                                    attendees,
-                                    url,
-                                    isCancelled
-                                },
-                                rangeStart,
-                                rangeEnd
-                            )) {
-                                stats.outOfRangeSkipped++;
-                            } else {
-                                stats.pushedEvents++;
-                            }
+                            if (scanEnd && this.normalizeTime(next, masterZone) > scanEnd) break;
+                            if (++count > maximum) throw new Error('Calendar recurrence expansion limit reached; refusing an incomplete sync.');
+                            const key = this.icalTimeToStableString(next);
+                            if (exceptionKeys.has(key)) continue;
+                            const occurrence = master.getOccurrenceDetails(next);
+                            this.emitOccurrence(events, uid, `${uid}-${key}`, true,
+                                occurrence.item.component, masterComponent!, occurrence.startDate, occurrence.endDate,
+                                masterZone, rangeStart, rangeEnd, includeCancelled);
                         }
                     } else {
-                        // Single Event
-                        const end = event.endDate ?? event.startDate.clone();
-                        if (!event.endDate && event.duration) {
-                            end.addDuration(event.duration);
-                        }
-
-                        const startDate = this.normalizeTime(event.startDate, explicitTzid);
-                        const endDate = this.normalizeTime(end, explicitTzid);
-
-                        let stableId: string | undefined;
-                        if (event.recurrenceId) {
-                            // Use raw ICAL.Time components for deterministic ID
-                            stableId = `${uid}-${this.icalTimeToStableString(event.recurrenceId)}`;
-                        } else {
-                            // Keep single-event identity stable across sync runs.
-                            // Always suffix with start components to avoid ID drift when
-                            // feeds intermittently include/exclude duplicate UIDs.
-                            stableId = `${uid}-${this.icalTimeToStableString(event.startDate)}`;
-                        }
-
-                        if (!this.pushEvent(
-                            events,
-                            startDate,
-                            endDate,
-                            event.startDate.isDate,
-                            {
-                                uid,
-                                id: stableId,
-                                occurrenceIdentity: event.recurrenceId ? stableId : uid,
-                                isRecurring: !!event.recurrenceId,
-                                summary,
-                                description,
-                                location,
-                                organizer,
-                                attendees,
-                                url,
-                                isCancelled,
-                            },
-                            rangeStart,
-                            rangeEnd
-                        )) {
-                            stats.outOfRangeSkipped++;
-                        } else {
-                            stats.pushedEvents++;
-                        }
+                        this.emitOccurrence(events, uid, uid, false, masterComponent!, null,
+                            master.startDate, master.endDate, masterZone, rangeStart, rangeEnd, includeCancelled);
                     }
-                } catch (innerError) {
-                    stats.eventErrors++;
-                    logger.flowWarn("ICalParser", "event:parse-failed", { error: logger.errorSummary(innerError) });
-                    continue;
+                }
+                // Explicit exceptions are emitted independently: a moved instance can enter
+                // the window even when its original date was excluded or outside that window.
+                for (const { key, event } of exceptionEvents) {
+                    this.emitOccurrence(events, uid, `${uid}-${key}`, true, event.component, masterComponent,
+                        event.startDate, event.endDate, master ? masterZone : this.timezone(event.component, 'dtstart'),
+                        rangeStart, rangeEnd, includeCancelled);
                 }
             }
-            logger.flow("ICalParser", "parse:done", {
-                ...context,
-                ...stats,
-                events: events.length,
-            });
+            events.sort((a, b) => a.startDate.getTime() - b.startDate.getTime() || a.id.localeCompare(b.id));
+            logger.flow("ICalParser", "parse:done", { ...stats, events: events.length, durationMs: Date.now() - startedAt });
             return events;
         } catch (error) {
-            logger.flowError("ICalParser", "parse:failed", error, {
-                ...context,
-                ...stats,
-                events: events.length,
-            });
-            // Return whatever we scraped so far instead of empty array
-            return events;
+            logger.flowError("ICalParser", "parse:failed", error, { ...stats, incomplete: true, durationMs: Date.now() - startedAt });
+            if (strict) throw error;
+            return [];
         }
+    }
+
+    private revision(component: ICAL.Component): [number, number, number] {
+        const sequence = Number(component.getFirstPropertyValue('sequence') || 0);
+        if (!Number.isSafeInteger(sequence) || sequence < 0) throw new Error('Invalid calendar sequence.');
+        const timestamp = (name: string): number => {
+            const value = component.getFirstPropertyValue(name) as ICAL.Time | null;
+            const seconds = value ? value.toUnixTime() : 0;
+            if (!Number.isFinite(seconds)) throw new Error('Invalid calendar revision timestamp.');
+            return seconds;
+        };
+        return [sequence, timestamp('last-modified'), timestamp('dtstamp')];
+    }
+
+    private latestRevision(components: ICAL.Component[]): ICAL.Component {
+        const compare = (a: number[], b: number[]) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+        const sorted = components.map(component => ({ component, rank: this.revision(component) }))
+            .sort((a, b) => compare(b.rank, a.rank));
+        const best = sorted[0];
+        const canonical = (component: ICAL.Component): string => {
+            const json = JSON.parse(JSON.stringify(component.toJSON()));
+            json[1].sort((a: unknown, b: unknown) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+            json[2].sort((a: unknown, b: unknown) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+            return JSON.stringify(json);
+        };
+        for (const other of sorted.slice(1)) {
+            if (compare(best.rank, other.rank) === 0 && canonical(best.component) !== canonical(other.component)) {
+                throw new Error('Conflicting calendar revisions have identical sequence/timestamps; no deterministic winner.');
+            }
+        }
+        return best.component;
+    }
+
+    private timezone(component: ICAL.Component, property: string): string | null {
+        const value = component.getFirstProperty(property)?.getParameter('tzid');
+        return typeof value === 'string' ? value.replace(/^["']|["']$/g, '') : null;
+    }
+
+    private inMasterClock(time: ICAL.Time, zone: string | null, master: ICAL.Event, masterZone: string | null): ICAL.Time {
+        if (time.isDate !== master.startDate.isDate) throw new Error('Recurrence DATE and DATE-TIME types disagree.');
+        const sameClock = zone === masterZone && time.zone.toString() === master.startDate.zone.toString();
+        let result = time.clone();
+        if (!time.isDate && !sameClock) {
+            const instant = this.normalizeTime(time, zone);
+            if (masterZone) {
+                const target = ICalParserService.WINDOWS_TZ_MAPPING[masterZone] || masterZone;
+                const parts = new Intl.DateTimeFormat('en-US', { timeZone: target, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(instant);
+                const fields = Object.fromEntries(parts.map(part => [part.type, Number(part.value)]));
+                result = new ICAL.Time({ year: fields.year, month: fields.month, day: fields.day, hour: fields.hour, minute: fields.minute, second: fields.second }, master.startDate.zone);
+            } else if (master.startDate.zone.toString() === 'UTC') {
+                result = ICAL.Time.fromJSDate(instant, true);
+            } else if (zone || time.zone.toString() !== 'floating') {
+                throw new Error('Cannot match a zoned recurrence exception to a floating master.');
+            }
+        }
+        result.zone = master.startDate.zone;
+        return result;
+    }
+
+    private isCancelled(component: ICAL.Component, fallback?: ICAL.Component | null): boolean {
+        const status = this.extractString(component, 'status', fallback ? this.extractString(fallback, 'status', '') : '').trim().toUpperCase();
+        const summary = this.extractString(component, 'summary', fallback ? this.extractString(fallback, 'summary', '') : '');
+        return status === 'CANCELLED' || status === 'CANCELED' || isCancelledCalendarTitle(summary);
+    }
+
+    private emitOccurrence(events: ExternalCalendarEvent[], uid: string, identity: string, recurring: boolean,
+        component: ICAL.Component, fallback: ICAL.Component | null, start: ICAL.Time, end: ICAL.Time,
+        zone: string | null, rangeStart?: Date, rangeEnd?: Date, includeCancelled = false): void {
+        const isCancelled = this.isCancelled(component, fallback);
+        if (isCancelled && !includeCancelled) return;
+        const startDate = this.normalizeTime(start, zone);
+        const endDate = this.normalizeTime(end, zone);
+        if (!Number.isFinite(startDate.getTime()) || !Number.isFinite(endDate.getTime()) || endDate < startDate) {
+            throw new Error('Calendar occurrence has invalid timing.');
+        }
+        const text = (key: string, defaultValue = '') => this.extractString(component, key, fallback ? this.extractString(fallback, key, defaultValue) : defaultValue);
+        this.pushEvent(events, startDate, endDate, start.isDate, {
+            uid, id: recurring ? identity : `${uid}-${this.icalTimeToStableString(start)}`,
+            occurrenceIdentity: identity, isRecurring: recurring,
+            summary: text('summary', 'Untitled Event'), description: text('description'), location: text('location'),
+            organizer: this.extractOrganizer(component) || (fallback ? this.extractOrganizer(fallback) : ''),
+            attendees: component.hasProperty('attendee') ? this.extractAttendees(component) : fallback ? this.extractAttendees(fallback) : [],
+            url: text('url'), isCancelled, sourceRevision: this.revision(component),
+            sourceRevisionOrigin: component.hasProperty('recurrence-id') ? String(component.getFirstPropertyValue('recurrence-id')) : 'master',
+        }, rangeStart, rangeEnd);
     }
 
     private normalizeTime(icalTime: ICAL.Time, explicitTzid: string | null): Date {
@@ -528,6 +403,8 @@ export class ICalParserService {
             isCancelled?: boolean;
             occurrenceIdentity?: string;
             isRecurring?: boolean;
+            sourceRevision?: [number, number, number];
+            sourceRevisionOrigin?: string;
         },
         rangeStart?: Date,
         rangeEnd?: Date
@@ -550,6 +427,8 @@ export class ICalParserService {
             isCancelled: props.isCancelled,
             occurrenceIdentity: props.occurrenceIdentity || props.id || props.uid,
             isRecurring: props.isRecurring === true,
+            sourceRevision: props.sourceRevision,
+            sourceRevisionOrigin: props.sourceRevisionOrigin,
         });
         return true;
     }

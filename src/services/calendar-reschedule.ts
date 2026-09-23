@@ -7,6 +7,8 @@ export interface CalendarSyncStamp {
     occurrenceId: string;
     schedule: string;
     retired?: true;
+    revision?: [number, number, number];
+    revisionOrigin?: string;
 }
 export function readCalendarSyncStamp(frontmatter: Record<string, unknown>): CalendarSyncStamp | null {
     const keys = Object.keys(frontmatter).filter(key => key.toLowerCase() === CALENDAR_SYNC_PROPERTY.toLowerCase());
@@ -16,7 +18,10 @@ export function readCalendarSyncStamp(frontmatter: Record<string, unknown>): Cal
     if (!value || typeof value !== 'object' || Array.isArray(value)
         || typeof value.occurrenceId !== 'string' || !parseCalendarRecordId(value.occurrenceId)
         || typeof value.schedule !== 'string' || !value.schedule
-        || (value.retired !== undefined && value.retired !== true)) {
+        || (value.revisionOrigin !== undefined && typeof value.revisionOrigin !== 'string')
+        || (value.retired !== undefined && value.retired !== true)
+        || (value.revision !== undefined && (!Array.isArray(value.revision) || value.revision.length !== 3
+            || value.revision.some(part => !Number.isFinite(part))))) {
         throw new Error('Invalid calendar schedule tracking property. Restore it before syncing this event.');
     }
     return value as CalendarSyncStamp;

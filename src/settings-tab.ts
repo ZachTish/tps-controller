@@ -1,3 +1,4 @@
+import { renderCalendarRescheduleActions } from './services/calendar-reschedule-settings';
 import { validateNoteRules } from "./services/note-rules";
 import { NoteRuleEditor, NoteRulePreviewModal } from "./services/note-rule-ui";
 import { renderFinanceRelaySettings } from "./services/finance-relay-settings";
@@ -1958,6 +1959,8 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                             await save();
                         });
                 });
+
+            renderCalendarRescheduleActions(acContent, calendar, () => save());
 
             new Setting(acContent)
                 .setName("Create as")
