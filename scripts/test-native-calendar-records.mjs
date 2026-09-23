@@ -2551,3 +2551,28 @@ test('advertised conflict-aware snapshots must actually include conflict diagnos
  await assert.rejects(()=>h.service.sync([calendar],'',true,false),/did not return calendar conflict diagnostics/);
  assert.equal(h.mutationLog.length,0);
 });
+
+test('settled repeat sync skips the write batch entirely',async()=>{
+ const h=harness([event()]);await h.service.sync([calendar],'',true,false);
+ h.api.applyIdentityChanges=async()=>{throw Error('Unchanged records must not enter a write batch')};
+ const r=await h.service.sync([calendar],'',true,false);
+ assert.equal(r.created,0);assert.equal(r.updated,0);assert.equal(r.unchanged,1);
+});
+
+test('new occurrences are written without replaying unchanged owners',async()=>{
+ const first=event();const h=harness([first]);await h.service.sync([calendar],'',true,false);
+ h.setEvents([first,event({id:'second-distinct',uid:'second-distinct',occurrenceIdentity:'second-distinct',title:'Second distinct event'})]);
+ const apply=h.api.applyIdentityChanges.bind(h.api);let applied;
+ h.api.applyIdentityChanges=async(plan,entries,...rest)=>{applied=entries;return apply(plan,entries,...rest)};
+ const r=await h.service.sync([calendar],'',true,false);
+ assert.equal(r.created,1);assert.equal(applied.length,1);assert.equal(applied[0].operation,'create');
+});
+
+test('an already archived missing event does not rewrite its archive timestamp on every sync',async()=>{
+ const h=harness([event()]);h.settings.syncOnEventDelete='archive';await h.service.sync([calendar],'',true,false);
+ h.setEvents([]);await h.service.sync([calendar],'',true,false);
+ assert.equal([...h.frontmatters.values()][0].archived,true);
+ const before=structuredClone([...h.frontmatters]);
+ h.api.applyIdentityChanges=async()=>{throw Error('Already archived missing event must not enter a write batch')};
+ await h.service.sync([calendar],'',true,false);assert.deepEqual([...h.frontmatters],before);
+});

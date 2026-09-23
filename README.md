@@ -1,5 +1,33 @@
 # TPS Controller
 
+## Calendar write-batch reduction — 2.4.3
+
+Full identity and destination checks still run, but unchanged calendar notes no
+longer enter the mutating batch. Only real property, identity, path, create and
+archive changes are applied. GCM replans the reduced batch against the same
+snapshot and must preserve every previously validated destination. Repeated
+missing-event handling also preserves an already archived note's archive date.
+This reduces interruptions from unrelated vault writers and automatic renamers;
+real source changes during an actual write batch still fail closed and need retry.
+No settings, defaults, identity formats or API requirements change.
+
+Tests cover zero write batches on settled repeat sync, a new occurrence beside
+unchanged owners, stable archive timestamps, and the existing stale-token, exact
+payload, interrupted-write and reschedule cases. Test-vault installed validation
+uses synthetic records and GCM's real planner/writer. This patch does not disable
+background services or weaken write guards. Production backfill verification is
+separate from test-vault release acceptance.
+
+Validation: 578 passing checks, three existing optional comparison skips, zero
+failures; 103 focused native-calendar checks. TypeScript and the separate final
+build passed and deployed to the test vault. Named-vault plugin reload and real
+Controller 2.4.3/GCM 3.2.1 QA verified no write batch for an unchanged repeat, one
+create-only batch beside an unchanged owner, preservation of an unrelated invalid
+note, and rejection of duplicate calendar ownership. Fixtures were archived from
+Inbox and test settings were preserved. This version is a BRAT handoff; it has not
+been installed or accepted in production.
+
+
 ## Calendar creation recovery — 2.4.2
 
 Calendar reconciliation now uses GCM's optional conflict-aware snapshot capability

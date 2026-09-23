@@ -857,7 +857,8 @@ export class NativeCalendarRecordService {
                         || prepared.seenIds.has(identityKey(targetId))) continue;
                     const start = Date.parse(String(record.frontmatter.scheduled || ""));
                     if (!Number.isFinite(start) || start < rangeStart.getTime() || start > rangeEnd.getTime()) continue;
-                    const updates = { archived: true, archivedDate: plannedAtIso };
+                    const updates: Record<string, unknown> = readPropertyCaseInsensitive(record.frontmatter, "archived") === true
+                        ? {} : { archived: true, archivedDate: plannedAtIso };
                     addEntry({
                         operation: "reidentify",
                         reference: record.id,
@@ -902,10 +903,31 @@ export class NativeCalendarRecordService {
                 throw new Error("Calendar payload planning changed the identity batch order; no records were changed.");
             }
         }
+        // Unchanged owners participated in global identity/path validation but
+        // need no write reservation. Replaying them can keep a long batch open
+        // until an unrelated heartbeat or filename rule invalidates its token.
+        const entries = exact.entries.filter(entry => {
+            if (entry.operation !== "reidentify" || typeof entry.reference !== "string") return true;
+            const source = this.findUniqueById(entry.reference);
+            return !source || entry.nextId !== source.id
+                || entry.updates.some(update => Object.keys(update).length > 0)
+                || normalizePathForComparison(expectedPathsById.get(identityKey(entry.nextId)))
+                    !== normalizePathForComparison(source.file.path);
+        });
+        const writeBatch = entries.length && entries.length !== exact.entries.length
+            ? await api.planIdentityChanges!(entries, snapshot)
+            : plannedBatch;
+        if (!writeBatch || (entries.length && (writeBatch.entries.length !== entries.length
+            || writeBatch.entries.some((planned, index) => planned.operation !== entries[index].operation
+                || identityKey(planned.nextId) !== identityKey(entries[index].nextId)
+                || normalizePathForComparison(planned.expectedPath)
+                    !== normalizePathForComparison(expectedPathsById.get(identityKey(planned.nextId))))))) {
+            throw new Error("TPS GCM could not preserve the validated calendar paths when excluding unchanged records; no records were changed.");
+        }
         return {
-            entries: exact.entries,
+            entries,
             expectedPathsById,
-            plannedBatch,
+            plannedBatch: writeBatch,
             archiveUpdatesById: exact.archiveUpdatesById,
             preApplyCancellationStateUpdatesById: exact.preApplyCancellationStateUpdatesById,
             postApplyCancellationStateUpdatesById: exact.postApplyCancellationStateUpdatesById,
