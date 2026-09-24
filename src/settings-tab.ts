@@ -1,3 +1,4 @@
+import { CONNECTION_SECTIONS, ConnectionSection, connectionSection, mountConnectionSettings } from "./services/connection-settings";
 import { renderCalendarRescheduleActions } from './services/calendar-reschedule-settings';
 import { validateNoteRules } from "./services/note-rules";
 import { NoteRuleEditor, NoteRulePreviewModal } from "./services/note-rule-ui";
@@ -16,7 +17,7 @@ import {
 } from './services/notification-delivery-provider';
 
 const createCalendarId = () => `calendar-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
-export type ControllerSettingsPage = 'overview' | 'calendar' | 'reminders' | 'automations' | 'advanced' | 'note-rules';
+export type ControllerSettingsPage = 'overview' | 'calendar' | 'reminders' | 'automations' | 'advanced' | 'note-rules' | 'connections';
 type ControllerAutomationPage = 'archive' | 'attachments';
 
 const CONTROLLER_SETTINGS_DESTINATIONS: Array<{
@@ -25,6 +26,7 @@ const CONTROLLER_SETTINGS_DESTINATIONS: Array<{
     description: string;
 }> = [
     { id: 'overview', label: 'Overview', description: 'Device role and quick links.' },
+    { id: 'connections', label: 'Connections', description: 'Banks, Wallet, AI, and food databases.' },
     { id: 'calendar', label: 'Calendar rules', description: 'Feeds, destinations, and sync safety.' },
     { id: 'note-rules', label: 'Note rules', description: 'Preview and apply rules with a command.' },
     { id: 'reminders', label: 'Reminder rules', description: 'Notification timing, matching, and snooze defaults.' },
@@ -67,6 +69,8 @@ export class TPSControllerSettingTab extends PluginSettingTab {
     private attachmentStatusDispose: (() => void) | null = null;
     private reminderDeliveryStatusTimer: number | null = null;
     private activePage: ControllerSettingsPage = 'overview';
+    private activeConnection: ConnectionSection = 'finance';
+    private connectionDispose: (() => void) | null = null;
     private activeAutomation: ControllerAutomationPage = 'archive';
     private noteRuleEditor: NoteRuleEditor | null = null;
     private selectedCalendarId: string | null = null;
@@ -74,7 +78,12 @@ export class TPSControllerSettingTab extends PluginSettingTab {
     private reminderRuleFilterQuery = '';
 
     openPlaidSettings(): void {
-        this.activePage = 'advanced';
+        this.openConnectionSettings('finance');
+    }
+
+    openConnectionSettings(section?: unknown): void {
+        this.activeConnection = connectionSection(section);
+        this.activePage = 'connections';
         this.display();
     }
 
@@ -89,6 +98,8 @@ export class TPSControllerSettingTab extends PluginSettingTab {
     }
 
     hide(): void {
+        this.connectionDispose?.();
+        this.connectionDispose = null;
         if (this.reminderDeliveryStatusTimer !== null) window.clearInterval(this.reminderDeliveryStatusTimer);
         this.reminderDeliveryStatusTimer = null;
         this.attachmentStatusDispose?.();
@@ -166,61 +177,51 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             'Open automations',
             'automations'
         );
-        const commandBridge = this.plugin.getTishOSCommandBridgeStatus();
-        const commandBridgeSection = createSettingsSection(
-            containerEl,
-            'Obsidian commands in Shortcuts',
-            'TishOS pairs separately on each device, then publishes a signed list of the commands registered by this local Obsidian installation.'
-        );
-        new Setting(commandBridgeSection)
-            .setName('Command catalog')
-            .setDesc(commandBridge.available
-                ? commandBridge.clients.length
-                    ? `${commandBridge.clients.length} paired device${commandBridge.clients.length === 1 ? '' : 's'}. Catalogs refresh after layout readiness and when commands change.`
-                    : 'No TishOS device is paired with this Obsidian installation.'
-                : 'Device-local bridge state is unavailable. Existing authority was not replaced.')
-            .addButton((button) => button
-                .setButtonText('Refresh')
-                .onClick(async () => {
-                    button.setDisabled(true);
-                    try {
-                        const result = await this.plugin.refreshTishOSCommandBridgeCatalogs();
-                        if (result.unavailableReason === 'not-paired') {
-                            new Notice('Pair this device from TishOS first.');
-                        } else if (result.unavailableReason) {
-                            new Notice('The command registry is temporarily unavailable. The last valid catalog was preserved.');
-                        } else {
-                            new Notice(result.publishedClients > 0
-                                ? `Published ${result.commandCount} commands.`
-                                : `${result.commandCount} commands are current.`);
-                        }
-                    } finally {
-                        this.redisplayPreservingScroll();
-                    }
-                }));
-        for (const client of commandBridge.clients) {
-            const updated = client.lastPublishedAt
-                ? ` · ${client.commandCount} commands · updated ${new Date(client.lastPublishedAt).toLocaleString()}`
-                : ' · waiting for its first catalog';
-            const nativeStatus = this.describeNativeNotificationStatus(client);
-            new Setting(commandBridgeSection)
-                .setName(client.device)
-                .setDesc(`${client.platform} · ${client.clientID.slice(-8)}${updated} · ${nativeStatus}`)
-                .addButton((button) => button
-                    .setWarning()
-                    .setButtonText('Revoke')
-                    .onClick(async () => {
-                        button.setDisabled(true);
-                        try {
-                            await this.plugin.requestRevokeTishOSCommandBridgeClient(client.clientID);
-                        } finally {
-                            this.redisplayPreservingScroll();
-                        }
-                    }));
-        }
         }
 
         // ── External Calendars ─────────────────────────────────────
+        if (this.activePage === 'connections') {
+            this.renderPageHeading(containerEl, 'Connections', '');
+            const selector = containerEl.createDiv({ cls: 'tps-controller-connections-selector', attr: { role: 'group', 'aria-label': 'Connection type' } });
+            for (const section of CONNECTION_SECTIONS) {
+                const button = selector.createEl('button', { text: section.label, attr: { type: 'button', 'aria-pressed': String(this.activeConnection === section.id) } });
+                button.addEventListener('click', () => {
+                    this.activeConnection = section.id;
+                    this.display();
+                    this.containerEl.querySelector<HTMLElement>('.tps-controller-connections-selector [aria-pressed="true"]')?.focus({ preventScroll: true });
+                });
+            }
+            const content = containerEl.createDiv({ cls: 'tps-controller-connections-content' });
+            if (this.activeConnection === 'finance') {
+                renderWalletSetupEntry(content);
+                const financePanel = content.createDiv();
+                const refreshFinance = () => {
+                    if (!this.containerEl.contains(financePanel)) return;
+                    this.connectionDispose?.(); financePanel.empty();
+                    this.connectionDispose = mountConnectionSettings(this.app, financePanel, 'finance');
+                };
+                refreshFinance();
+                const setup = content.createEl('details');
+                setup.createEl('summary', { text: 'Bank setup · This device' });
+                let configuration;
+                let configurationReadable = true;
+                try { configuration = this.plugin.financeRelay.getConfiguration(); }
+                catch { configurationReadable = false; }
+                setup.open = !configuration;
+                renderFinanceRelaySettings(setup, this.app, this.plugin.financeRelay, this.plugin.deviceRoleManager.isController(), () => {
+                    if (this.containerEl.contains(setup)) this.display();
+                });
+                if (configurationReadable && configuration?.mode !== 'client') renderPlaidConnectionSettings(setup, this.app, this.plugin.plaidConnection, refreshFinance);
+            } else if (this.activeConnection === 'tishos') {
+                this.renderTishOSConnections(content);
+            } else {
+                this.connectionDispose = mountConnectionSettings(this.app, content, this.activeConnection);
+            }
+            new Setting(containerEl).setName('Other connections')
+                .addButton(button => button.setButtonText('Calendar feeds').onClick(() => this.navigateToPage('calendar')))
+                .addButton(button => button.setButtonText('Attachment sync').onClick(() => { this.activeAutomation = 'attachments'; this.navigateToPage('automations'); }));
+        }
+
         if (this.activePage === 'calendar') {
         this.renderPageHeading(
             containerEl,
@@ -541,8 +542,6 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             'Advanced',
             'Change shared field names or use troubleshooting controls. Normal calendar and reminder rules do not require these options.'
         );
-        renderFinanceRelaySettings(containerEl, this.app, this.plugin.financeRelay, this.plugin.deviceRoleManager.isController());
-        renderPlaidConnectionSettings(containerEl, this.app, this.plugin.plaidConnection);
         const fmContent = createSettingsSection(
             containerEl,
             'Calendar field names',
@@ -638,6 +637,61 @@ export class TPSControllerSettingTab extends PluginSettingTab {
     // ========================================================================
     // Helpers
     // ========================================================================
+
+    private renderTishOSConnections(containerEl: HTMLElement): void {
+        const commandBridge = this.plugin.getTishOSCommandBridgeStatus();
+        const commandBridgeSection = createSettingsSection(
+            containerEl,
+            'Obsidian commands in Shortcuts',
+            'TishOS pairs separately on each device, then publishes a signed list of the commands registered by this local Obsidian installation.'
+        );
+        new Setting(commandBridgeSection)
+            .setName('Command catalog')
+            .setDesc(commandBridge.available
+                ? commandBridge.clients.length
+                    ? `${commandBridge.clients.length} paired device${commandBridge.clients.length === 1 ? '' : 's'}. Catalogs refresh after layout readiness and when commands change.`
+                    : 'No TishOS device is paired with this Obsidian installation.'
+                : 'Device-local bridge state is unavailable. Existing authority was not replaced.')
+            .addButton((button) => button
+                .setButtonText('Refresh')
+                .onClick(async () => {
+                    button.setDisabled(true);
+                    try {
+                        const result = await this.plugin.refreshTishOSCommandBridgeCatalogs();
+                        if (result.unavailableReason === 'not-paired') {
+                            new Notice('Pair this device from TishOS first.');
+                        } else if (result.unavailableReason) {
+                            new Notice('The command registry is temporarily unavailable. The last valid catalog was preserved.');
+                        } else {
+                            new Notice(result.publishedClients > 0
+                                ? `Published ${result.commandCount} commands.`
+                                : `${result.commandCount} commands are current.`);
+                        }
+                    } finally {
+                        this.redisplayPreservingScroll();
+                    }
+                }));
+        for (const client of commandBridge.clients) {
+            const updated = client.lastPublishedAt
+                ? ` · ${client.commandCount} commands · updated ${new Date(client.lastPublishedAt).toLocaleString()}`
+                : ' · waiting for its first catalog';
+            const nativeStatus = this.describeNativeNotificationStatus(client);
+            new Setting(commandBridgeSection)
+                .setName(client.device)
+                .setDesc(`${client.platform} · ${client.clientID.slice(-8)}${updated} · ${nativeStatus}`)
+                .addButton((button) => button
+                    .setWarning()
+                    .setButtonText('Revoke')
+                    .onClick(async () => {
+                        button.setDisabled(true);
+                        try {
+                            await this.plugin.requestRevokeTishOSCommandBridgeClient(client.clientID);
+                        } finally {
+                            this.redisplayPreservingScroll();
+                        }
+                    }));
+        }
+    }
 
     private renderSettingsDestinationHub(container: HTMLElement): void {
         const hub = container.createDiv({ cls: 'tps-settings-destination-hub' });

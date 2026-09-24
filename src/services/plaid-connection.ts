@@ -37,19 +37,19 @@ export class PlaidConnectionService {
     async request(environment: Environment, path: string, body: Record<string, unknown>, clientRef?: string, secretRef?: string) {
         if (!Object.prototype.hasOwnProperty.call(HOSTS, environment) || !PATHS.has(path)) throw new Error('Unsupported Plaid operation.');
         const config = this.getConfiguration();
-        if (this.inspect(clientRef, secretRef).state !== 'ready') throw new Error('Configure separate Plaid client ID and secret in TPS Controller → Advanced → Plaid.');
+        if (this.inspect(clientRef, secretRef).state !== 'ready') throw new Error('Configure separate Plaid client ID and secret in TPS Controller → Connections → Banks & Wallet → Bank setup.');
         return requestUrl({url:HOSTS[environment]+path, method:'POST', headers:{'Content-Type':'application/json','Plaid-Version':'2020-09-14',
             'PLAID-CLIENT-ID':this.app.secretStorage.getSecret(clientRef || config.plaidClientIdSecret)!.trim(),
             'PLAID-SECRET':this.app.secretStorage.getSecret(secretRef || config.plaidSecretSecret)!.trim()},body:JSON.stringify(body),throw:false});
     }
 }
-export function renderPlaidConnectionSettings(container: HTMLElement, app: App, service: PlaidConnectionService): void {
+export function renderPlaidConnectionSettings(container: HTMLElement, app: App, service: PlaidConnectionService, onChanged: () => void = () => {}): void {
     container.createEl('h3', {text:'Plaid · This device'});
     const config = service.getConfiguration();
-    new Setting(container).setName('Environment · This device').addDropdown(dropdown => dropdown.addOption('sandbox','Sandbox').addOption('development','Development').addOption('production','Production').setValue(config.plaidEnvironment).onChange(value => { config.plaidEnvironment = value as Environment; service.saveConfiguration(config); }));
+    new Setting(container).setName('Environment · This device').addDropdown(dropdown => dropdown.addOption('sandbox','Sandbox').addOption('development','Development').addOption('production','Production').setValue(config.plaidEnvironment).onChange(value => { config.plaidEnvironment = value as Environment; service.saveConfiguration(config); onChanged(); }));
     for (const [key,label] of [['plaidClientIdSecret','Plaid client ID'],['plaidSecretSecret','Plaid secret']] as const) {
-        new Setting(container).setName(`${label} · This device`).addComponent(el => new SecretComponent(app,el).setValue(config[key]).onChange(value => { config[key] = value; service.saveConfiguration(config); }));
+        new Setting(container).setName(`${label} · This device`).addComponent(el => new SecretComponent(app,el).setValue(config[key]).onChange(value => { config[key] = value; service.saveConfiguration(config); onChanged(); }));
     }
-    new Setting(container).setName('OAuth redirect URI · This device').addText(text => text.setValue(config.oauthRedirectUri).onChange(value => {config.oauthRedirectUri=value.trim();service.saveConfiguration(config);}));
-    new Setting(container).setName('Accounts and transactions').setDesc('Manage institutions, sync, and ledger records in TPS Finances.').addButton(button => button.setButtonText('Open Finances settings').onClick(() => {const finances=(app as any).plugins?.plugins?.['tps-finances']?.api;if(finances?.openConnectionSettings){finances.openConnectionSettings();return;}const settings=(app as any).setting;settings?.open();settings?.openTabById('tps-finances');}));
+    new Setting(container).setName('OAuth redirect URI · This device').addText(text => text.setValue(config.oauthRedirectUri).onChange(value => {config.oauthRedirectUri=value.trim();service.saveConfiguration(config); onChanged();}));
+
 }

@@ -390,6 +390,11 @@ export default class TPSControllerPlugin extends Plugin {
         (this as any).api = {
             plaid: this.plaidConnection,
             financeRelay: this.financeRelay,
+            openConnectionSettings: (section?: unknown) => {
+                const settings = (this.app as any).setting;
+                settings?.open(); settings?.openTabById(this.manifest.id);
+                this.settingsTab?.openConnectionSettings(section);
+            },
             openPlaidSettings: () => {
                 const settings = (this.app as any).setting;
                 settings?.open(); settings?.openTabById(this.manifest.id);

@@ -15,19 +15,19 @@ function render(mobile,config=null,entryOnly=false){
 }
 test('unpaired phone presents Wallet before bank pairing without desktop-only controls',()=>{
  const {rows,titles}=render(true);assert.deepEqual(titles,['Bank connections · This device']);
- assert.equal(rows[0].buttons[0].label,'Connect Apple Wallet');assert.match(rows[0].desc,/import automatically/);
+ assert.equal(rows.some(r=>r.name==='Apple Card & Savings'),false);
  assert.ok(rows.some(r=>r.name==='Pair bank connections'));
  for(const name of ['Host on this device','Request files folder','Import Apple Wallet · This device'])assert.equal(rows.some(r=>r.name===name),false);
 });
 test('desktop retains bank controls, pairing and folder editing; legacy import only exposes Stop',()=>{
  const {rows}=render(false,{mode:'host',enabled:false,intervalMinutes:60,walletEnabled:true});
- for(const name of ['Request files folder','Finance service · This device','Automatic bank refresh · This device','Pair another device','Connections and pending requests'])assert.ok(rows.some(r=>r.name===name),name);
+ for(const name of ['Request files folder','Finance service · This device','Automatic bank refresh · This device','Pair another device'])assert.ok(rows.some(r=>r.name===name),name);
  const old=rows.find(r=>r.name==='Previous Wallet importer');assert.equal(old.buttons[0].label,'Stop old importer');assert.equal(old.toggle,undefined);
  assert.equal(render(false,{mode:'host',enabled:true,intervalMinutes:60,walletEnabled:false}).rows.some(r=>r.name==='Previous Wallet importer'),false);
 });
 test('paired phone retains bank unpairing and Finances entry',()=>{
  const {rows}=render(true,{mode:'client',enabled:false});
- assert.ok(rows.some(r=>r.buttons.some(b=>b.label==='Update pairing code')));assert.ok(rows.some(r=>r.name==='Remove this device’s pairing'));assert.ok(rows.some(r=>r.name==='Connections and pending requests'));
+ assert.ok(rows.some(r=>r.buttons.some(b=>b.label==='Update pairing code')));assert.ok(rows.some(r=>r.name==='Remove this device’s pairing'));assert.equal(rows.some(r=>r.name==='Connections and pending requests'),false);
 });
 
 test('Overview always presents an actionable Wallet connection before role controls',()=>{

@@ -8,11 +8,13 @@ export function renderWalletSetupEntry(parent: HTMLElement): void {
             if (Platform.isMobile) window.location.assign(url); else window.open(url);
         }));
 }
-export function renderFinanceRelaySettings(parent: HTMLElement, app: App, relay: FinanceRelayService, isController: boolean): void {
+export function renderFinanceRelaySettings(parent: HTMLElement, app: App, relay: FinanceRelayService, isController: boolean, onChanged?: () => void): void {
     const root = parent.createDiv({ cls: 'tps-controller-finance-settings' });
+    let rendered = false;
     const render = () => {
+        if (rendered && onChanged) { onChanged(); return; }
+        rendered = true;
         root.empty();
-        renderWalletSetupEntry(root);
         root.createEl('h3', { text: 'Bank connections · This device' });
         let configuration: ReturnType<FinanceRelayService['getConfiguration']>;
         let status: ReturnType<FinanceRelayService['getStatus']>;
@@ -82,16 +84,7 @@ export function renderFinanceRelaySettings(parent: HTMLElement, app: App, relay:
         }
         if (config.mode === 'client')
             new Setting(root).setName('Remove this device’s pairing').addButton(button => button.setButtonText('Unpair').onClick(() => new UnpairModal(app, relay, render).open()));
-        new Setting(root).setName('Connections and pending requests').addButton(button => button.setButtonText('Open Finances').onClick(() => {
-            const finance = (app as any).plugins?.plugins?.['tps-finances']?.api;
-            if (finance?.openConnectionSettings) {
-                finance.openConnectionSettings();
-                return;
-            }
-            const settings = (app as any).setting;
-            settings?.open();
-            settings?.openTabById('tps-finances');
-        }));
+
     };
     render();
 }

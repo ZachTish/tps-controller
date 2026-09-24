@@ -211,7 +211,7 @@
 
 .tps-settings-destination-grid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -368,7 +368,7 @@
 
 @media (max-width: 900px) {
   .tps-settings-destination-grid {
-    grid-template-columns: repeat(6, minmax(132px, 1fr));
+    grid-template-columns: repeat(7, minmax(132px, 1fr));
     overflow-x: auto;
     padding-bottom: 2px;
   }
@@ -472,4 +472,20 @@
     .tps-controller-attachment-sync-settings button {
         min-height: 40px;
     }
+}
+
+/* Connection ownership hub: one selected provider, no persisted navigation state. */
+.tps-controller-connections-selector { display: flex; gap: 8px; overflow-x: auto; padding: 4px 0 12px; }
+.tps-controller-connections-selector button { height: auto; min-height: 36px; flex: 0 0 auto; }
+.tps-controller-connections-selector button[aria-pressed="true"] { background: var(--interactive-accent); color: var(--text-on-accent); }
+.tps-controller-connections-selector button:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.tps-controller-connections-content { min-width: 0; }
+.tps-controller-connections-content summary { cursor: pointer; padding: 12px 0; }
+.tps-controller-connections-content .setting-item-control { flex-wrap: wrap; }
+@media (max-width: 600px) {
+  .tps-controller-connections-content .setting-item { flex-wrap: wrap; gap: 8px; }
+  .tps-controller-connections-content .setting-item-info { flex-basis: 100%; }
+  .tps-controller-connections-content .setting-item-control { max-width: 100%; justify-content: flex-start; }
+  .tps-controller-connections-content input { max-width: 100%; }
+  .tps-controller-connections-content button { height: auto; min-height: 36px; white-space: normal; }
 }

@@ -389,11 +389,11 @@ test("Controller settings use one routed page with an explicit six-destination h
   assert.match(settingsTabSource, /private activeAutomation: ControllerAutomationPage = 'archive'/);
   assert.match(settingsTabSource, /Choose what to configure/);
   assert.match(settingsTabSource, /setAttr\('aria-pressed', String\(this\.activePage === destination\.id\)\)/);
-  for (const destination of ["Overview", "Calendar rules", "Note rules", "Reminder rules", "Automations", "Advanced"]) {
+  for (const destination of ["Overview", "Connections", "Calendar rules", "Note rules", "Reminder rules", "Automations", "Advanced"]) {
     assert.match(settingsTabSource, new RegExp(`label: '${destination}'`));
   }
-  assert.equal((settingsTabSource.match(/\{ id: '(?:overview|calendar|note-rules|reminders|automations|advanced)'/g) || []).length, 6);
-  assert.doesNotMatch(displaySource, /createEl\(['"]details['"]/);
+  assert.equal((settingsTabSource.match(/\{ id: '(?:overview|connections|calendar|note-rules|reminders|automations|advanced)'/g) || []).length, 7);
+  assert.equal((displaySource.match(/createEl\(['"]details['"]/g) || []).length, 1);
   assert.match(settingsTabSource, /createEl\('details', \{ cls: 'tps-controller-reminder-rule' \}\)/);
   assert.match(settingsTabSource, /private navigateToPage[\s\S]*heading\?\.focus\(\{ preventScroll: false \}\)/);
   assert.match(settingsTabSource, /private redisplayPreservingScroll\(focusSelector\?: string\)[\s\S]*this\.containerEl\.scrollTop = scrollTop[\s\S]*focus\(\{ preventScroll: true \}\)/);
@@ -453,7 +453,7 @@ test("Controller settings use one routed page with an explicit six-destination h
   assert.match(settingsStylesSource, /\.tps-settings-inline-selector-button\[aria-pressed="true"\]/);
   assert.match(settingsStylesSource, /\.tps-settings-destination-button:focus-visible/);
   assert.match(settingsStylesSource, /\.tps-settings-destination-button \{[\s\S]*\n  height: auto;/);
-  assert.match(settingsStylesSource, /@media \(max-width: 900px\)[\s\S]*grid-template-columns: repeat\(6, minmax\(132px, 1fr\)\)[\s\S]*overflow-x: auto/);
+  assert.match(settingsStylesSource, /@media \(max-width: 900px\)[\s\S]*grid-template-columns: repeat\(7, minmax\(132px, 1fr\)\)[\s\S]*overflow-x: auto/);
   assert.match(settingsStylesSource, /@media \(max-width: 520px\)[\s\S]*\.tps-settings-destination-description \{[\s\S]*display: none/);
 });
 

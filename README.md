@@ -1,5 +1,22 @@
 # TPS Controller
 
+## 2.6.0 — Connections in one place
+
+Open **Connections** for **Banks & Wallet**, **AI**, **TishOS devices**, or **Food databases**. Apple Wallet setup, bank connect/sync/reconnect/disconnect, pending sign-ins and import history are together. **Bank setup · This device** holds hosting/pairing, automatic refresh, request-folder controls and Plaid credentials. It starts expanded on an unconfigured device. Paired clients do not need the host's Plaid secrets. Changing pairing or credentials refreshes the affected controls immediately. Apple permission and initial Wallet import still happen in the native TishOS app; new Wallet connections write on the iPhone and do not require bank pairing.
+
+The top-level destinations are Overview (default), Connections, Calendar rules, Note rules, Reminder rules, Automations, and Advanced. Calendar feeds and attachment sync retain their existing Controller workflow pages, with direct buttons from Connections. Overview keeps its visible Wallet shortcut. TishOS command pairing/catalog actions moved from Overview to Connections → TishOS devices. Advanced now contains field mappings and diagnostics only.
+
+Update Controller first, then **Finances 1.9.0**, **AI Gateway 0.10.0**, and **Health 3.4.0**. Controller does not bundle or enable those plugins. Finances still owns provider normalization and the account/transaction note writer; AI Gateway still executes AI requests; Health still performs food lookups. This release consolidates connection configuration and controls without rewriting those tested service contracts.
+
+The connection editor API is `api.connectionSettings = { version: 1, render(parent): dispose }`. Controller mounts one editor at a time and disposes it on navigation/hide. Provider-specific editors retain the existing save paths, runtime adapters, commands, and device state. No keys, tokens, pairing authority, queued requests, connection IDs, sync cursors, or note mappings are copied or reset. No connection or provider test runs merely from opening settings. Missing/outdated plugins produce an upgrade/enable message instead of a duplicate configuration surface.
+
+Settings inventory: added Connections and its transient provider selector; moved existing bank/Wallet controls from Advanced; moved TishOS devices from Overview; retained calendar, reminder, archive, attachment, mapping, and diagnostic controls. Retired circular Open Finances/Open Controller connection links. One bank-setup disclosure and AI's existing Diagnostics disclosure are never nested. Native buttons use aria-pressed, visible focus, restored selector focus, and horizontally scrolling selectors; narrow controls wrap. No navigation fields are persisted. Minimum Obsidian remains 1.12.3. This additive API/settings consolidation is a minor release.
+
+See [connection ownership audit](CONNECTIONS.md) and [release validation](release-notes/2.6.0.md) for preserved/retired controls, tests, final build, isolated test-vault deployment, reload, UI verification, limitations, and hashes. Production installation remains the user's BRAT pull.
+
+## Previous releases (historical settings locations)
+
+
 ## Visible Wallet connection — 2.5.2
 
 **Overview → Connect Apple Wallet** is available immediately, before Device role,
