@@ -1,5 +1,24 @@
 # TPS Controller
 
+## Visible Wallet connection — 2.5.2
+
+**Overview → Connect Apple Wallet** is available immediately, before Device role,
+on desktop and mobile. The same action remains in Advanced beside bank settings.
+It opens TishOS's Wallet settings only; it does not grant account permission or
+start bank automation. TishOS 0.18.2 (152) exposes the action on its home screen
+even without a linked vault, and starts setup with Choose vault or Connect Apple
+Wallet. Confirm the destination and Apple accounts to begin the initial import.
+
+The six destinations, default Overview, device role, bank hosting/pairing,
+request-folder editing, legacy Stop, status and Finances handoff are retained.
+No persisted settings, defaults or disclosure levels change. Native Obsidian
+buttons retain keyboard semantics and existing narrow-screen wrapping. Focused
+regressions cover default-page placement and working mobile/desktop URL actions;
+the full suite passes 588 cases with three existing opt-in skips and no failures.
+Test-vault desktop and mobile-emulated UI show the action on Overview and
+Advanced; settings remain editable without bank pairing. A separate final build,
+test deployment and reload verify the released artifact. Production installation remains the user's BRAT pull.
+
 ## Initial Wallet handoff recovery — 2.5.1
 
 A first-time legacy handoff can retry its acknowledgement after a disk or sync

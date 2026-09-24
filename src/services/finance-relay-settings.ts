@@ -1,16 +1,18 @@
 import { App, Modal, Notice, Platform, Setting } from 'obsidian';
 import { FinanceRelayService } from './finance-relay';
+export function renderWalletSetupEntry(parent: HTMLElement): void {
+    new Setting(parent).setName('Apple Card & Savings')
+        .setDesc('Connect in TishOS on your iPhone to import automatically. Requires TishOS 0.18.2 or newer.')
+        .addButton(button => button.setButtonText('Connect Apple Wallet').setCta().onClick(() => {
+            const url = 'tishos://settings?section=apple-wallet';
+            if (Platform.isMobile) window.location.assign(url); else window.open(url);
+        }));
+}
 export function renderFinanceRelaySettings(parent: HTMLElement, app: App, relay: FinanceRelayService, isController: boolean): void {
     const root = parent.createDiv({ cls: 'tps-controller-finance-settings' });
     const render = () => {
         root.empty();
-        root.createEl('h3', { text: 'Apple Card & Savings' });
-        new Setting(root).setName('Import with TishOS on iPhone')
-            .setDesc('Connect and run the first import in TishOS → Apple Wallet. No bank pairing code is needed.')
-            .addButton(button => button.setButtonText('Open Apple Wallet').onClick(() => {
-                const url = 'tishos://settings?section=apple-wallet';
-                if (Platform.isMobile) window.location.assign(url); else window.open(url);
-            }));
+        renderWalletSetupEntry(root);
         root.createEl('h3', { text: 'Bank connections · This device' });
         let configuration: ReturnType<FinanceRelayService['getConfiguration']>;
         let status: ReturnType<FinanceRelayService['getStatus']>;

@@ -1,7 +1,7 @@
 import { renderCalendarRescheduleActions } from './services/calendar-reschedule-settings';
 import { validateNoteRules } from "./services/note-rules";
 import { NoteRuleEditor, NoteRulePreviewModal } from "./services/note-rule-ui";
-import { renderFinanceRelaySettings } from "./services/finance-relay-settings";
+import { renderFinanceRelaySettings, renderWalletSetupEntry } from "./services/finance-relay-settings";
 import { renderPlaidConnectionSettings } from "./services/plaid-connection";
 import { buildReminderDeliveryStatusText } from "./services/reminder-delivery-status";
 import { renderAttachmentSyncSettings } from "./services/attachment-sync/settings-ui";
@@ -109,6 +109,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                 'Overview',
                 'See what this device owns, then jump directly to the rules or automation you want to change.'
             );
+        renderWalletSetupEntry(containerEl);
         // ── Device Role ─────────────────────────────────────────────
         const roleSection = containerEl.createDiv({ cls: 'tps-settings-core' });
         new Setting(roleSection).setName('Device role').setHeading();
