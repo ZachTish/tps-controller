@@ -933,21 +933,18 @@ export class TishOSCommandBridgeService {
         const maximumFireAt = now + 60 * 24 * 60 * 60 * 1000;
         const unique = new Map<string, TishOSNativeNotificationItem>();
         const exactCandidates = new Set<string>();
-        const orderedValues = [...values].sort((left, right) => {
-            const leftFireAt = Number.isSafeInteger(left.fireAt) ? left.fireAt : Number.MAX_SAFE_INTEGER;
-            const rightFireAt = Number.isSafeInteger(right.fireAt) ? right.fireAt : Number.MAX_SAFE_INTEGER;
-            if (leftFireAt !== rightFireAt) return leftFireAt - rightFireAt;
-            return compareUTF8(
-                this.nativeNotificationCandidateKey(left),
-                this.nativeNotificationCandidateKey(right),
-            );
-        });
-        const uniqueValues = orderedValues.filter((value) => {
-            const candidateKey = this.nativeNotificationCandidateKey(value);
-            if (exactCandidates.has(candidateKey)) return false;
-            exactCandidates.add(candidateKey);
+        const orderedValues = values.map(value => ({ value, key: this.nativeNotificationCandidateKey(value) }))
+            .sort((left, right) => {
+                const leftFireAt = Number.isSafeInteger(left.value.fireAt) ? left.value.fireAt : Number.MAX_SAFE_INTEGER;
+                const rightFireAt = Number.isSafeInteger(right.value.fireAt) ? right.value.fireAt : Number.MAX_SAFE_INTEGER;
+                if (leftFireAt !== rightFireAt) return leftFireAt - rightFireAt;
+                return compareUTF8(left.key, right.key);
+            });
+        const uniqueValues = orderedValues.filter(({ key }) => {
+            if (exactCandidates.has(key)) return false;
+            exactCandidates.add(key);
             return true;
-        });
+        }).map(({ value }) => value);
         const seriesValues = new Map<string, NativeNotificationProjectionValue[]>();
         const liveSeriesKeys = new Set<string>();
         for (const value of uniqueValues) {
@@ -962,7 +959,7 @@ export class TishOSCommandBridgeService {
         }
         const liveSeries = [...seriesValues].filter(([key]) => liveSeriesKeys.has(key));
         const prioritizedValues: NativeNotificationProjectionValue[] = [];
-        const prioritizedKeys = new Set<string>();
+        const prioritizedValuesSeen = new Set<NativeNotificationProjectionValue>();
         let round = 0;
         while (true) {
             let appended = false;
@@ -970,15 +967,14 @@ export class TishOSCommandBridgeService {
                 const value = valuesForSeries[round];
                 if (!value) continue;
                 prioritizedValues.push(value);
-                prioritizedKeys.add(this.nativeNotificationCandidateKey(value));
+                prioritizedValuesSeen.add(value);
                 appended = true;
             }
             if (!appended) break;
             round += 1;
         }
         for (const value of uniqueValues) {
-            const candidateKey = this.nativeNotificationCandidateKey(value);
-            if (prioritizedKeys.has(candidateKey)) continue;
+            if (prioritizedValuesSeen.has(value)) continue;
             prioritizedValues.push(value);
         }
         for (const value of prioritizedValues) {
@@ -1001,15 +997,23 @@ export class TishOSCommandBridgeService {
     ): Promise<TishOSNativeNotificationSeriesAuditItem[]> {
         const selectedSeries = new Set(items.map((item) => item.seriesID));
         const valuesBySeries = new Map<string, NativeNotificationProjectionValue[]>();
+        // Group before hashing: repeats share a series identity. Keep every
+        // occurrence for the existing consistency checks, including ones that
+        // did not fit in the published schedule.
+        const candidatesBySeries = new Map<string, NativeNotificationProjectionValue[]>();
         for (const value of values) {
-            const seriesID = await sha256Base64URL(canonicalNotificationSeries(
-                value.sourceKey,
-                value.reminderId,
-            ));
+            const key = JSON.stringify([value.sourceKey, value.reminderId]);
+            const group = candidatesBySeries.get(key);
+            if (group) group.push(value);
+            else candidatesBySeries.set(key, [value]);
+        }
+        for (const group of candidatesBySeries.values()) {
+            const value = group[0];
+            const seriesID = await sha256Base64URL(canonicalNotificationSeries(value.sourceKey, value.reminderId));
             if (!selectedSeries.has(seriesID)) continue;
-            const group = valuesBySeries.get(seriesID) ?? [];
-            group.push(value);
-            valuesBySeries.set(seriesID, group);
+            const existing = valuesBySeries.get(seriesID);
+            if (existing) existing.push(...group);
+            else valuesBySeries.set(seriesID, group);
         }
         const bySeries = new Map<string, TishOSNativeNotificationSeriesAuditItem>();
         for (const [seriesID, group] of valuesBySeries) {

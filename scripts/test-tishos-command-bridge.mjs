@@ -2312,3 +2312,33 @@ test("source wiring keeps discovery, execution, and mobile-safe confirmation beh
   assert.match(bridgeService, /this\.modalEl\.addClass\("tps-keyboard-aware-modal"\)/);
   assert.match(packageJson, /test-tishos-command-bridge\.mjs/);
 });
+
+test('large repeated schedules retain the previous exact output and inspect unselected repeats', async (t) => {
+  const { createHash } = await import('node:crypto');
+  const harness = createHarness();
+  t.after(() => harness.service.stop());
+  const now = 1790448000000;
+  harness.service.now = () => now;
+  const values = Array.from({ length: 168 }, (_, s) => Array.from({ length: 128 }, (_, i) => ({
+    sourceKey: `synthetic-${s}`, reminderId: 'benchmark', title: 'Synthetic reminder', body: 'Synthetic body',
+    sourcePath: 'Inbox/Synthetic.md', fireAt: now + 60000 + s * 86400000 + i * 300000,
+    dueAt: now + 60000 + s * 86400000, repeatEverySeconds: 300,
+  }))).flat();
+  let candidateKeys = 0;
+  const key = harness.service.nativeNotificationCandidateKey;
+  harness.service.nativeNotificationCandidateKey = function (value) { candidateKeys++; return key.call(this, value); };
+  const items = await harness.service.buildNativeNotificationItems(values);
+  const audit = await harness.service.buildNativeNotificationSeriesAuditItems(values, items);
+  assert.equal(candidateKeys, values.length);
+  assert.equal(items.length, 128);
+  assert.equal(audit.length, 1);
+  // Captured from the installed 2.6.1 artifact using this exact synthetic input.
+  assert.equal(createHash('sha256').update(JSON.stringify({ items, audit })).digest('hex'),
+    'c1d710195939789322ad5c5ca725b37220f5eb9f2f1ec286776647d2c910cce2');
+  const extra = { ...values[0], fireAt: now + 86400000 * 59, dueAt: values[0].dueAt + 1000 };
+  await assert.rejects(harness.service.buildNativeNotificationSeriesAuditItems([...values, extra], items), /due time is inconsistent/);
+  extra.dueAt = values[0].dueAt;
+  extra.repeatEverySeconds = 600;
+  await assert.rejects(harness.service.buildNativeNotificationSeriesAuditItems([...values, extra], items), /cadence is inconsistent/);
+  assert.deepEqual(await harness.service.buildNativeNotificationItems([...values, { ...values[0] }]), items);
+});
