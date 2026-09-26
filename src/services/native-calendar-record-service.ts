@@ -1032,7 +1032,7 @@ export class NativeCalendarRecordService {
         const protectedKeys = [settings.eventIdKey, settings.uidKey, settings.titleKey,
             settings.startProperty, settings.endProperty,
             gcm?.nativeRecordIdentityPropertyKey, gcm?.nativeRecordSchemaPropertyKey,
-            gcm?.nativeRecordKindPropertyKey, ...Object.values(gcm?.nativeRecordKindPropertyKeys || {}),
+            gcm?.nativeRecordKindPropertyKey, ...Object.values(gcm?.nativeRecordKindPropertyKeys || {}).map((value: any) => typeof value === "string" ? value : value?.key),
             gcm?.nativeRecordTitlePropertyKey, gcm?.nativeRecordCreatedPropertyKey, gcm?.nativeRecordModifiedPropertyKey,
             ...aliases.flatMap((profile: any) => [profile.identityPropertyKey, profile.schemaPropertyKey]),
         ].filter((key): key is string => typeof key === 'string' && !!key);
@@ -1122,8 +1122,8 @@ export class NativeCalendarRecordService {
                     projected.properties.status = cancellationStatus;
                     const pendingState: NativeCalendarCancellationState = {
                         appliedStatus: cancellationStatus,
-                        previousStatusPresent: existing ? statusPresent : true,
-                        previousStatus: existing || statusPresent ? statusValue : "scheduled",
+                        previousStatusPresent: statusPresent,
+                        previousStatus: statusPresent ? statusValue : null,
                         canRestore: true,
                         pendingApplication: true,
                     };
@@ -1153,7 +1153,7 @@ export class NativeCalendarRecordService {
             return projected;
         }
 
-        if (!existing) projected.properties.status = statusPresent ? statusValue : "scheduled";
+        if (!existing && statusPresent) projected.properties.status = statusValue;
         if (cancellationState) {
             if (cancellationState.canRestore
                 && statusPresent

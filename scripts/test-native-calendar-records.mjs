@@ -764,7 +764,7 @@ test('canonical IDs are deterministic, privacy-safe, URL-independent, and contai
   assert.equal(Object.hasOwn(original, 'attendees'), false);
   assert.equal(Object.hasOwn(original, 'url'), false);
   assert.equal(Object.hasOwn(original, 'tags'), false);
-  assert.deepEqual(Object.keys(original).sort(), ['end', 'scheduled', 'status', 'title', 'tpsId']);
+  assert.deepEqual(Object.keys(original).sort(), ['end', 'scheduled', 'title', 'tpsId']);
   const projected = await h.api.resolve(original.tpsId);
   assert.equal(projected.frontmatter.tpsSchemaVersion, 1);
   assert.equal(projected.frontmatter.createdDate, '2023-11-14T22:13:20.000Z');
@@ -1006,7 +1006,7 @@ test('cancellation intent save failure aborts before frontmatter mutation and ro
   h.setEvents([event({ isCancelled: true })]);
   h.setFailSettingsSave(true);
   await assert.rejects(h.service.sync([calendar], '', true, false), /settings-save-failed/u);
-  assert.equal(h.frontmatters.get(path).status, 'scheduled');
+  assert.equal(Object.hasOwn(h.frontmatters.get(path), 'status'), false);
   assert.deepEqual(h.settings.nativeCalendarCancellationState, {});
   assert.equal(h.mutationLog.length, mutationCount);
 });
@@ -2575,4 +2575,13 @@ test('an already archived missing event does not rewrite its archive timestamp o
  const before=structuredClone([...h.frontmatters]);
  h.api.applyIdentityChanges=async()=>{throw Error('Already archived missing event must not enter a write batch')};
  await h.service.sync([calendar],'',true,false);assert.deepEqual([...h.frontmatters],before);
+});
+
+test('new events omit status and cancellation restoration returns to an absent status', async()=>{
+ const h=harness([event()]);await h.service.sync([calendar],'',true,false);
+ const [path]=h.files.keys();assert.equal(Object.hasOwn(h.frontmatters.get(path),'status'),false);
+ h.setEvents([event({isCancelled:true})]);await h.service.sync([calendar],'',true,false);
+ assert.equal(h.frontmatters.get(path).status,'cancelled');
+ h.setEvents([event()]);await h.service.sync([calendar],'',true,false);
+ assert.equal(Object.hasOwn(h.frontmatters.get(path),'status'),false);
 });
