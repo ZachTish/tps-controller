@@ -1,5 +1,34 @@
 # TPS Controller
 
+## 2.6.3 — Respect notes-only reminder scope before reading bodies
+
+Reminder discovery now uses the same inline-task scope as target construction.
+When inline reminders are disabled, including **Follow GCM** with Atomic note
+mode or an unavailable GCM, notes without a configured reminder frontmatter key
+are rejected without reading their bodies. Previously discovery read those
+bodies and found task candidates that the configured target builder could never
+emit. Actual frontmatter candidates still read current content to preserve prose
+tags and existing reminder behavior. Enabled inline modes and missing-mode legacy
+behavior keep the source parser, including when task metadata is missing or stale.
+
+This uses the existing runtime policy; it adds no cache, observer, timer, setting
+or metadata-freshness assumption. The regression fixture contains 1,000 unrelated
+notes, an inline task and a frontmatter reminder. Each notes-only discovery now
+makes zero body reads instead of 1,001; three repeated runs stay at zero. Enabled
+inline modes still read and discover the task. Versioned full validation passes
+602 checks with three existing optional historical-comparison skips; TypeScript
+and the separate final build pass. The stable build deployed to the isolated test
+vault. A targeted disable/load-manifest/enable reload verified version 2.6.3,
+which passed the same discovery comparison using its compiled implementation with a synthetic app facade: 2.6.2 read 1,001 bodies
+in each mode; 2.6.3 reads zero in notes-only and Follow GCM/Atomic note modes,
+while scheduled inline mode still reads 1,001 and retains the task. Frontmatter
+candidates remain present in every mode. This check does not measure complete
+reminder delivery latency or change real settings, notes or provider state.
+This is a backward-compatible performance patch; minimum Obsidian stays 1.12.3.
+Versioned tests, build, installed QA and release details are tracked in
+[2.6.3 release notes](release-notes/2.6.3.md). The public release is the BRAT
+handoff; no production speed or installation claim is made.
+
 ## 2.6.0 — Connections in one place
 
 Open **Connections** for **Banks & Wallet**, **AI**, **TishOS devices**, or **Food databases**. Apple Wallet setup, bank connect/sync/reconnect/disconnect, pending sign-ins and import history are together. **Bank setup · This device** holds hosting/pairing, automatic refresh, request-folder controls and Plaid credentials. It starts expanded on an unconfigured device. Paired clients do not need the host's Plaid secrets. Changing pairing or credentials refreshes the affected controls immediately. Apple permission and initial Wallet import still happen in the native TishOS app; new Wallet connections write on the iPhone and do not require bank pairing.
@@ -310,7 +339,7 @@ release; minimum Obsidian stays 1.12.3. Production installation is the BRAT hand
 
 Device roles, calendar synchronization, reminders, encrypted attachment sync, and shared Plaid transport.
 
-Current release: [2.4.1](https://github.com/ZachTish/tps-controller/releases/tag/2.4.1) · Obsidian 1.12.3+ · Desktop and mobile.
+Current release: [2.6.3](https://github.com/ZachTish/tps-controller/releases/tag/2.6.3) · Obsidian 1.12.3+ · Desktop and mobile.
 
 ## Install with BRAT
 

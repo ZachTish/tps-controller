@@ -1,4 +1,16 @@
 import type { NotificationDeliveryProvider } from "./notification-delivery-provider";
+import type { TPSControllerSettings } from "../types";
+
+/** Keep candidate discovery and target construction on the same configured scope. */
+export function resolveInlineTaskReminderMode(
+    app: unknown,
+    settings: Pick<TPSControllerSettings, "inlineTaskReminders">,
+): TPSControllerSettings["inlineTaskReminders"] {
+    if (settings.inlineTaskReminders !== "gcm") return settings.inlineTaskReminders;
+    const gcm = (app as any)?.plugins?.getPlugin?.("tps-global-context-menu")
+        || (app as any)?.plugins?.plugins?.["tps-global-context-menu"];
+    return gcm?.settings?.dataArchitectureMode === "legacy" ? "scheduled" : "none";
+}
 
 export type ReminderDeliveryMode = "local-obsidian" | "ntfy";
 

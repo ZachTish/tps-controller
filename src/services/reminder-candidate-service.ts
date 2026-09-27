@@ -1,5 +1,6 @@
 import { App, TFile } from "obsidian";
 import type { TPSControllerSettings } from "../types";
+import { resolveInlineTaskReminderMode } from "./reminder-runtime-policy";
 
 const TASK_LINE_PATTERN = /^\s*(?:[-*+]|\d+[.)])\s+\[[^\]]?]\s+/;
 const INLINE_PROPERTY_PATTERN = /\[([^\[\]:]+)::\s*([^\]]+)\]/g;
@@ -44,13 +45,14 @@ async function hasReminderInlineTaskProperty(file: TFile, app: App, reminderProp
 
 export async function getReminderCandidateFiles(
     app: App,
-    _settings: TPSControllerSettings,
+    settings: TPSControllerSettings,
     reminderProperties: string[],
 ): Promise<{ files: TFile[] }> {
     const properties = reminderProperties.map((property) => String(property || "").trim()).filter(Boolean);
     if (!properties.length) return { files: [] };
 
     const propertySet = new Set(properties.map((property) => property.toLowerCase()));
+    const includeInlineTasks = resolveInlineTaskReminderMode(app, settings) !== "none";
     const files: TFile[] = [];
     const markdownFiles = app.vault
         .getMarkdownFiles()
@@ -61,7 +63,7 @@ export async function getReminderCandidateFiles(
             files.push(file);
             continue;
         }
-        if (await hasReminderInlineTaskProperty(file, app, propertySet)) {
+        if (includeInlineTasks && await hasReminderInlineTaskProperty(file, app, propertySet)) {
             files.push(file);
         }
     }

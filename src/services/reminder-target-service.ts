@@ -1,6 +1,7 @@
 import { TFile } from "obsidian";
 import type { ExternalCalendarEvent, TPSControllerSettings } from "../types";
 import { buildCalendarExternalId, getDailyNoteTaskSchedulePolicyViaGcm } from "../tps-gcm-api";
+import { resolveInlineTaskReminderMode } from "./reminder-runtime-policy";
 
 export type ReminderTargetType = "file" | "external-event";
 
@@ -38,11 +39,7 @@ export async function buildReminderTargetsForFile(
     frontmatter: Record<string, unknown>,
     settings: TPSControllerSettings,
 ): Promise<ReminderEvaluationTarget[]> {
-    const gcm = (app as any)?.plugins?.getPlugin?.('tps-global-context-menu')
-        || (app as any)?.plugins?.plugins?.['tps-global-context-menu'];
-    const inlineMode = settings.inlineTaskReminders === "gcm"
-        ? (gcm?.settings?.dataArchitectureMode === "legacy" ? "scheduled" : "none")
-        : settings.inlineTaskReminders;
+    const inlineMode = resolveInlineTaskReminderMode(app, settings);
     const noteTitle = buildNoteDisplayName(file, frontmatter);
     const noteTarget: ReminderEvaluationTarget = {
         sourceKey: file.path,

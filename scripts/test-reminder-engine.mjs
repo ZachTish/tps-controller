@@ -51,6 +51,7 @@ function loadReminderTargetModule(taskSchedulePolicy = { available: false, isDai
       };
     }
     if (id === 'obsidian') return {};
+    if (id === './reminder-runtime-policy') return loadReminderRuntimePolicyModule();
     throw new Error(`Unexpected require: ${id}`);
   };
   const load = new Function('module', 'exports', 'require', compiled.outputText);
@@ -90,6 +91,7 @@ function loadReminderCandidateModule() {
   });
   const module = { exports: {} };
   const requireStub = (id) => {
+    if (id === './reminder-runtime-policy') return loadReminderRuntimePolicyModule();
     throw new Error(`Unexpected require: ${id}`);
   };
   const load = new Function('module', 'exports', 'require', compiled.outputText);
@@ -1931,6 +1933,60 @@ test('reminder candidate discovery normalizes own frontmatter keys without a per
 
   assert.deepEqual(result.files.map(({ path }) => path), ['Alpha.md', 'Inline.md', 'Zeta.md']);
   assert.deepEqual(cachedReads, ['Inherited.md', 'Inline.md', 'None.md']);
+});
+
+for (const scenario of [
+  { name: 'explicit none', mode: 'none', reads: 0 },
+  { name: 'GCM native records', mode: 'gcm', architecture: 'native-records', reads: 0 },
+  { name: 'GCM unavailable', mode: 'gcm', reads: 0 },
+  { name: 'GCM map fallback', mode: 'gcm', architecture: 'native-records', mapFallback: true, reads: 0 },
+  { name: 'GCM legacy', mode: 'gcm', architecture: 'legacy', reads: 1001 },
+  { name: 'explicit scheduled', mode: 'scheduled', reads: 1001 },
+  { name: 'explicit all', mode: 'all', reads: 1001 },
+  { name: 'missing mode preserves legacy behavior', reads: 1001 },
+]) {
+  test(`reminder discovery avoids impossible inline work: ${scenario.name}`, async () => {
+    const { getReminderCandidateFiles } = loadReminderCandidateModule();
+    const files = Array.from({ length: 1000 }, (_, index) => ({ path: `Ordinary/${index}.md` }));
+    const task = { path: 'Task.md' };
+    const note = { path: 'Scheduled.md' };
+    files.push(task, note);
+    let reads = 0;
+    const gcm = scenario.architecture ? { settings: { dataArchitectureMode: scenario.architecture } } : undefined;
+    const app = {
+      plugins: scenario.mapFallback
+        ? { plugins: { 'tps-global-context-menu': gcm } }
+        : { getPlugin: () => gcm },
+      metadataCache: { getFileCache: (file) => ({
+        frontmatter: file === note ? { SCHEDULED: '2026-09-27', tags: ['note-tag'] } : {},
+        // Deliberately stale/empty task metadata must not hide an enabled task.
+        listItems: [],
+      }) },
+      vault: {
+        getMarkdownFiles: () => files.slice(),
+        cachedRead: async (file) => { reads++; return file === task ? '- [ ] New task [scheduled:: 2026-09-27]' : 'Plain body'; },
+      },
+    };
+    const settings = scenario.mode === undefined ? {} : { inlineTaskReminders: scenario.mode };
+    for (let repeat = 0; repeat < 3; repeat++) {
+      const result = await getReminderCandidateFiles(app, settings, ['scheduled']);
+      assert.equal(reads, scenario.reads * (repeat + 1));
+      assert.deepEqual(result.files.map(file => file.path), scenario.reads === 0 ? ['Scheduled.md'] : ['Scheduled.md', 'Task.md']);
+    }
+  });
+}
+
+test('notes-only reminder targets retain current body tags and frontmatter without emitting tasks', async () => {
+  const { buildReminderTargetsForFile } = loadReminderTargetModule();
+  let reads = 0;
+  const app = { vault: { cachedRead: async () => { reads++; return 'Body #current-tag\n- [ ] Task [scheduled:: 2026-09-27] #task-tag'; } } };
+  const file = { path: 'Scheduled.md', basename: 'Scheduled', extension: 'md' };
+  const frontmatter = { scheduled: '2026-09-27', tags: ['note-tag'] };
+  const result = await buildReminderTargetsForFile(app, file, frontmatter, { inlineTaskReminders: 'none' });
+  assert.equal(reads, 1, 'real frontmatter candidates must still inspect current prose tags');
+  assert.deepEqual(result.map(target => target.targetKind), ['note']);
+  assert.deepEqual(result[0].reminderTags, ['#note-tag', '#current-tag']);
+  assert.deepEqual(frontmatter, { scheduled: '2026-09-27', tags: ['note-tag'] });
 });
 
 test('reminder task parsing ignores task examples inside fenced code blocks', () => {
