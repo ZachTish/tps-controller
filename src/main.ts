@@ -1340,7 +1340,8 @@ export default class TPSControllerPlugin extends Plugin {
     }
 
     private deferCalendarSyncSettlementForFile(file: unknown, reason: string): void {
-        if (file instanceof TFile && !shouldDeferCalendarSyncSettlementForPath(file.path)) return;
+        const path = (file as { path?: unknown } | null)?.path;
+        if (typeof path === "string" && !shouldDeferCalendarSyncSettlementForPath(path, reason, file instanceof TFile)) return;
         this.deferCalendarSyncSettlement(reason);
     }
 

@@ -43,3 +43,25 @@ test('calendar sync settlement still defers for real vault content', () => {
     assert.equal(shouldDeferCalendarSyncSettlementForPath(path), true, path);
   }
 });
+
+test('unrelated folder and asset modifies cannot push manual calendar readiness back', () => {
+  let readyAt = 1000;
+  let deferred = 0;
+  const onModify = (path, isFile) => {
+    if (!shouldDeferCalendarSyncSettlementForPath(path, 'file modify', isFile)) return;
+    readyAt = 5000;
+    deferred += 1;
+  };
+  onModify('_assets', false);
+  onModify('_assets/queued-image.png', false);
+  onModify('_assets/queue.json', false);
+  onModify('_assets/queued-image.png', true);
+  onModify('_assets/queue.json', true);
+  assert.equal(readyAt, 1000);
+  assert.equal(deferred, 0);
+  assert.equal(readyAt < 2000, true, 'a manual sync remains ready after unrelated asset activity');
+
+  onModify('Calendar/Meeting.md', true);
+  assert.equal(readyAt, 5000);
+  assert.equal(deferred, 1, 'a candidate calendar note still extends settlement');
+});

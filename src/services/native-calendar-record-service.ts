@@ -1,5 +1,6 @@
 import { calendarRescheduleUpdates, cloneCalendarRescheduleActions } from './calendar-reschedule-actions';
 import { CALENDAR_SYNC_PROPERTY, calendarScheduleSignature, readCalendarSyncStamp } from './calendar-reschedule';
+import type { CalendarSyncStamp } from './calendar-reschedule';
 import { App, TFile } from "obsidian";
 import type {
     ExternalCalendarConfig,
@@ -227,7 +228,15 @@ export class NativeCalendarRecordService {
         // A live settings edit must not introduce archive writes that were not
         // included in the token-bound property/identity preflight.
         const settings = this.getSettings();
-        const missingEventPolicy = settings.syncOnEventDelete;
+        // No-Loss applies to native records too: a successful but incomplete
+        // feed is not evidence that an absent occurrence was deleted. Explicit
+        // cancelled VEVENTs still follow the cancellation/status path below.
+        const missingEventPolicy = settings.noLossSyncMode !== false
+            ? "nothing"
+            : settings.syncOnEventDelete;
+        const missingEventStatus = typeof settings.missingEventStatusValue === "string"
+            ? settings.missingEventStatusValue.trim()
+            : "";
         const cancellationStatus = normalizeCancellationStatus(settings.canceledStatusValue);
         const cancellationStateSnapshot = cloneCancellationState(settings.nativeCalendarCancellationState);
         const plannedAtIso = new Date().toISOString();
@@ -262,7 +271,7 @@ export class NativeCalendarRecordService {
         const authoritativeSnapshot = await this.calendarSnapshot(api);
         this.rebuildFromHandles(authoritativeSnapshot.records);
         const migrationPlan = await this.prepareLegacyMigration(contexts, authoritativeSnapshot.records);
-        await this.prepareRescheduledOccurrences(prepared, authoritativeSnapshot.records, migrationPlan);
+        await this.prepareRescheduledOccurrences(prepared, authoritativeSnapshot.records, migrationPlan, filterTerms.length > 0);
         await this.prepareCreationTemplates(prepared, migrationPlan);
         const mutationPlan = await this.preflightIdentityPlan(
             api,
@@ -271,6 +280,7 @@ export class NativeCalendarRecordService {
             rangeStart,
             rangeEnd,
             missingEventPolicy,
+            missingEventStatus,
             plannedAtIso,
             authoritativeSnapshot,
             cancellationStatus,
@@ -490,6 +500,7 @@ export class NativeCalendarRecordService {
         prepared: PreparedCalendarSync,
         snapshot: GcmNativeRecordHandle[],
         migrations: PlannedLegacyMigration[],
+        hasTitleFilter: boolean,
     ): Promise<void> {
         // History stays in the vault with its original identity and path. It is
         // excluded from future sync, deletion and legacy migration, while a new
@@ -520,6 +531,9 @@ export class NativeCalendarRecordService {
             // must not be treated as missing simply because it has a newer ID.
             if (prepared.seenIds.has(key)) prepared.seenIds.add(identityKey(record.id));
         }
+        const shiftedMasters = hasTitleFilter
+            ? new Map<string, IndexedCalendarRecord>()
+            : await this.findShiftedMasterOwners(prepared, activeByOccurrence, migratedById, migrations);
         for (const occurrence of prepared.occurrences) {
             const sourceId = occurrence.id;
             occurrence.sourceOccurrenceId = sourceId;
@@ -527,7 +541,8 @@ export class NativeCalendarRecordService {
             const migrated = migratedById.get(identityKey(sourceId));
             if (migrated && !active.some(record => record.file.path === migrated.file.path)) active.push(migrated);
             if (active.length > 1) throw new Error('More than one active note claims this calendar occurrence; no records were changed.');
-            const existing = active[0];
+            const shiftedMaster = shiftedMasters.get(identityKey(sourceId));
+            const existing = active[0] || shiftedMaster;
             const previous = existing ? readCalendarSyncStamp(existing.frontmatter) : null;
             const revision = occurrence.event.sourceRevision;
             if (previous?.revision && revision && previous.revisionOrigin === occurrence.event.sourceRevisionOrigin) {
@@ -539,9 +554,9 @@ export class NativeCalendarRecordService {
                     continue;
                 }
             }
-            const rescheduled = !!(!occurrence.event.isCancelled && previous && parseCalendarRecordId(existing.id)
+            const rescheduled = !!shiftedMaster || !!(!occurrence.event.isCancelled && previous && parseCalendarRecordId(existing.id)
                 && previous.schedule !== calendarScheduleSignature(occurrence.event));
-            const recovering = !existing && relatedIds.has(identityKey(sourceId));
+            const recovering = !active.length && relatedIds.has(identityKey(sourceId));
             occurrence.externallyRescheduled = rescheduled || (recovering && !occurrence.event.isCancelled);
             const preserve = rescheduled && occurrence.context.calendar.preserveNotesOnExternalReschedule === true;
             if (preserve) {
@@ -549,15 +564,94 @@ export class NativeCalendarRecordService {
                 prepared.seenIds.add(identityKey(existing.id));
             }
             if (preserve || recovering) {
-                // The same lineage and feed schedule produce the same next ID, even
-                // after retirement was written but creation was interrupted.
-                const lineage = [...(relatedIds.get(identityKey(sourceId)) || [])].sort();
-                occurrence.id = await deriveCalendarRecordId(occurrence.context.configId,
-                    JSON.stringify([calendarEventOccurrenceIdentity(occurrence.event), 'generation', lineage, calendarScheduleSignature(occurrence.event)]));
-            } else if (existing && !migrated) occurrence.id = existing.id;
+                if (!shiftedMaster || recovering) {
+                    // The same lineage and feed schedule produce the same next ID,
+                    // even after retirement was written but creation interrupted.
+                    const lineage = [...(relatedIds.get(identityKey(sourceId)) || [])].sort();
+                    occurrence.id = await deriveCalendarRecordId(occurrence.context.configId,
+                        JSON.stringify([calendarEventOccurrenceIdentity(occurrence.event), 'generation', lineage, calendarScheduleSignature(occurrence.event)]));
+                }
+            } else if (existing && !migrated && !shiftedMaster) occurrence.id = existing.id;
+            if (shiftedMaster && !preserve) {
+                if (migrations.some(migration => migration.record.file.path === shiftedMaster.file.path)) {
+                    throw new Error('A recurring master reschedule overlaps calendar identity migration; no records were changed.');
+                }
+                migrations.push({ record: shiftedMaster, targetId: occurrence.id, updates: {} });
+                prepared.seenIds.add(identityKey(shiftedMaster.id));
+            }
             prepared.seenIds.add(identityKey(occurrence.id));
         }
         prepared.occurrences = prepared.occurrences.filter(occurrence => !occurrence.staleRevision);
+    }
+
+    private async findShiftedMasterOwners(
+        prepared: PreparedCalendarSync,
+        activeByOccurrence: Map<string, IndexedCalendarRecord[]>,
+        migratedById: Map<string, IndexedCalendarRecord>,
+        migrations: PlannedLegacyMigration[],
+    ): Promise<Map<string, IndexedCalendarRecord>> {
+        const matches = new Map<string, IndexedCalendarRecord>();
+        const claimedPaths = new Set<string>();
+        const clocks = prepared.occurrences.map(occurrence => masterOccurrenceClock(occurrence.event));
+        const recordsByOffsetAndDay = new Map<number, Map<string, Array<{ record: IndexedCalendarRecord; stamp: CalendarSyncStamp; priorKey: string }>>>();
+        const recordsForOffset = (utcOffsetMs: number) => {
+            let byDay = recordsByOffsetAndDay.get(utcOffsetMs);
+            if (byDay) return byDay;
+            byDay = new Map();
+            for (const record of this.recordsByPath.values()) {
+                const sourceScope = calendarRecordSourceScope(record.id);
+                if (!sourceScope || readPropertyCaseInsensitive(record.frontmatter, 'archived') === true) continue;
+                const stamp = sourceScheduleStamp(record);
+                // A detached exception can share the series UID and calendar day,
+                // but it is not the old master occurrence being shifted.
+                if (!stamp?.schedule.startsWith('time|')
+                    || (stamp.revisionOrigin && stamp.revisionOrigin !== 'master')) continue;
+                const start = Date.parse(stamp.schedule.split('|')[1]);
+                if (!Number.isFinite(start)) continue;
+                const priorKey = compactUtcClock(new Date(start - utcOffsetMs));
+                const key = `${sourceScope}\u0000${priorKey.slice(0, 8)}`;
+                const sameDay = byDay.get(key) || [];
+                sameDay.push({ record, stamp, priorKey });
+                byDay.set(key, sameDay);
+            }
+            recordsByOffsetAndDay.set(utcOffsetMs, byDay);
+            return byDay;
+        };
+        const dayCounts = new Map<string, number>();
+        for (let index = 0; index < prepared.occurrences.length; index += 1) {
+            const clock = clocks[index];
+            if (!clock) continue;
+            const occurrence = prepared.occurrences[index];
+            const key = `${occurrence.context.configId}\u0000${occurrence.event.uid}\u0000${clock.day}`;
+            dayCounts.set(key, (dayCounts.get(key) || 0) + 1);
+        }
+        for (let index = 0; index < prepared.occurrences.length; index += 1) {
+            const occurrence = prepared.occurrences[index];
+            const clock = clocks[index];
+            if (!clock || activeByOccurrence.has(identityKey(occurrence.id))
+                || migratedById.has(identityKey(occurrence.id))) continue;
+            const candidates: IndexedCalendarRecord[] = [];
+            const sameDay = recordsForOffset(clock.utcOffsetMs)
+                .get(`${occurrence.context.sourceScope}\u0000${clock.day}`) || [];
+            for (const { record, stamp, priorKey } of sameDay) {
+                if (prepared.seenIds.has(identityKey(record.id))) continue;
+                const priorId = await deriveCalendarRecordId(occurrence.context.configId, `${occurrence.event.uid}-${priorKey}`);
+                if (identityKey(priorId) === identityKey(stamp.occurrenceId)) candidates.push(record);
+            }
+            if (!candidates.length) continue;
+            const dayKey = `${occurrence.context.configId}\u0000${occurrence.event.uid}\u0000${clock.day}`;
+            if (candidates.length !== 1 || (dayCounts.get(dayKey) || 0) !== 1
+                || claimedPaths.has(candidates[0].file.path)) {
+                throw new Error('Ambiguous recurring master reschedule; no records were changed.');
+            }
+            const record = candidates[0];
+            if (migrations.some(migration => migration.record.file.path === record.file.path)) {
+                throw new Error('A recurring master reschedule overlaps calendar identity migration; no records were changed.');
+            }
+            claimedPaths.add(record.file.path);
+            matches.set(identityKey(occurrence.id), record);
+        }
+        return matches;
     }
 
     private async prepareCreationTemplates(
@@ -650,6 +744,7 @@ export class NativeCalendarRecordService {
         rangeStart: Date,
         rangeEnd: Date,
         missingPolicy: TPSControllerSettings["syncOnEventDelete"],
+        missingStatus: string,
         plannedAtIso: string,
         snapshot: Pick<GcmNativeRecordSnapshot, "token" | "revision">,
         cancellationStatus: string,
@@ -743,7 +838,8 @@ export class NativeCalendarRecordService {
             // the event payload after authoritative path preview.
             for (const record of records) {
                 if (retainedByPath.has(record.file.path)) {
-                    const stamp = readCalendarSyncStamp(record.frontmatter)!;
+                    const stamp = sourceScheduleStamp(record);
+                    if (!stamp) throw new Error('Retained calendar history has no valid prior schedule; no records were changed.');
                     addEntry({ operation: "reidentify", reference: record.id, nextId: record.id,
                         updates: [{ ...retainedByPath.get(record.file.path)!.context.previousRescheduleUpdates, [CALENDAR_SYNC_PROPERTY]: { ...stamp, retired: true } }] });
                     postApplyCancellationStateUpdatesById.set(record.id, null);
@@ -858,7 +954,11 @@ export class NativeCalendarRecordService {
                     const start = Date.parse(String(record.frontmatter.scheduled || ""));
                     if (!Number.isFinite(start) || start < rangeStart.getTime() || start > rangeEnd.getTime()) continue;
                     const updates: Record<string, unknown> = readPropertyCaseInsensitive(record.frontmatter, "archived") === true
-                        ? {} : { archived: true, archivedDate: plannedAtIso };
+                        ? {} : {
+                            archived: true,
+                            archivedDate: plannedAtIso,
+                            ...(missingStatus ? { status: missingStatus } : {}),
+                        };
                     addEntry({
                         operation: "reidentify",
                         reference: record.id,
@@ -906,24 +1006,28 @@ export class NativeCalendarRecordService {
         // Unchanged owners participated in global identity/path validation but
         // need no write reservation. Replaying them can keep a long batch open
         // until an unrelated heartbeat or filename rule invalidates its token.
-        const entries = exact.entries.filter(entry => {
-            if (entry.operation !== "reidentify" || typeof entry.reference !== "string") return true;
-            const source = this.findUniqueById(entry.reference);
-            return !source || entry.nextId !== source.id
-                || entry.updates.some(update => Object.keys(update).length > 0)
-                || normalizePathForComparison(expectedPathsById.get(identityKey(entry.nextId)))
-                    !== normalizePathForComparison(source.file.path);
-        });
-        const writeBatch = entries.length && entries.length !== exact.entries.length
-            ? await api.planIdentityChanges!(entries, snapshot)
-            : plannedBatch;
-        if (!writeBatch || (entries.length && (writeBatch.entries.length !== entries.length
-            || writeBatch.entries.some((planned, index) => planned.operation !== entries[index].operation
-                || identityKey(planned.nextId) !== identityKey(entries[index].nextId)
-                || normalizePathForComparison(planned.expectedPath)
-                    !== normalizePathForComparison(expectedPathsById.get(identityKey(planned.nextId))))))) {
-            throw new Error("TPS GCM could not preserve the validated calendar paths when excluding unchanged records; no records were changed.");
+        const changedIndices: number[] = [];
+        for (let index = 0; index < exact.entries.length; index += 1) {
+            const entry = exact.entries[index];
+            let changed = entry.operation !== "reidentify" || typeof entry.reference !== "string";
+            if (!changed && entry.operation === "reidentify") {
+                const source = this.findUniqueById(entry.reference);
+                changed = !source || entry.nextId !== source.id
+                    || entry.updates.some(update => Object.keys(update).length > 0)
+                    || normalizePathForComparison(expectedPathsById.get(identityKey(entry.nextId)))
+                        !== normalizePathForComparison(source.file.path);
+            }
+            if (changed) changedIndices.push(index);
         }
+        const entries = changedIndices.map(index => exact.entries[index]);
+        // A removed no-op reidentify starts and ends at its existing path, so
+        // GCM's occupied-path set is identical for every following entry.
+        // Subset the first validated plan at matching indices instead of making
+        // a second asynchronous plan whose generation can drift before apply.
+        // GCM replans and verifies this exact subset at its mutation boundary.
+        const writeBatch = changedIndices.length === exact.entries.length
+            ? plannedBatch
+            : { ...plannedBatch, entries: changedIndices.map(index => plannedBatch.entries[index]) };
         return {
             entries,
             expectedPathsById,
@@ -1134,9 +1238,10 @@ export class NativeCalendarRecordService {
                     };
                 }
             } else if (!existing) {
-                projected.properties.status = cancellationState.appliedStatus;
+                projected.properties.status = cancellationStatus;
                 projected.postApplyCancellationStateUpdate = {
-                    ...cancellationState,
+                    ...withoutPendingReplacement(cancellationState),
+                    appliedStatus: cancellationStatus,
                     pendingApplication: false,
                 };
             } else if (cancellationState.pendingApplication) {
@@ -1149,6 +1254,38 @@ export class NativeCalendarRecordService {
                     ...cancellationState,
                     pendingApplication: false,
                 };
+            } else if (cancellationState.canRestore) {
+                const replacement = cancellationState.pendingReplacementStatus;
+                const ownedStatus = statusPresent && statusValue === replacement
+                    ? replacement
+                    : statusPresent && statusValue === cancellationState.appliedStatus
+                        ? cancellationState.appliedStatus
+                        : null;
+                if (ownedStatus) {
+                    const settledState: NativeCalendarCancellationState = {
+                        ...withoutPendingReplacement(cancellationState),
+                        appliedStatus: ownedStatus,
+                    };
+                    if (ownedStatus !== cancellationStatus) {
+                        projected.properties.status = cancellationStatus;
+                        projected.preApplyCancellationStateUpdate = {
+                            ...settledState,
+                            pendingReplacementStatus: cancellationStatus,
+                        };
+                        projected.postApplyCancellationStateUpdate = {
+                            ...settledState,
+                            appliedStatus: cancellationStatus,
+                        };
+                    } else if (replacement) {
+                        projected.postApplyCancellationStateUpdate = settledState;
+                    }
+                } else if (replacement) {
+                    // A user changed status while our label change was pending.
+                    // Keep the old ownership marker only for exact-match restore.
+                    projected.postApplyCancellationStateUpdate = {
+                        ...withoutPendingReplacement(cancellationState),
+                    };
+                }
             }
             return projected;
         }
@@ -1157,7 +1294,8 @@ export class NativeCalendarRecordService {
         if (cancellationState) {
             if (cancellationState.canRestore
                 && statusPresent
-                && statusValue === cancellationState.appliedStatus) {
+                && (statusValue === cancellationState.appliedStatus
+                    || statusValue === cancellationState.pendingReplacementStatus)) {
                 projected.properties.status = cancellationState.previousStatusPresent
                     ? cancellationState.previousStatus ?? ""
                     : null;
@@ -1357,6 +1495,38 @@ function nonBlankText(value: unknown): string {
     return String(value ?? "").trim();
 }
 
+function compactUtcClock(value: Date): string {
+    return value.toISOString().replace(/[-:]/gu, '').slice(0, 15);
+}
+
+/** The suffix is the parser's original source-clock RECURRENCE-ID, not an inferred title/date match. */
+function masterOccurrenceClock(event: ExternalCalendarEvent): { day: string; utcOffsetMs: number } | null {
+    if (!event.isRecurring || event.isCancelled || event.isAllDay || event.sourceRevisionOrigin !== 'master') return null;
+    const prefix = `${event.uid}-`;
+    const identity = String(event.occurrenceIdentity || '');
+    if (!identity.startsWith(prefix)) return null;
+    const sourceClock = identity.slice(prefix.length);
+    if (!/^\d{8}T\d{6}$/u.test(sourceClock)) return null;
+    const localAsUtc = new Date(`${sourceClock.slice(0, 4)}-${sourceClock.slice(4, 6)}-${sourceClock.slice(6, 8)}T${sourceClock.slice(9, 11)}:${sourceClock.slice(11, 13)}:${sourceClock.slice(13, 15)}Z`);
+    if (!Number.isFinite(localAsUtc.getTime()) || compactUtcClock(localAsUtc) !== sourceClock) return null;
+    const utcOffsetMs = event.startDate.getTime() - localAsUtc.getTime();
+    if (!Number.isFinite(utcOffsetMs) || Math.abs(utcOffsetMs) > 14 * 3600_000) return null;
+    return { day: sourceClock.slice(0, 8), utcOffsetMs };
+}
+
+function sourceScheduleStamp(record: IndexedCalendarRecord): CalendarSyncStamp | null {
+    const existing = readCalendarSyncStamp(record.frontmatter);
+    if (existing) return existing;
+    if (readPropertyCaseInsensitive(record.frontmatter, 'allDay') === true) return null;
+    const start = Date.parse(String(readPropertyCaseInsensitive(record.frontmatter, 'scheduled') || ''));
+    const end = Date.parse(String(readPropertyCaseInsensitive(record.frontmatter, 'end') || ''));
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+    return {
+        occurrenceId: record.id,
+        schedule: `time|${new Date(start).toISOString()}|${new Date(end).toISOString()}`,
+    };
+}
+
 function optionalSyncedTextProperty(
     existing: IndexedCalendarRecord | null,
     key: "description" | "location" | "organizer" | "url",
@@ -1390,6 +1560,10 @@ function cloneCancellationState(value: unknown): Record<string, NativeCalendarCa
                 : null,
             canRestore: entry.canRestore === true,
             pendingApplication: entry.pendingApplication === true,
+            ...(entry.canRestore === true && typeof entry.pendingReplacementStatus === "string"
+                && entry.pendingReplacementStatus && entry.pendingReplacementStatus !== entry.appliedStatus
+                ? { pendingReplacementStatus: entry.pendingReplacementStatus }
+                : {}),
         };
         claimedIds.add(idKey);
     }
@@ -1402,6 +1576,12 @@ function cancellationStateForId(
 ): NativeCalendarCancellationState | null {
     const key = Object.keys(state).find((candidate) => identityKey(candidate) === identityKey(id));
     return key ? { ...state[key] } : null;
+}
+
+function withoutPendingReplacement(state: NativeCalendarCancellationState): NativeCalendarCancellationState {
+    const copy = { ...state };
+    delete copy.pendingReplacementStatus;
+    return copy;
 }
 
 function statusMatchesPreviousState(

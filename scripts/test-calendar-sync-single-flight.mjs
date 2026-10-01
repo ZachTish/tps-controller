@@ -279,7 +279,7 @@ test("a joined readiness skip clears the flight so a later ready call can run", 
   assert.deepEqual(harness.notices, ["Calendar Sync skipped: metadata cache not ready"]);
 
   ready = true;
-  await harness.service.runSync();
+  await harness.service.runSync(true);
   assert.equal(harness.autoCreateCalls.length, 1);
   assert.equal(completionCalls, 1);
   assert.equal(eventCount(harness.events, STARTED), 2);

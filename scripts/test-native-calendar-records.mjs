@@ -132,8 +132,10 @@ function harness(initialEvents = [], options = {}) {
   let failSettingsSave = false;
   const settings = {
     calendarStorageMode: 'native-records',
+    noLossSyncMode: false,
     syncOnEventDelete: 'nothing',
     canceledStatusValue: 'cancelled',
+    missingEventStatusValue: '',
     nativeCalendarCancellationState: {},
   };
   feedStates.set(calendar.url, { ok: true, events: initialEvents });
@@ -901,6 +903,95 @@ test('successful missing occurrence with nothing policy is a true business-field
   assert.equal(h.mutationLog.length, mutationCount);
 });
 
+test('native no-loss mode leaves absent records untouched, but still honors explicit cancellation', async () => {
+  const h = harness([event()]);
+  h.settings.noLossSyncMode = true;
+  h.settings.syncOnEventDelete = 'archive';
+  h.settings.canceledStatusValue = 'canceled';
+  h.settings.missingEventStatusValue = 'deleted';
+  await h.service.sync([calendar], '', true, false);
+  const [path] = h.files.keys();
+  h.frontmatters.get(path).status = 'complete';
+  const before = structuredClone(h.frontmatters.get(path));
+  const mutations = h.mutationLog.length;
+  h.setEvents([]);
+  const missing = await h.service.sync([calendar], '', true, false);
+  assert.equal(missing.missing, 1);
+  assert.equal(missing.archived, 0);
+  assert.deepEqual(h.frontmatters.get(path), before);
+  assert.equal(h.mutationLog.length, mutations);
+
+  h.setEvents([event({ isCancelled: true })]);
+  const cancelled = await h.service.sync([calendar], '', true, false);
+  assert.equal(cancelled.cancelled, 1);
+  assert.equal(h.frontmatters.get(path).status, 'canceled');
+  assert.equal(h.frontmatters.get(path).archived, undefined);
+});
+
+test('configured missing-event status is applied only on first archive when No-Loss is off', async () => {
+  const h = harness([event()]);
+  h.settings.syncOnEventDelete = 'archive';
+  h.settings.missingEventStatusValue = 'deleted';
+  await h.service.sync([calendar], '', true, false);
+  const [path] = h.files.keys();
+  h.frontmatters.get(path).status = 'complete';
+  h.setEvents([]);
+  const result = await h.service.sync([calendar], '', true, false);
+  assert.equal(result.archived, 1);
+  assert.equal(h.frontmatters.get(path).status, 'deleted');
+  assert.equal(h.frontmatters.get(path).archived, true);
+  h.frontmatters.get(path).status = 'reviewed';
+  await h.service.sync([calendar], '', true, false);
+  assert.equal(h.frontmatters.get(path).status, 'reviewed', 'later user status is not overwritten');
+});
+
+test('blank missing-event status leaves an authored status unchanged when archiving', async () => {
+  const h = harness([event()]);
+  h.settings.syncOnEventDelete = 'archive';
+  await h.service.sync([calendar], '', true, false);
+  const [path] = h.files.keys();
+  h.frontmatters.get(path).status = 'complete';
+  h.setEvents([]);
+  await h.service.sync([calendar], '', true, false);
+  assert.equal(h.frontmatters.get(path).status, 'complete');
+  assert.equal(h.frontmatters.get(path).archived, true);
+});
+
+test('missing-event status is frozen before the asynchronous archive plan', async () => {
+  const h = harness([event()]);
+  h.settings.syncOnEventDelete = 'archive';
+  h.settings.missingEventStatusValue = 'deleted';
+  await h.service.sync([calendar], '', true, false);
+  h.setEvents([]);
+  h.setAfterPreflightHook(() => { h.settings.missingEventStatusValue = 'missing'; });
+  await h.service.sync([calendar], '', true, false);
+  const [frontmatter] = h.frontmatters.values();
+  assert.equal(frontmatter.status, 'deleted');
+  assert.equal(h.settings.missingEventStatusValue, 'missing');
+});
+
+test('native no-loss mode does not archive an occurrence absent from a successful partial feed', async () => {
+  const first = event({ uid: 'first', id: 'first', occurrenceIdentity: 'first' });
+  const second = event({ uid: 'second', id: 'second', occurrenceIdentity: 'second', startDate: futureDate(3) });
+  const h = harness([first, second]);
+  h.settings.noLossSyncMode = true;
+  h.settings.syncOnEventDelete = 'archive';
+  await h.service.sync([calendar], '', true, false);
+  const before = new Map([...h.frontmatters].map(([path, frontmatter]) => [path, structuredClone(frontmatter)]));
+  const mutations = h.mutationLog.length;
+  h.setEvents([first]);
+  const result = await h.service.sync([calendar], '', true, false);
+  assert.equal(result.missing, 1);
+  assert.equal(result.archived, 0);
+  assert.deepEqual(h.frontmatters, before);
+  assert.equal(h.mutationLog.length, mutations);
+
+  h.settings.noLossSyncMode = false;
+  const archive = await h.service.sync([calendar], '', true, false);
+  assert.equal(archive.archived, 1);
+  assert.equal([...h.frontmatters.values()].filter(frontmatter => frontmatter.archived === true).length, 1);
+});
+
 test('failed feed cannot delete or alter records while successful feed deletion remains source-scoped', async () => {
   const personal = { ...calendar, id: 'personal-calendar', url: 'https://calendar.example/personal.ics' };
   const workEvent = event({ uid: 'work', id: 'work', occurrenceIdentity: 'work' });
@@ -954,6 +1045,88 @@ test('cancelled events use the configured status once and preserve a later user 
   await h.service.sync([calendar], '', true, false);
   assert.equal(h.frontmatters.get(path).status, 'complete');
   assert.equal(Object.hasOwn(h.settings.nativeCalendarCancellationState, id), false);
+});
+
+test('changing the cancellation label updates only Controller-owned status and keeps its original restore value', async () => {
+  const h = harness([event()]);
+  await h.service.sync([calendar], '', true, false);
+  const [path] = h.files.keys();
+  h.mutateBusinessFieldOnDisk(path, { status: 'complete' });
+  h.setEvents([event({ isCancelled: true })]);
+  await h.service.sync([calendar], '', true, false);
+  const id = h.frontmatters.get(path).tpsId;
+  assert.equal(h.frontmatters.get(path).status, 'cancelled');
+
+  h.settings.canceledStatusValue = 'canceled';
+  await h.service.sync([calendar], '', true, false);
+  assert.equal(h.frontmatters.get(path).status, 'canceled');
+  assert.deepEqual(h.settings.nativeCalendarCancellationState[id], {
+    appliedStatus: 'canceled', previousStatusPresent: true, previousStatus: 'complete',
+    canRestore: true, pendingApplication: false,
+  });
+  const mutations = h.mutationLog.length;
+  await h.service.sync([calendar], '', true, false);
+  assert.equal(h.mutationLog.length, mutations);
+
+  h.setEvents([event()]);
+  await h.service.sync([calendar], '', true, false);
+  assert.equal(h.frontmatters.get(path).status, 'complete');
+  assert.equal(Object.hasOwn(h.settings.nativeCalendarCancellationState, id), false);
+});
+
+test('changing the cancellation label leaves adopted and user-overridden statuses alone', async () => {
+  const incoming = event({ isCancelled: true });
+  const id = canonicalId(calendar.id, incoming.occurrenceIdentity);
+  const adopted = harness([incoming]);
+  adopted.seedRecordOnDisk('adopted.md', canonicalFrontmatter(incoming, id, 'adopted.md', { status: 'cancelled' }));
+  await adopted.service.sync([calendar], '', true, false);
+  assert.equal(adopted.settings.nativeCalendarCancellationState[id].canRestore, false);
+  adopted.settings.canceledStatusValue = 'canceled';
+  await adopted.service.sync([calendar], '', true, false);
+  assert.equal([...adopted.frontmatters.values()].find(fm => fm.tpsId === id).status, 'cancelled');
+
+  const overridden = harness([event()]);
+  await overridden.service.sync([calendar], '', true, false);
+  const [path] = overridden.files.keys();
+  overridden.setEvents([incoming]);
+  await overridden.service.sync([calendar], '', true, false);
+  overridden.mutateBusinessFieldOnDisk(path, { status: 'reviewed' });
+  overridden.settings.canceledStatusValue = 'canceled';
+  await overridden.service.sync([calendar], '', true, false);
+  assert.equal(overridden.frontmatters.get(path).status, 'reviewed');
+  overridden.setEvents([event()]);
+  await overridden.service.sync([calendar], '', true, false);
+  assert.equal(overridden.frontmatters.get(path).status, 'reviewed');
+});
+
+test('an interrupted cancellation-label update retains exact ownership through retry', async () => {
+  const first = event({ id: 'first-cancel', uid: 'first-cancel', occurrenceIdentity: 'first-cancel' });
+  const second = event({ id: 'second-cancel', uid: 'second-cancel', occurrenceIdentity: 'second-cancel', startDate: futureDate(3) });
+  const secondId = canonicalId(calendar.id, second.occurrenceIdentity);
+  const h = harness([first, second]);
+  await h.service.sync([calendar], '', true, false);
+  const byId = id => [...h.frontmatters.values()].find(fm => fm.tpsId === id);
+  for (const [path] of h.files) h.mutateBusinessFieldOnDisk(path, { status: 'complete' });
+  h.setEvents([{ ...first, isCancelled: true }, { ...second, isCancelled: true }]);
+  await h.service.sync([calendar], '', true, false);
+  h.settings.canceledStatusValue = 'canceled';
+  h.setAfterBatchEntryHook(() => h.seedPlainFile('Unrelated cancellation interruption.md'));
+  const originalConsoleError = console.error;
+  console.error = () => {};
+  try {
+    await assert.rejects(h.service.sync([calendar], '', true, false), /interrupted/u);
+  } finally {
+    console.error = originalConsoleError;
+  }
+  assert.equal(byId(secondId).status, 'cancelled');
+  assert.equal(h.settings.nativeCalendarCancellationState[secondId].pendingReplacementStatus, 'canceled');
+  await h.service.sync([calendar], '', true, false);
+  assert.equal(byId(secondId).status, 'canceled');
+  assert.equal(h.settings.nativeCalendarCancellationState[secondId].appliedStatus, 'canceled');
+  assert.equal(Object.hasOwn(h.settings.nativeCalendarCancellationState[secondId], 'pendingReplacementStatus'), false);
+  h.setEvents([first, second]);
+  await h.service.sync([calendar], '', true, false);
+  assert.equal(byId(secondId).status, 'complete');
 });
 
 test('active feed restores an exact plugin-owned cancellation, including blank and absent prior statuses', async () => {
@@ -2203,6 +2376,142 @@ test('native calendar template setting remains reachable with a saved legacy tas
 const preserveCalendar = { ...calendar, preserveNotesOnExternalReschedule: true };
 const currentNotes = h => [...h.frontmatters.entries()].filter(([, fm]) => !fm.tpsCalendarSync?.retired);
 
+function recurringMasterOccurrence(uid, startDate, sourceOffsetHours = 5) {
+  const sourceClock = new Date(startDate.getTime() - sourceOffsetHours * 3600_000);
+  const stamp = sourceClock.toISOString().replace(/[-:]/gu, '').slice(0, 15);
+  const occurrenceIdentity = `${uid}-${stamp}`;
+  return event({
+    id: occurrenceIdentity, uid, occurrenceIdentity, isRecurring: true,
+    startDate, endDate: new Date(startDate.getTime() + 30 * 60_000),
+    sourceRevision: [1, 0, 1], sourceRevisionOrigin: 'master',
+  });
+}
+
+test('whole-series master time shift links an old occurrence by exact identity hash and retains history', async () => {
+  const old = recurringMasterOccurrence('series-shift', futureDate(2, 12));
+  const next = recurringMasterOccurrence('series-shift', new Date(old.startDate.getTime() - 3600_000));
+  const config = { ...preserveCalendar, rescheduleActions: [
+    { target: 'previous', key: 'status', value: 'rescheduled' },
+    { target: 'current', key: 'review', value: 'true' },
+  ] };
+  const h = harness([old]);
+  await h.service.sync([config], '', true, false);
+  const [oldPath] = h.files.keys();
+  h.bodies.set(oldPath, 'Authored meeting notes');
+  h.setEvents([next]);
+  const moved = await h.service.sync([config], '', true, false);
+  assert.equal(moved.created, 1);
+  assert.equal(h.files.size, 2);
+  assert.equal(h.frontmatters.get(oldPath).tpsCalendarSync.retired, true);
+  assert.equal(h.frontmatters.get(oldPath).status, 'rescheduled');
+  assert.equal(h.bodies.get(oldPath), 'Authored meeting notes');
+  assert.equal(currentNotes(h).length, 1);
+  assert.equal(currentNotes(h)[0][1].tpsId, canonicalId(calendar.id, next.occurrenceIdentity));
+  assert.equal(currentNotes(h)[0][1].review, true);
+  assert.equal((await h.service.sync([config], '', true, false)).created, 0);
+  assert.equal(h.files.size, 2);
+});
+
+test('whole-series master time shift reidentifies the old note when history is disabled', async () => {
+  const old = recurringMasterOccurrence('series-in-place', futureDate(2, 12));
+  const next = recurringMasterOccurrence('series-in-place', new Date(old.startDate.getTime() - 3600_000));
+  const h = harness([old]);
+  await h.service.sync([calendar], '', true, false);
+  const [oldPath] = h.files.keys();
+  h.bodies.set(oldPath, 'Keep this body');
+  h.setEvents([next]);
+  const moved = await h.service.sync([calendar], '', true, false);
+  assert.equal(moved.created, 0);
+  assert.equal(h.files.size, 1);
+  assert.equal([...h.frontmatters.values()][0].tpsId, canonicalId(calendar.id, next.occurrenceIdentity));
+  assert.equal([...h.bodies.values()][0], 'Keep this body');
+  assert.equal((await h.service.sync([calendar], '', true, false)).created, 0);
+});
+
+test('same-day multi-occurrence master shifts fail closed before mutation', async () => {
+  const first = recurringMasterOccurrence('multi-series', futureDate(2, 12));
+  const second = recurringMasterOccurrence('multi-series', new Date(first.startDate.getTime() + 3600_000));
+  const h = harness([first, second]);
+  await h.service.sync([preserveCalendar], '', true, false);
+  const snapshot = structuredClone([...h.frontmatters]);
+  h.setEvents([recurringMasterOccurrence('multi-series', new Date(first.startDate.getTime() - 3600_000))]);
+  await assert.rejects(h.service.sync([preserveCalendar], '', true, false), /Ambiguous recurring master reschedule/u);
+  assert.deepEqual([...h.frontmatters], snapshot);
+});
+
+test('master-shift matching uses each occurrence offset across a daylight-saving change', async () => {
+  const first = recurringMasterOccurrence('dst-series', futureDate(2, 12), 5);
+  const second = recurringMasterOccurrence('dst-series', futureDate(3, 12), 6);
+  const h = harness([first, second]);
+  await h.service.sync([preserveCalendar], '', true, false);
+  h.setEvents([
+    recurringMasterOccurrence('dst-series', new Date(first.startDate.getTime() - 3600_000), 5),
+    recurringMasterOccurrence('dst-series', new Date(second.startDate.getTime() - 3600_000), 6),
+  ]);
+  const result = await h.service.sync([preserveCalendar], '', true, false);
+  assert.equal(result.created, 2);
+  assert.equal(currentNotes(h).length, 2);
+  assert.equal([...h.frontmatters.values()].filter(fm => fm.tpsCalendarSync?.retired).length, 2);
+  assert.equal((await h.service.sync([preserveCalendar], '', true, false)).created, 0);
+});
+
+test('a tracked detached exception is not mistaken for a shifted master occurrence', async () => {
+  const old = recurringMasterOccurrence('detached-series', futureDate(2, 12));
+  old.sourceRevisionOrigin = '20261002T070000';
+  const next = recurringMasterOccurrence('detached-series', new Date(old.startDate.getTime() - 3600_000));
+  const h = harness([old]);
+  await h.service.sync([preserveCalendar], '', true, false);
+  const [oldPath] = h.files.keys();
+  h.setEvents([next]);
+  assert.equal((await h.service.sync([preserveCalendar], '', true, false)).created, 1);
+  assert.equal(h.frontmatters.get(oldPath).tpsCalendarSync.retired, undefined);
+  assert.equal(currentNotes(h).length, 2);
+});
+
+test('an untracked locally moved exception does not match a former master identity', async () => {
+  const old = recurringMasterOccurrence('untracked-exception', futureDate(2, 12));
+  const next = recurringMasterOccurrence('untracked-exception', new Date(old.startDate.getTime() - 3600_000));
+  const id = canonicalId(calendar.id, old.occurrenceIdentity);
+  const h = harness([next]);
+  h.seedRecordOnDisk('old-exception.md', canonicalFrontmatter(old, id, 'old-exception.md', {
+    scheduled: new Date(old.startDate.getTime() + 3600_000).toISOString(),
+    end: new Date(old.endDate.getTime() + 3600_000).toISOString(),
+  }));
+  assert.equal((await h.service.sync([preserveCalendar], '', true, false)).created, 1);
+  assert.equal(h.frontmatters.get('old-exception.md').tpsCalendarSync, undefined);
+  assert.equal(currentNotes(h).length, 2);
+});
+
+test('a local schedule edit does not fork by itself and tracked feed time still identifies a later master shift', async () => {
+  const old = recurringMasterOccurrence('local-edit-series', futureDate(2, 12));
+  const h = harness([old]);
+  await h.service.sync([preserveCalendar], '', true, false);
+  const [oldPath] = h.files.keys();
+  h.mutateBusinessFieldOnDisk(oldPath, { scheduled: new Date(old.startDate.getTime() + 2 * 3600_000).toISOString() });
+  assert.equal((await h.service.sync([preserveCalendar], '', true, false)).created, 0);
+  const next = recurringMasterOccurrence('local-edit-series', new Date(old.startDate.getTime() - 3600_000));
+  h.setEvents([next]);
+  assert.equal((await h.service.sync([preserveCalendar], '', true, false)).created, 1);
+  assert.equal(h.frontmatters.get(oldPath).tpsCalendarSync.retired, true);
+  assert.equal(currentNotes(h).length, 1);
+});
+
+test('interrupted master-shift retirement retries with the same new canonical identity', async () => {
+  const old = recurringMasterOccurrence('interrupted-series', futureDate(2, 12));
+  const next = recurringMasterOccurrence('interrupted-series', new Date(old.startDate.getTime() - 3600_000));
+  const h = harness([old]);
+  await h.service.sync([preserveCalendar], '', true, false);
+  h.setEvents([next]);
+  h.setAfterBatchEntryHook(() => h.seedPlainFile('Unrelated interruption.md'));
+  await assert.rejects(h.service.sync([preserveCalendar], '', true, false), /interrupted/u);
+  assert.equal(currentNotes(h).length, 0);
+  const retry = await h.service.sync([preserveCalendar], '', true, false);
+  assert.equal(retry.created, 1);
+  assert.equal(currentNotes(h).length, 1);
+  assert.equal(currentNotes(h)[0][1].tpsId, canonicalId(calendar.id, next.occurrenceIdentity));
+  assert.equal((await h.service.sync([preserveCalendar], '', true, false)).created, 0);
+});
+
 test('external reschedule retains the original identity, path, authored body and properties; only the new note stays active', async () => {
   const h = harness([event()]);
   await h.service.sync([preserveCalendar], '', true, false);
@@ -2559,13 +2868,41 @@ test('settled repeat sync skips the write batch entirely',async()=>{
  assert.equal(r.created,0);assert.equal(r.updated,0);assert.equal(r.unchanged,1);
 });
 
-test('new occurrences are written without replaying unchanged owners',async()=>{
+test('new occurrences use one validated path plan without replaying unchanged owners',async()=>{
  const first=event();const h=harness([first]);await h.service.sync([calendar],'',true,false);
  h.setEvents([first,event({id:'second-distinct',uid:'second-distinct',occurrenceIdentity:'second-distinct',title:'Second distinct event'})]);
+ const originalPlan=h.api.planIdentityChanges.bind(h.api);let planCalls=0;
+ h.api.planIdentityChanges=async(...args)=>{
+  planCalls+=1;
+  if(planCalls>1) throw Error('Calendar sync requested a second path plan for the same snapshot');
+  return originalPlan(...args);
+ };
+ const priorMutations=h.mutationLog.length;
  const apply=h.api.applyIdentityChanges.bind(h.api);let applied;
  h.api.applyIdentityChanges=async(plan,entries,...rest)=>{applied=entries;return apply(plan,entries,...rest)};
  const r=await h.service.sync([calendar],'',true,false);
+ assert.equal(planCalls,1);
  assert.equal(r.created,1);assert.equal(applied.length,1);assert.equal(applied[0].operation,'create');
+ assert.deepEqual(h.mutationLog.slice(priorMutations).map(entry=>entry.type),['create']);
+});
+
+test('a generation change after planning is rejected at the write boundary',async()=>{
+ const h=harness([event()]);
+ h.setAfterPreflightHook(()=>{
+  h.seedRecordOnDisk('unrelated-arrival.md',{tpsId:'unrelated-arrival',tpsSchemaVersion:1,kind:'task'});
+ });
+ await assert.rejects(h.service.sync([calendar],'',true,false),/rejected the calendar batch before applying it/u);
+ assert.equal(h.mutationLog.length,0);
+ assert.equal([...h.frontmatters.values()].some(frontmatter=>frontmatter.tpsId===canonicalId(calendar.id,'uid-1')),false);
+});
+
+test('a path-layout change after planning is rejected before a calendar write', async () => {
+  const layout = { nativeRoot: 'Calendar records' };
+  const h = harness([event()], layout);
+  h.setAfterPreflightHook(() => { layout.nativeRoot = 'Moved records'; });
+  await assert.rejects(h.service.sync([calendar], '', true, false), /rejected the calendar batch before applying it/u);
+  assert.equal(h.mutationLog.length, 0);
+  assert.equal(h.files.size, 0);
 });
 
 test('an already archived missing event does not rewrite its archive timestamp on every sync',async()=>{

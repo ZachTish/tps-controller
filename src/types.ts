@@ -196,6 +196,8 @@ export interface TPSControllerSettings {
     syncOnEventDelete: "delete" | "archive" | "nothing";
     archiveFolder: string;
     canceledStatusValue: string;
+    /** Optional status for an inferred missing event when No-Loss is disabled. */
+    missingEventStatusValue: string;
     /** Controller-owned reconciliation state. Keys are canonical calendar-record tpsIds. */
     nativeCalendarCancellationState: Record<string, NativeCalendarCancellationState>;
     externalCalendarFilter: string;
@@ -250,6 +252,8 @@ export interface NativeCalendarCancellationState {
     canRestore: boolean;
     /** True only between durable intent and a confirmed GCM status mutation. */
     pendingApplication: boolean;
+    /** New owned cancellation label awaiting confirmation of its note mutation. */
+    pendingReplacementStatus?: string;
 }
 
 export const DEFAULT_CONTROLLER_SETTINGS: TPSControllerSettings = {
@@ -261,6 +265,7 @@ export const DEFAULT_CONTROLLER_SETTINGS: TPSControllerSettings = {
     syncOnEventDelete: "nothing",
     archiveFolder: "",
     canceledStatusValue: "cancelled",
+    missingEventStatusValue: "",
     nativeCalendarCancellationState: {},
     externalCalendarFilter: "",
     externalCalendars: [],

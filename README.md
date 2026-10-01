@@ -1,5 +1,67 @@
 # TPS Controller
 
+## 2.7.0 — Calendar lifecycle and deterministic sync
+
+Native calendar notes now honor **No-Loss Sync Mode** for successful feeds: an
+occurrence that is absent from a feed stays unchanged, even when **On Event
+Deletion** is set to archive or delete. An explicit canceled iCalendar event
+still receives the configured canceled status. Turning No-Loss off restores the
+configured missing-event archive policy. The new optional **Missing-event
+status value** writes a user-chosen status when an absent native note is first
+archived with No-Loss off; its blank default preserves an authored status.
+Already archived notes and later user status edits are not overwritten. Feed
+absence is inferred missing, not a confirmed deletion. Legacy task/note mode
+retains its existing grace and quarantine behavior. The settings copy
+distinguishes these paths.
+
+Changing **Canceled Status Value** updates only notes whose current status
+exactly matches a Controller-owned cancellation label. It leaves legacy notes
+with unknown prior status and later user status edits alone, and restores the
+original pre-cancellation status if the event becomes active. The existing
+private cancellation ownership entry records an in-flight label replacement
+so an interrupted batch can resume without losing that provenance. No status
+is automatically set on a new active event.
+
+A recurring master whose whole series moves to a different time can change
+each occurrence's source identity. Native sync now links an unmatched new
+master occurrence to its former note only when the former canonical ID is an
+exact hash of the current series UID and its stored former source-clock time,
+in the same feed scope and local calendar day. It excludes detached exceptions,
+retired/archived records and filtered runs; multiple plausible same-day
+matches fail before writes. The existing **Keep old note when externally
+rescheduled** choice then either retires the former note and creates the new
+one, or reidentifies the former note. Existing previous/current reschedule
+property actions apply. This uses the current source's identity and the
+existing `tpsCalendarSync` property, without a title heuristic, new watcher or
+background repair. It cannot link a changed provider UID or an old untracked
+note whose schedule was locally changed before its first tracked sync; those
+cases remain unmatched rather than risking the wrong association.
+
+The startup calendar settlement gate no longer resets for a folder modify or a
+non-Markdown asset modify. A live Controller trace showed an unrelated `_assets`
+modify extending the 20-second deadline and blocking manual sync. Markdown
+note modifies and content create/delete/rename events still defer as before;
+manual force sync still requires resolved metadata and a settled calendar gate.
+
+Native sync now obtains one GCM path plan per run, then removes unchanged
+owners from the planned write batch by matching their original plan indices.
+Previously it requested a second path plan after a potentially long first
+plan; an intervening vault event invalidated that second request and aborted
+all creates with a misleading path-preservation error. GCM still replans and
+checks the trimmed entries, source identities, paths and generation at its
+write boundary; stale generations or changed path layouts fail before writes.
+Unchanged notes are not replayed through GCM's file queue.
+
+Focused tests cover empty and partial successful feeds, no-op mutation counts,
+explicit cancellation and label changes, blank and configured inferred-missing
+statuses, frozen settings, whole-series shifts with and without preserved
+history, same-day ambiguity, daylight-saving offsets, detached exceptions,
+local edits, and interrupted batches. Full validation passed 622 checks with
+three existing skips. Test-vault deployment and verification are recorded in
+[2.7.0 release notes](release-notes/2.7.0.md). This is a backward-compatible
+minor release; minimum Obsidian remains 1.12.3. Production installation is the
+user's BRAT handoff.
+
 ## 2.6.3 — Respect notes-only reminder scope before reading bodies
 
 Reminder discovery now uses the same inline-task scope as target construction.
@@ -339,7 +401,7 @@ release; minimum Obsidian stays 1.12.3. Production installation is the BRAT hand
 
 Device roles, calendar synchronization, reminders, encrypted attachment sync, and shared Plaid transport.
 
-Current release: [2.6.3](https://github.com/ZachTish/tps-controller/releases/tag/2.6.3) · Obsidian 1.12.3+ · Desktop and mobile.
+Current release: [2.7.0](https://github.com/ZachTish/tps-controller/releases/tag/2.7.0) · Obsidian 1.12.3+ · Desktop and mobile.
 
 ## Install with BRAT
 

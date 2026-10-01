@@ -55,6 +55,10 @@ export function normalizeNativeCalendarCancellationState(
             previousStatus,
             canRestore: entry.canRestore === true,
             pendingApplication: entry.pendingApplication === true,
+            ...(entry.canRestore === true && typeof entry.pendingReplacementStatus === "string"
+                && entry.pendingReplacementStatus && entry.pendingReplacementStatus !== appliedStatus
+                ? { pendingReplacementStatus: entry.pendingReplacementStatus }
+                : {}),
         };
         claimedIds.add(identityKey);
     }

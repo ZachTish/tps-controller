@@ -112,6 +112,22 @@ test("private native calendar cancellation state keeps only valid tpsId-keyed en
   });
 });
 
+test("private cancellation label replacement survives settings normalization without copying malformed intent", () => {
+  const id = `calendar:v1:${'A'.repeat(16)}:${'B'.repeat(27)}`;
+  const state = {
+    appliedStatus: 'cancelled', previousStatusPresent: true,
+    previousStatus: 'complete', canRestore: true, pendingApplication: false,
+    pendingReplacementStatus: 'canceled',
+  };
+  assert.deepEqual(normalizeNativeCalendarCancellationState({ [id]: state }), { [id]: state });
+  assert.deepEqual(normalizeNativeCalendarCancellationState({ [id]: {
+    ...state, canRestore: false,
+  } }), { [id]: {
+    appliedStatus: 'cancelled', previousStatusPresent: true,
+    previousStatus: 'complete', canRestore: false, pendingApplication: false,
+  } });
+});
+
 test("external calendar normalization backfills one stable unique ID without replacing editor objects", () => {
   const missing = { url: "https://calendar.example/legacy.ics", enabled: true };
   const duplicateUrl = { url: "https://calendar.example/legacy.ics", enabled: false };

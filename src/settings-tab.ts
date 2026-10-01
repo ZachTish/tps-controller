@@ -461,7 +461,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
         new Setting(calSection)
             .setName('No-Loss Sync Mode')
-            .setDesc('Prevents inferred deletes from remote absence. Orphans are quarantined for manual review; explicit cancellations can archive.')
+            .setDesc('Prevents inferred deletes from remote absence. Native event notes stay unchanged; legacy notes are quarantined for review. Explicit cancellations still update status.')
             .addToggle(toggle => toggle
                 .setValue(this.plugin.settings.noLossSyncMode ?? true)
                 .onChange(async (value) => {
@@ -471,7 +471,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
         new Setting(calSection)
             .setName('On Event Deletion')
-            .setDesc('What to do when an external event is removed from the feed. In No-Loss mode, "Delete note" is treated as archive-safe behavior.')
+            .setDesc('What to do when an external event is absent from the feed and No-Loss mode is off. In No-Loss mode, native notes stay unchanged and legacy "Delete note" is archive-safe.')
             .addDropdown(drop => drop
                 .addOption('nothing', 'Do nothing')
                 .addOption('archive', 'Move to archive folder')
@@ -512,6 +512,17 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                 .setValue(this.plugin.settings.canceledStatusValue)
                 .onChange(async (value) => {
                     this.plugin.settings.canceledStatusValue = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(calSection)
+            .setName('Missing-event status value')
+            .setDesc('Optional status when a note is first archived because its event is absent from a successful feed and No-Loss is off. Absence is not proof of deletion. Leave blank to preserve the existing status.')
+            .addText(text => text
+                .setPlaceholder('Leave blank')
+                .setValue(this.plugin.settings.missingEventStatusValue || '')
+                .onChange(async value => {
+                    this.plugin.settings.missingEventStatusValue = value;
                     await this.plugin.saveSettings();
                 }));
         }
