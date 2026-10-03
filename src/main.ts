@@ -912,6 +912,7 @@ export default class TPSControllerPlugin extends Plugin {
         s.previousStatusKey = normalizeKey(s.previousStatusKey, d.previousStatusKey);
         s.startProperty = normalizeKey(s.startProperty, d.startProperty);
         s.endProperty = normalizeKey(s.endProperty, d.endProperty);
+        s.calendarEndDateTimeProperty = normalizeKey(s.calendarEndDateTimeProperty, d.calendarEndDateTimeProperty);
 
         const identity = new Set([s.eventIdKey.toLowerCase(), s.uidKey.toLowerCase()]);
         const ensureNotIdentity = (v: string, fb: string) => identity.has(v.toLowerCase()) ? fb : v;
@@ -920,6 +921,7 @@ export default class TPSControllerPlugin extends Plugin {
         s.previousStatusKey = ensureNotIdentity(s.previousStatusKey, d.previousStatusKey);
         s.startProperty = ensureNotIdentity(s.startProperty, d.startProperty);
         s.endProperty = ensureNotIdentity(s.endProperty, d.endProperty);
+        s.calendarEndDateTimeProperty = ensureNotIdentity(s.calendarEndDateTimeProperty, d.calendarEndDateTimeProperty);
 
     }
 

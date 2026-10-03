@@ -561,6 +561,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             { key: 'previousStatusKey', label: 'Previous Status Key', placeholder: 'tpsCalendarPrevStatus' },
             { key: 'startProperty', label: 'Start Property', placeholder: 'scheduled' },
             { key: 'endProperty', label: 'Duration Property', placeholder: 'timeEstimate' },
+            { key: 'calendarEndDateTimeProperty', label: 'Calendar event end datetime', placeholder: 'end' },
         ];
 
         for (const fk of fmKeys) {

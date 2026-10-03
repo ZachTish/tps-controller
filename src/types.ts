@@ -215,6 +215,8 @@ export interface TPSControllerSettings {
     previousStatusKey: string;
     startProperty: string;
     endProperty: string;
+    /** End datetime for native external-calendar records; endProperty is a duration field. */
+    calendarEndDateTimeProperty: string;
 
     // Notification Rules
     pollMinutes: number;
@@ -318,6 +320,7 @@ export const DEFAULT_CONTROLLER_SETTINGS: TPSControllerSettings = {
     previousStatusKey: "tpsCalendarPrevStatus",
     startProperty: "scheduled",
     endProperty: "timeEstimate",
+    calendarEndDateTimeProperty: "end",
 
     // Notification Rules
     pollMinutes: 0.5,

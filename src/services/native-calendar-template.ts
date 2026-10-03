@@ -82,7 +82,11 @@ export function renderNativeCalendarTemplate(
         const value = expandValue(sourceValue);
         if (normalized === "kind") {
             if (value === null || value === undefined || (typeof value === "string" && !value.trim())) continue;
-            if (typeof value !== "string") throw new Error(`Calendar template kind must be text: ${templatePath}`);
+            if (typeof value !== "string"
+                && (!Array.isArray(value) || value.length === 0
+                    || value.some(item => typeof item !== "string" || !item.trim()))) {
+                throw new Error(`Calendar template kind must be text or a nonempty list of text: ${templatePath}`);
+            }
             properties.kind = value;
         } else {
             properties[key] = value;

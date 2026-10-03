@@ -1,5 +1,30 @@
 # TPS Controller
 
+## Pending configurable native calendar fields
+
+Native external-calendar sync now uses the configured title, status, and start
+property names for note creation, reconciliation, cancellation, reschedule
+actions, and missing-event archive decisions. The separate **Calendar event end
+datetime** setting defaults to `end`; the existing **Duration Property**
+setting remains a duration/reminder field and is not repurposed. Calendar field
+names are frozen at the beginning of each sync. In Advanced, Apply uses GCM's
+confirmed property-key migration for the new end-datetime field, as for the
+existing fields. Existing notes are not silently converted on plugin load.
+
+A configured calendar template may author `kind` as a nonempty YAML list of
+text values. Controller preserves the values as written; GCM owns the public
+kind mapping and the native-record identity remains separate. Templates may
+also contain tags, which Controller copies to new notes, so remove tag fields
+from a template when tags should be manual. A configured reschedule action
+cannot overwrite the configured schedule keys or GCM's kind-list key and legacy
+classification aliases.
+
+Focused regressions cover custom field creation, unchanged repeat sync,
+cancellation/restoration, missing-event archive, protected reschedule keys,
+and list-valued template kinds. Full suite and separate build are run with
+`TPS_NO_DEPLOY=1` during integration; this candidate is not deployed or
+released independently.
+
 ## 3.0.0 — Whole-note calendar records and reminders
 
 Controller now creates and synchronizes external calendar occurrences as ordinary

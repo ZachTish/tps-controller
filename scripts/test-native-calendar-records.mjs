@@ -550,6 +550,7 @@ function harness(initialEvents = [], options = {}) {
 
   const app = {
     plugins: {
+      plugins: options.gcmSettings ? { 'tps-global-context-menu': { settings: options.gcmSettings } } : {},
       getPlugin: (id) => id === 'tps-global-context-menu'
         ? {
             api: {
@@ -2232,6 +2233,86 @@ test('new native calendar notes omit public kind without an explicit template ki
   assert.equal(h.files.size, 1);
 });
 
+test('native sync uses configured title, schedule, end datetime and status keys with a list-valued template kind', async () => {
+  const incoming = event();
+  const h = harness([incoming], {
+    templates: { 'Template.md': '---\nkind: [user/meeting, user/reviewed]\nstage: planned\n---\nAgenda\n' },
+  });
+  Object.assign(h.settings, {
+    titleKey: 'name', statusKey: 'stage', startProperty: 'beginsAt',
+    calendarEndDateTimeProperty: 'endsAt', endProperty: 'timeEstimate',
+  });
+  const configured = { ...calendar, autoCreateTemplate: 'Template.md' };
+  assert.equal((await h.service.sync([configured], '', true, false)).created, 1);
+  const [record] = h.frontmatters.values();
+  assert.deepEqual(record.kind, ['user/meeting', 'user/reviewed']);
+  assert.equal(record.name, incoming.title);
+  assert.equal(record.beginsAt, incoming.startDate.toISOString());
+  assert.equal(record.endsAt, incoming.endDate.toISOString());
+  for (const key of ['title', 'scheduled', 'end', 'status', 'timeEstimate']) {
+    assert.equal(Object.hasOwn(record, key), false, key);
+  }
+  const mutations = h.mutationLog.length;
+  assert.equal((await h.service.sync([configured], '', true, false)).unchanged, 1);
+  assert.equal(h.mutationLog.length, mutations, 'an unchanged event should not be rewritten');
+  h.setEvents([event({ isCancelled: true })]);
+  await h.service.sync([configured], '', true, false);
+  assert.equal([...h.frontmatters.values()][0].stage, 'cancelled');
+  h.setEvents([incoming]);
+  await h.service.sync([configured], '', true, false);
+  assert.equal([...h.frontmatters.values()][0].stage, 'planned');
+  h.settings.syncOnEventDelete = 'archive';
+  h.settings.missingEventStatusValue = 'missing';
+  h.setEvents([]);
+  assert.equal((await h.service.sync([configured], '', true, false)).archived, 1);
+  assert.equal([...h.frontmatters.values()][0].stage, 'missing');
+  assert.equal([...h.frontmatters.values()][0].archived, true);
+});
+
+test('custom calendar schedule keys remain protected from reschedule actions', async () => {
+  const h = harness([event()]);
+  Object.assign(h.settings, { startProperty: 'beginsAt', calendarEndDateTimeProperty: 'endsAt' });
+  for (const key of ['beginsAt', 'endsAt']) {
+    await assert.rejects(
+      h.service.sync([{ ...calendar, rescheduleActions: [{ target: 'current', key, value: '2026-01-01' }] }], '', true, false),
+      /protected|reserved|cannot|forbidden/u,
+    );
+    assert.equal(h.mutationLog.length, 0);
+  }
+});
+
+test('reschedule actions cannot overwrite a GCM-configured kind-list key or legacy classification alias', async () => {
+  const h = harness([event()], {
+    gcmSettings: { nativeRecordKindPropertyKeys: {
+      'calendar-event': {
+        primary: { kindList: { key: 'recordKinds', value: 'user/calendar' } },
+        aliases: [{ scalar: { key: 'legacyKind', value: 'event' } }],
+      },
+    } },
+  });
+  for (const key of ['recordKinds', 'legacyKind']) {
+    await assert.rejects(
+      h.service.sync([{ ...calendar, rescheduleActions: [{ target: 'current', key, value: 'wrong' }] }], '', true, false),
+      /protected|reserved|cannot|forbidden/u,
+    );
+    assert.equal(h.mutationLog.length, 0);
+  }
+});
+
+test('reschedule status action follows the configured status property', async () => {
+  const initial = event();
+  const h = harness([initial]);
+  h.settings.statusKey = 'stage';
+  const configured = { ...calendar, rescheduleActions: [{ target: 'current', key: 'status', value: 'moved' }] };
+  await h.service.sync([configured], '', true, false);
+  const moved = event({ startDate: futureDate(3) });
+  h.setEvents([moved]);
+  await h.service.sync([configured], '', true, false);
+  const [record] = h.frontmatters.values();
+  assert.equal(record.stage, 'moved');
+  assert.equal(Object.hasOwn(record, 'status'), false);
+});
+
 test('native calendar template contributes public kind, defaults, body and variables but never source identity', async () => {
   const incoming = event({ title: 'Weekly 1:1' });
   const templatePath = 'Templates/Meeting.md';
@@ -2341,6 +2422,8 @@ test('unsafe or missing native calendar templates abort before any create or mig
     { source: '---\nkind: [broken\n---\n', expected: /frontmatter is invalid/u },
     { source: '---\nkind: event\n', expected: /unclosed frontmatter/u },
     { source: '---\nkind: true\n---\n', expected: /kind must be text/u },
+    { source: '---\nkind: []\n---\n', expected: /kind must be text/u },
+    { source: '---\nkind: [event, null]\n---\n', expected: /kind must be text/u },
     { source: '---\nkind: event\nKind: task\n---\n', expected: /duplicate property/u },
     { source: '<% tp.date.now() %>', expected: /executable Templater/u },
     { source: 'Template content', prepareInstanceSource: () => null, expected: /GCM rejected/u },
@@ -2372,6 +2455,13 @@ test('calendar template setting remains reachable while legacy sync is paused', 
   assert.doesNotMatch(source, /\.setName\("Create as"\)/u);
   assert.match(source, /Quote variables in YAML values/u);
   assert.match(source, /Executable Templater commands are not supported/u);
+});
+
+test('event end datetime has its own confirmed field mapping beside the duration field', () => {
+  const source = readFileSync(new URL('../src/settings-tab.ts', import.meta.url), 'utf8');
+  assert.match(source, /key: 'endProperty', label: 'Duration Property'/u);
+  assert.match(source, /key: 'calendarEndDateTimeProperty', label: 'Calendar event end datetime'/u);
+  assert.match(source, /api\.changeKey\('tps-controller', fk\.key, value\)/u);
 });
 
 const preserveCalendar = { ...calendar, preserveNotesOnExternalReschedule: true };
