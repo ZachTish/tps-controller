@@ -1,6 +1,6 @@
 # TPS Controller
 
-## Pending configurable native calendar fields
+## 3.1.0 — Configurable native calendar fields
 
 Native external-calendar sync now uses the configured title, status, and start
 property names for note creation, reconciliation, cancellation, reschedule
@@ -21,9 +21,13 @@ classification aliases.
 
 Focused regressions cover custom field creation, unchanged repeat sync,
 cancellation/restoration, missing-event archive, protected reschedule keys,
-and list-valued template kinds. Full suite and separate build are run with
-`TPS_NO_DEPLOY=1` during integration; this candidate is not deployed or
-released independently.
+and list-valued template kinds. The declared suite passed 615 checks with
+three existing skips. Minimum Obsidian remains 1.12.3. The separate final
+build deployed to the Test Vault; Hot Reload showed the editable event-end
+datetime field beside the independent duration field. Controller data.json
+remained unchanged. The test vault has no external feeds, so live feed
+reconciliation and physical iPhone behavior remain unverified. Production
+behavior remains unverified; hashes are in [3.1.0 release notes](release-notes/3.1.0.md).
 
 ## 3.0.0 — Whole-note calendar records and reminders
 
