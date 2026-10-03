@@ -2366,9 +2366,10 @@ test('native calendar refuses old GCM capabilities before injecting a fallback k
   assert.equal(h.mutationLog.length, 0);
 });
 
-test('native calendar template setting remains reachable with a saved legacy task mode', () => {
+test('calendar template setting remains reachable while legacy sync is paused', () => {
   const source = readFileSync(new URL('../src/settings-tab.ts', import.meta.url), 'utf8');
-  assert.match(source, /if \(this\.plugin\.settings\.calendarStorageMode === "native-records" \|\| \(calendar\.autoCreateMode \|\| "note"\) === "note"\) \{\s*new Setting\(acContent\)\s*\.setName\("Template"\)/u);
+  assert.match(source, /new Setting\(acContent\)\s*\.setName\("Template"\)/u);
+  assert.doesNotMatch(source, /\.setName\("Create as"\)/u);
   assert.match(source, /Quote variables in YAML values/u);
   assert.match(source, /Executable Templater commands are not supported/u);
 });

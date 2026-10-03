@@ -169,6 +169,7 @@ test("external calendar task-note strategy normalization preserves supported ser
     autoCreateTaskNoteFolder: "External Events/Linked",
   }];
   normalizeExternalCalendarsInPlace(calendars, (path) => path);
+  assert.equal(calendars[0].autoCreateMode, "note", "old task output must never remain active after settings load");
   assert.equal(calendars[0].autoCreateTaskNoteStrategy, "series");
   assert.equal(calendars[0].autoCreateTaskNoteFolder, "External Events/Linked");
 });
@@ -428,13 +429,17 @@ test("Controller settings use one routed page with an explicit six-destination h
   assert.match(calendarEditorSource, /configureBtn\.setAttr\('aria-controls', editorId\)/);
   assert.match(calendarEditorSource, /configureBtn\.dataset\.calendarAction = 'configure'/);
   assert.match(calendarEditorSource, /editor\.id = editorId/);
-  assert.match(calendarEditorSource, /drop\.selectEl\.dataset\.calendarAction = 'create-mode'/);
+  assert.doesNotMatch(calendarEditorSource, /dataset\.calendarAction = 'create-mode'/);
   assert.match(calendarEditorSource, /focusCalendarControl\(container, calendarId, 'configure'\)/);
-  assert.match(calendarEditorSource, /save\(true, \{ calendarId, action: 'create-mode' \}\)/);
+  assert.doesNotMatch(calendarEditorSource, /\.setName\("Create as"\)/);
+  assert.doesNotMatch(displaySource, /\.setName\('Calendar storage'\)/);
+  assert.doesNotMatch(settingsTabSource, /\.setName\('Inline task reminders'\)/);
+  assert.doesNotMatch(settingsTabSource, /\.setName\('Ignore Checkbox States'\)/);
+  assert.doesNotMatch(settingsTabSource, /\.setName\('Required Checkbox States'\)/);
   assert.match(calendarEditorSource, /nextCalendarId[\s\S]*focusCalendarControl\(container, nextCalendarId, 'configure'\)/);
-  assert.match(calendarEditorSource, /if \(\(calendar\.autoCreateMode \|\| "note"\) === "task"\)/);
-  assert.match(calendarEditorSource, /\} else \{\s*new Setting\(acContent\)\s*\.setName\("Type Folder"\)/);
-  assert.match(calendarEditorSource, /if \(this\.plugin\.settings\.calendarStorageMode === "native-records" \|\| \(calendar\.autoCreateMode \|\| "note"\) === "note"\) \{\s*new Setting\(acContent\)\s*\.setName\("Template"\)/);
+  assert.doesNotMatch(calendarEditorSource, /\.setName\("Task destination"\)/);
+  assert.match(calendarEditorSource, /new Setting\(acContent\)\s*\.setName\("Type Folder"\)/);
+  assert.match(calendarEditorSource, /new Setting\(acContent\)\s*\.setName\("Template"\)/);
 
   assert.ok(
     reminderPageSource.indexOf(".setName('Rule actions')") < reminderPageSource.indexOf("this.renderReminderRules(rulesContainer)"),
@@ -668,11 +673,12 @@ test("controller logging records settings causes and concise runtime outcomes", 
   assert.match(mainSource, /logger\.flow\("ParentChildMaintenance", "candidates:resolved"/);
 });
 
-test("calendar sync and auto-create logging records causes and resulting counts", () => {
+test("calendar sync logs native outcomes and a paused legacy setting", () => {
   assert.match(calendarAutomationSource, /logger\.flow\("CalendarSync", "readiness"/);
   assert.match(calendarAutomationSource, /logger\.flow\("CalendarSync", "calendars:resolved"/);
-  assert.match(calendarAutomationSource, /logger\.flow\("CalendarSync", "scan-roots:resolved"/);
-  assert.match(calendarAutomationSource, /logger\.flow\("CalendarSync", "auto-create-configs"/);
+  assert.match(calendarAutomationSource, /logger\.flowWarn\("CalendarSync", "skip:legacy-mode-paused"/);
+  assert.match(calendarAutomationSource, /storage: "native-records"/);
+  assert.doesNotMatch(calendarAutomationSource, /checkAndCreateMeetingNotes\(/);
   assert.match(autoCreateSource, /logger\.flow\("AutoCreate", "sync:start"/);
   assert.match(autoCreateSource, /logger\.flow\("AutoCreate", "fetch-events:result"/);
   assert.match(autoCreateSource, /logger\.flow\("AutoCreate", "vault-index:result"/);
@@ -691,12 +697,13 @@ test("notification and overdue action logging records scan and mutation routes",
   assert.match(overdueServiceSource, /logger\.flow\("NotificationView", "open:start"/);
   assert.match(overdueServiceSource, /logger\.flow\("OverdueItems", "scan:done"/);
   assert.match(overdueServiceSource, /logger\.flow\("OverdueAction", "status:set-start"/);
-  assert.match(overdueServiceSource, /route: "task-line"/);
+  assert.doesNotMatch(overdueServiceSource, /route: "task-line"/);
   assert.match(overdueServiceSource, /route: "gcm-set-status"/);
   assert.match(overdueServiceSource, /logger\.flow\("OverdueAction", "snooze:done"/);
   assert.match(overdueServiceSource, /logger\.flow\("OverdueAction", "resolve-reminder:done"/);
-  assert.match(overdueServiceSource, /logger\.flow\("OverdueAction", "task-line:update-done"/);
-  assert.match(overdueServiceSource, /logger\.flow\("OverdueAction", "move-task:done"/);
+  assert.match(overdueServiceSource, /logger\.flowWarn\("OverdueAction", "task-line:status-disabled"/);
+  assert.match(overdueServiceSource, /logger\.flowWarn\("OverdueAction", "task-line:snooze-disabled"/);
+  assert.match(overdueServiceSource, /logger\.flowWarn\("OverdueAction", "task-line:resolve-disabled"/);
   assert.match(overdueServiceSource, /logger\.flow\("OverdueAction", "open-file:route"/);
 });
 

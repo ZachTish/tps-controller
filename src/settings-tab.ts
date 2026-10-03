@@ -34,14 +34,6 @@ const CONTROLLER_SETTINGS_DESTINATIONS: Array<{
     { id: 'advanced', label: 'Advanced', description: 'Field names and troubleshooting.' },
 ];
 
-const normalizeTaskTargetNotePath = (value: string): string => {
-    const normalized = normalizePath(String(value || "")
-        .trim()
-        .replace(/^\[\[|\]\]$/g, "")
-        .replace(/^\/+/, ""));
-    if (!normalized || normalized === "." || normalized === ".md" || normalized.endsWith("/.md")) return "";
-    return normalized.toLowerCase().endsWith(".md") ? normalized : `${normalized}.md`;
-};
 const createSettingsSection = (
     parent: HTMLElement,
     title: string,
@@ -226,24 +218,20 @@ export class TPSControllerSettingTab extends PluginSettingTab {
         this.renderPageHeading(
             containerEl,
             'Calendar rules',
-            'Connect external feeds, choose what each feed creates, and control global sync safety.'
+            'Connect external feeds, configure event notes, and control global sync safety.'
         );
-        const architectureSection = createSettingsSection(
-            containerEl,
-            'Data architecture',
-            'Legacy vaults keep their existing note/task synchronization. Native mode writes one ordinary Markdown record per calendar occurrence.',
-        );
-        new Setting(architectureSection)
-            .setName('Calendar storage')
-            .setDesc('Native TPS records requires GCM native-record mode. Syncs event notes with optional history for external reschedules. Does not write Daily Note task lines.')
-            .addDropdown((dropdown) => dropdown
-                .addOption('legacy', 'Legacy notes and inline tasks')
-                .addOption('native-records', 'Native TPS event records')
-                .setValue(this.plugin.settings.calendarStorageMode)
-                .onChange(async (value) => {
-                    this.plugin.settings.calendarStorageMode = value === 'native-records' ? 'native-records' : 'legacy';
-                    await this.plugin.saveSettings();
-                }));
+        if (this.plugin.settings.calendarStorageMode === 'legacy') {
+            new Setting(containerEl)
+                .setName('Calendar sync paused')
+                .setDesc('This vault saved the former inline calendar mode. Existing items are unchanged. Review them before enabling whole-note event sync, which may create event notes for unmatched feed occurrences.')
+                .addButton(button => button
+                    .setButtonText('Use whole-note events')
+                    .onClick(async () => {
+                        this.plugin.settings.calendarStorageMode = 'native-records';
+                        await this.plugin.saveSettings();
+                        this.display();
+                    }));
+        }
         const extCalSection = createSettingsSection(
             containerEl,
             'External calendar feeds',
@@ -267,8 +255,6 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                             enabled: true,
                             autoCreateEnabled: true,
                             autoCreateMode: "note",
-                            autoCreateTaskDestination: "daily-note",
-                            autoCreateTaskTargetPath: "",
                             autoCreateTypeFolder: "",
                             autoCreateFolder: "",
                             autoCreateTemplate: "",
@@ -283,6 +269,10 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             .addButton(btn => btn
                 .setButtonText('Sync Now')
                 .onClick(async () => {
+                    if (this.plugin.settings.calendarStorageMode === 'legacy') {
+                        new Notice('Calendar sync is paused. Review existing inline events, then enable whole-note events above.');
+                        return;
+                    }
                     btn.setButtonText('Syncing...');
                     btn.setDisabled(true);
                     try {
@@ -461,7 +451,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
         new Setting(calSection)
             .setName('No-Loss Sync Mode')
-            .setDesc('Prevents inferred deletes from remote absence. Native event notes stay unchanged; legacy notes are quarantined for review. Explicit cancellations still update status.')
+            .setDesc('Keeps event notes unchanged when a feed omits an occurrence. Explicit cancellations still update status.')
             .addToggle(toggle => toggle
                 .setValue(this.plugin.settings.noLossSyncMode ?? true)
                 .onChange(async (value) => {
@@ -471,7 +461,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
         new Setting(calSection)
             .setName('On Event Deletion')
-            .setDesc('What to do when an external event is absent from the feed and No-Loss mode is off. In No-Loss mode, native notes stay unchanged and legacy "Delete note" is archive-safe.')
+            .setDesc('What to do when an event is absent from the feed and No-Loss mode is off. Native records retain an archive marker even with the saved Delete note policy.')
             .addDropdown(drop => drop
                 .addOption('nothing', 'Do nothing')
                 .addOption('archive', 'Move to archive folder')
@@ -765,7 +755,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
     private focusCalendarControl(
         container: HTMLElement,
         calendarId: string,
-        action: 'configure' | 'create-mode'
+        action: 'configure'
     ): void {
         const card = Array.from(container.querySelectorAll<HTMLElement>('.tps-calendar-feed-card'))
             .find((element) => element.dataset.calendarId === calendarId);
@@ -876,21 +866,6 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                         this.redisplayPreservingScroll('[data-tps-settings-focus="enable-reminders"]');
                     });
             });
-
-        new Setting(rulesSection)
-            .setName('Inline task reminders')
-            .setDesc('Follow GCM uses full notes in atomic-note mode, otherwise explicitly scheduled tasks. A date on the containing note does not count.')
-            .addDropdown(dropdown => dropdown
-                .addOption('gcm', 'Follow GCM architecture')
-                .addOption('none', 'Full notes only')
-                .addOption('scheduled', 'Notes and explicitly scheduled tasks')
-                .addOption('all', 'Notes and all inline tasks')
-                .setValue(this.plugin.settings.inlineTaskReminders || 'gcm')
-                .onChange(async value => {
-                    this.plugin.settings.inlineTaskReminders = value as 'gcm' | 'none' | 'scheduled' | 'all';
-                    await this.plugin.saveSettings();
-                    this.plugin.refreshReminderPolicy();
-                }));
 
         let rulesContainer: HTMLElement | null = null;
         let presetSummary: HTMLElement | null = null;
@@ -1115,24 +1090,12 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
         new Setting(ignoreContent)
             .setName('Ignore Statuses')
-            .setDesc('Comma-separated frontmatter or semantic task status values to ignore.')
+            .setDesc('Comma-separated note status values to ignore.')
             .addText(text => text
                 .setPlaceholder('complete, wont-do')
                 .setValue((this.plugin.settings.globalIgnoreStatuses || []).join(', '))
                 .onChange(async (value) => {
                     this.plugin.settings.globalIgnoreStatuses = value.split(',').map(s => s.trim()).filter(Boolean);
-                    await this.plugin.saveSettings();
-                    this.plugin.refreshReminderPolicy();
-                }));
-
-        new Setting(ignoreContent)
-            .setName('Ignore Checkbox States')
-            .setDesc('Comma-separated raw Markdown checkbox markers to ignore. Use blank/open/todo for unchecked tasks, or markers like x, -, /, ?.')
-            .addText(text => text
-                .setPlaceholder('x, -')
-                .setValue((this.plugin.settings.globalIgnoreCheckboxStates || []).join(', '))
-                .onChange(async (value) => {
-                    this.plugin.settings.globalIgnoreCheckboxStates = value.split(',').map(s => s.trim()).filter(Boolean);
                     await this.plugin.saveSettings();
                     this.plugin.refreshReminderPolicy();
                 }));
@@ -1208,9 +1171,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             ignorePaths: [],
             ignoreTags: [],
             ignoreStatuses: [],
-            ignoreCheckboxStates: [],
             requiredStatuses: [],
-            requiredCheckboxStates: [],
             allDayFilter: 'any',
             includeUnmatchedExternalEvents: false,
             sourceTypes: ['file'],
@@ -1231,9 +1192,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             ignorePaths: [],
             ignoreTags: [],
             ignoreStatuses: [],
-            ignoreCheckboxStates: [],
             requiredStatuses: [],
-            requiredCheckboxStates: [],
             requiredPaths: [],
             title: 'Reminder: {filename}',
             body: 'At {time} ({remaining})',
@@ -1395,10 +1354,8 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     rem.label,
                     rem.property,
                     (rem.requiredStatuses || []).join(' '),
-                    (rem.requiredCheckboxStates || []).join(' '),
                     (rem.requiredPaths || []).join(' '),
                     (rem.ignoreStatuses || []).join(' '),
-                    (rem.ignoreCheckboxStates || []).join(' '),
                     (rem.ignoreTags || []).join(' '),
                     (rem.stopConditions || []).join(' '),
                     `rule ${index + 1}`
@@ -1468,9 +1425,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     ignorePaths: [...(rem.ignorePaths || [])],
                     ignoreTags: [...(rem.ignoreTags || [])],
                     ignoreStatuses: [...(rem.ignoreStatuses || [])],
-                    ignoreCheckboxStates: [...(rem.ignoreCheckboxStates || [])],
                     requiredStatuses: [...(rem.requiredStatuses || [])],
-                    requiredCheckboxStates: [...(rem.requiredCheckboxStates || [])],
                     requiredPaths: [...(rem.requiredPaths || [])],
                     sourceTypes: [...(rem.sourceTypes || [])],
                 };
@@ -1754,23 +1709,11 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
             new Setting(filteringGroup)
                 .setName('Required Statuses')
-                .setDesc('Only trigger for notes/tasks with one of these semantic status values. Comma-separated (e.g. scheduled, in-progress).')
+                .setDesc('Only trigger for notes with one of these status values. Comma-separated (e.g. in-progress, complete).')
                 .addText(text => text
                     .setValue((rem.requiredStatuses || []).join(', '))
                     .onChange(async (value) => {
                         rem.requiredStatuses = value.split(',').map(s => s.trim()).filter(Boolean);
-                        await this.plugin.saveSettings();
-                        descSpan.textContent = this.buildRuleDesc(rem);
-                    }));
-
-            new Setting(filteringGroup)
-                .setName('Required Checkbox States')
-                .setDesc('Only trigger for task rows with one of these raw checkbox markers. Use blank/open/todo for unchecked tasks, or markers like x, -, /, ?.')
-                .addText(text => text
-                    .setPlaceholder('blank, /')
-                    .setValue((rem.requiredCheckboxStates || []).join(', '))
-                    .onChange(async (value) => {
-                        rem.requiredCheckboxStates = value.split(',').map(s => s.trim()).filter(Boolean);
                         await this.plugin.saveSettings();
                         descSpan.textContent = this.buildRuleDesc(rem);
                     }));
@@ -1810,23 +1753,11 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
             new Setting(filteringGroup)
                 .setName('Ignore Statuses')
-                .setDesc('Skip notes/tasks with these semantic status values. Comma-separated.')
+                .setDesc('Skip notes with these status values. Comma-separated.')
                 .addText(text => text
                     .setValue((rem.ignoreStatuses || []).join(', '))
                     .onChange(async (value) => {
                         rem.ignoreStatuses = value.split(',').map(s => s.trim()).filter(Boolean);
-                        await this.plugin.saveSettings();
-                        this.plugin.refreshReminderPolicy();
-                    }));
-
-            new Setting(filteringGroup)
-                .setName('Ignore Checkbox States')
-                .setDesc('Skip task rows with these raw checkbox markers. Use blank/open/todo for unchecked tasks, or markers like x, -, /, ?.')
-                .addText(text => text
-                    .setPlaceholder('x, -')
-                    .setValue((rem.ignoreCheckboxStates || []).join(', '))
-                    .onChange(async (value) => {
-                        rem.ignoreCheckboxStates = value.split(',').map(s => s.trim()).filter(Boolean);
                         await this.plugin.saveSettings();
                         this.plugin.refreshReminderPolicy();
                     }));
@@ -1853,7 +1784,6 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             parts.push(`${rem.offsetMinutes >= 0 ? '+' : ''}${rem.offsetMinutes}min`);
         }
         if (rem.requiredStatuses?.length) parts.push(rem.requiredStatuses.join('/'));
-        if (rem.requiredCheckboxStates?.length) parts.push(`checkbox ${rem.requiredCheckboxStates.join('/')}`);
         if (rem.triggerAtEnd) parts.push('at end');
         if (rem.mode && rem.mode !== 'task') parts.push(rem.mode);
         if (rem.allDayFilter === 'true') parts.push('all-day only');
@@ -1882,7 +1812,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
         const save = async (
             rerender = false,
-            focus?: { calendarId: string; action: 'configure' | 'create-mode' }
+            focus?: { calendarId: string; action: 'configure' }
         ) => {
             await this.plugin.saveSettings();
             if (rerender) {
@@ -2029,102 +1959,6 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             renderCalendarRescheduleActions(acContent, calendar, () => save());
 
             new Setting(acContent)
-                .setName("Create as")
-                .setDesc("Choose whether synced external events become event notes or inline task items.")
-                .addDropdown(drop => {
-                    drop.selectEl.dataset.calendarAction = 'create-mode';
-                    return drop
-                        .addOption("note", "Note")
-                        .addOption("task", "Task item")
-                        .setValue(calendar.autoCreateMode || "note")
-                        .onChange(async (val: "note" | "task") => {
-                            calendar.autoCreateMode = val;
-                            await save(true, { calendarId, action: 'create-mode' });
-                        });
-                });
-
-            if ((calendar.autoCreateMode || "note") === "task") {
-                new Setting(acContent)
-                    .setName("Task destination")
-                    .setDesc("Daily note creates one inline task on the scheduled day. Single task note appends all synced events into one note.")
-                    .addDropdown(drop => drop
-                        .addOption("daily-note", "Daily note")
-                        .addOption("event-note", "Single task note")
-                    .setValue(calendar.autoCreateTaskDestination || "daily-note")
-                    .onChange(async (val: "daily-note" | "event-note") => {
-                        calendar.autoCreateTaskDestination = val;
-                        summary.textContent = this.buildCalendarOutputSummary(calendar);
-                        await save();
-                    }));
-
-                new Setting(acContent)
-                    .setName("Task target note")
-                    .setDesc("Optional note path for synced task items. Leave blank for daily-note task storage.")
-                    .addText(t => {
-                        const commit = async () => {
-                            const normalized = normalizeTaskTargetNotePath(t.getValue());
-                            if ((calendar.autoCreateTaskTargetPath || "") === normalized) return;
-                            calendar.autoCreateTaskTargetPath = normalized;
-                            t.setValue(normalized);
-                            summary.textContent = this.buildCalendarOutputSummary(calendar);
-                            await save();
-                        };
-                        t.setValue(calendar.autoCreateTaskTargetPath || "")
-                            .setPlaceholder("Areas/Calendar.md")
-                            .onChange(() => {
-                                // Keep typing local. Saving on each keystroke rebuilds this settings
-                                // panel and can persist only the first character on mobile/desktop.
-                            });
-                        t.inputEl.addEventListener("blur", () => {
-                            void commit();
-                        });
-                        t.inputEl.addEventListener("keydown", (event) => {
-                            if (event.key !== "Enter") return;
-                            event.preventDefault();
-                            t.inputEl.blur();
-                            void commit();
-                        });
-                    });
-
-                new Setting(acContent)
-                    .setName("Linked event note")
-                    .setDesc("Choose whether recurring events link to one shared note or a different note for each scheduled day.")
-                    .addDropdown(drop => drop
-                        .addOption("occurrence-day", "One note per scheduled day")
-                        .addOption("series", "One note for the recurring series")
-                        .setValue(calendar.autoCreateTaskNoteStrategy || "occurrence-day")
-                        .onChange(async (val: "occurrence-day" | "series") => {
-                            calendar.autoCreateTaskNoteStrategy = val;
-                            summary.textContent = this.buildCalendarOutputSummary(calendar);
-                            await save();
-                        }));
-
-                new Setting(acContent)
-                    .setName("Linked note folder")
-                    .setDesc("Folder used when a linked event note is created by opening its task title.")
-                    .addText(t => {
-                        const commit = async () => {
-                            const normalized = normalizePath(t.getValue().trim().replace(/^\/+|\/+$/g, "")) || "Calendar Events";
-                            if ((calendar.autoCreateTaskNoteFolder || "Calendar Events") === normalized) return;
-                            calendar.autoCreateTaskNoteFolder = normalized;
-                            t.setValue(normalized);
-                            await save();
-                        };
-                        t.setValue(calendar.autoCreateTaskNoteFolder || "Calendar Events")
-                            .setPlaceholder("Calendar Events")
-                            .onChange(() => {
-                                // Commit full paths on blur/Enter so settings rerenders cannot truncate typing.
-                            });
-                        t.inputEl.addEventListener("blur", () => void commit());
-                        t.inputEl.addEventListener("keydown", (event) => {
-                            if (event.key !== "Enter") return;
-                            event.preventDefault();
-                            t.inputEl.blur();
-                            void commit();
-                        });
-                    });
-            } else {
-                new Setting(acContent)
                 .setName("Type Folder")
                 .setDesc("High-level folder categorization (optional).")
                 .addText(t => t
@@ -2147,22 +1981,16 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                         summary.textContent = this.buildCalendarOutputSummary(calendar);
                         await save();
                     }));
-            }
-
-            if (this.plugin.settings.calendarStorageMode === "native-records" || (calendar.autoCreateMode || "note") === "note") {
-                new Setting(acContent)
-                    .setName("Template")
-                    .setDesc(this.plugin.settings.calendarStorageMode === "native-records"
-                        ? "Defaults and body for new event notes; kind is added only if this template supplies it. Supports static Markdown/YAML and {{title}}, {{start}}, {{end}} variables. Quote variables in YAML values. Executable Templater commands are not supported; existing notes are not re-templated."
-                        : "Path to template file")
-                    .addText(t => t
-                        .setValue(calendar.autoCreateTemplate || "")
-                        .setPlaceholder("Templates/Meeting.md")
-                        .onChange(async (val) => {
-                            calendar.autoCreateTemplate = val;
-                            await save();
-                        }));
-            }
+            new Setting(acContent)
+                .setName("Template")
+                .setDesc("Defaults and body for new event notes; kind is added only if this template supplies it. Supports static Markdown/YAML and {{title}}, {{start}}, {{end}} variables. Quote variables in YAML values. Executable Templater commands are not supported; existing notes are not re-templated.")
+                .addText(t => t
+                    .setValue(calendar.autoCreateTemplate || "")
+                    .setPlaceholder("Templates/Meeting.md")
+                    .onChange(async (val) => {
+                        calendar.autoCreateTemplate = val;
+                        await save();
+                    }));
         });
     }
 
@@ -2180,15 +2008,6 @@ export class TPSControllerSettingTab extends PluginSettingTab {
     private buildCalendarOutputSummary(calendar: ExternalCalendarConfig): string {
         const state = calendar.enabled === false ? 'Disabled' : 'Enabled';
         if (calendar.autoCreateEnabled === false) return `${state} · sync only`;
-        if ((calendar.autoCreateMode || 'note') === 'task') {
-            const destination = (calendar.autoCreateTaskDestination || 'daily-note') === 'daily-note'
-                ? 'daily note'
-                : calendar.autoCreateTaskTargetPath || 'single task note';
-            const noteStrategy = (calendar.autoCreateTaskNoteStrategy || 'occurrence-day') === 'series'
-                ? 'one series note'
-                : 'one note per day';
-            return `${state} · Task → ${destination} · ${noteStrategy}`;
-        }
         const destination = calendar.autoCreateFolder || calendar.autoCreateTypeFolder || 'default note folder';
         return `${state} · Note → ${destination}`;
     }

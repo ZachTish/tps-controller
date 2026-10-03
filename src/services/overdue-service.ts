@@ -1,4 +1,4 @@
-import { App, FuzzySuggestModal, MarkdownView, Notice, TFile, WorkspaceLeaf, moment } from "obsidian";
+import { App, MarkdownView, Notice, TFile, WorkspaceLeaf, moment } from "obsidian";
 import { NOTIFICATION_VIEW_TYPE } from "../views/notification-view";
 import * as logger from "../logger";
 import type { TPSControllerSettings, OverdueItem } from "../types";
@@ -20,7 +20,7 @@ import {
     shouldSkipStaleOneShotReminder,
 } from "./reminder-delivery-window";
 import { TPS_EVENTS, TPS_LEGACY_EVENTS } from "../tps-contracts";
-import { emitFilesUpdated, moveTaskViaGcm } from "../tps-gcm-api";
+import { emitFilesUpdated } from "../tps-gcm-api";
 
 /**
  * Handles overdue reminder detection, the notification sidebar view,
@@ -492,6 +492,10 @@ export class OverdueService {
     }
 
     async setItemStatus(item: OverdueItem, status: string | null): Promise<void> {
+        if (item.targetKind === "task") {
+            logger.flowWarn("OverdueAction", "task-line:status-disabled", { path: item.file.path });
+            return;
+        }
         const statusKey = this.getSettings().statusKey || "status";
         const isStatusClear = status == null || String(status).trim() === "";
         const resolvedStatus = isStatusClear ? null : status;
@@ -501,17 +505,6 @@ export class OverdueService {
             taskLine: typeof item.taskLine === "number" ? item.taskLine : -1,
             status: resolvedStatus || "",
         });
-        if (item.targetKind === "task" && typeof item.taskLine === "number") {
-            const changed = await this.updateTaskLineProperties(item, this.buildTaskStatusPatch(resolvedStatus), "status");
-            logger.flow("OverdueAction", "status:set-done", {
-                route: "task-line",
-                changed,
-                path: item.file.path,
-                status: resolvedStatus || "",
-            });
-            return;
-        }
-
         const bulkEditService = this.getGcmBulkEditService();
         if (bulkEditService) {
             if (isStatusClear) {
@@ -564,25 +557,15 @@ export class OverdueService {
     }
 
     async snoozeItem(item: OverdueItem, minutes: number): Promise<void> {
+        if (item.targetKind === "task") {
+            logger.flowWarn("OverdueAction", "task-line:snooze-disabled", { path: item.file.path });
+            return;
+        }
         logger.flow("OverdueAction", "snooze:start", {
             path: item.file.path,
             targetKind: item.targetKind || "note",
             minutes,
         });
-        if (item.targetKind === "task" && typeof item.taskLine === "number") {
-            const snoozeKey = this.getSettings().snoozeProperty || "reminderSnooze";
-            const snoozeTimeStr = minutes > 0
-                ? moment().add(minutes, "minutes").format("YYYY-MM-DD HH:mm")
-                : "";
-            const changed = await this.updateTaskLineProperties(item, { [snoozeKey]: snoozeTimeStr || null }, "snooze");
-            logger.flow("OverdueAction", "snooze:done", {
-                route: "task-line",
-                changed,
-                path: item.file.path,
-                minutes,
-            });
-            return;
-        }
         await this.snoozeFile(item.file, minutes);
         logger.flow("OverdueAction", "snooze:done", {
             route: "frontmatter",
@@ -596,25 +579,13 @@ export class OverdueService {
     }
 
     async completeItemFromNativeNotification(item: OverdueItem): Promise<boolean> {
-        if (item.targetKind === "task" && typeof item.taskLine === "number") {
-            return this.updateTaskLineProperties(item, this.buildTaskStatusPatch("complete"), "notification-complete");
-        }
+        if (item.targetKind === "task") return false;
         await this.setItemStatus(item, "complete");
         return true;
     }
 
     async snoozeItemFromNativeNotification(item: OverdueItem, minutes: number): Promise<boolean> {
-        if (item.targetKind === "task" && typeof item.taskLine === "number") {
-            const snoozeKey = this.getSettings().snoozeProperty || "reminderSnooze";
-            const snoozeTime = minutes > 0
-                ? moment().add(minutes, "minutes").format("YYYY-MM-DD HH:mm")
-                : null;
-            return this.updateTaskLineProperties(
-                item,
-                { [snoozeKey]: snoozeTime },
-                "notification-snooze",
-            );
-        }
+        if (item.targetKind === "task") return false;
         await this.snoozeFile(item.file, minutes);
         return true;
     }
@@ -624,6 +595,10 @@ export class OverdueService {
     }
 
     async resolveTaskReminder(item: OverdueItem): Promise<boolean> {
+        if (item.targetKind === "task") {
+            logger.flowWarn("OverdueAction", "task-line:resolve-disabled", { path: item.file?.path || "" });
+            return false;
+        }
         const property = item.reminderProperty || item.reminder.property || this.getSettings().startProperty || "scheduled";
         logger.flow("OverdueAction", "resolve-reminder:start", {
             path: item.file?.path,
@@ -633,44 +608,14 @@ export class OverdueService {
             reminderPropertySource: item.reminderPropertySource,
             property,
         });
-        if (item.targetKind !== "task" || typeof item.taskLine !== "number") {
-            await this.clearFileReminderProperty(item.file, property);
-            new Notice(`Cleared ${property}.`);
-            logger.flow("OverdueAction", "resolve-reminder:done", {
-                route: "note-clear",
-                path: item.file.path,
-                property,
-            });
-            return true;
-        }
-
-        if (item.reminderPropertySource === "task") {
-            const changed = await this.updateTaskLineProperties(item, { [property]: null }, "clear-task-reminder");
-            if (changed) new Notice(`Cleared ${property} from task.`);
-            logger.flow("OverdueAction", "resolve-reminder:done", {
-                route: "task-clear",
-                path: item.file.path,
-                property,
-                changed,
-            });
-            return changed;
-        }
-
-        const targetFile = await this.promptTargetFile(item.file.path);
-        if (!targetFile) {
-            logger.flow("OverdueAction", "resolve-reminder:canceled", {
-                path: item.file?.path,
-                taskTitle: item.taskTitle,
-            });
-            return false;
-        }
-        logger.flow("OverdueAction", "resolve-reminder:target-selected", {
-            sourcePath: item.file?.path,
-            targetPath: targetFile.path,
-            taskLine: item.taskLine,
-            taskTitle: item.taskTitle,
+        await this.clearFileReminderProperty(item.file, property);
+        new Notice(`Cleared ${property}.`);
+        logger.flow("OverdueAction", "resolve-reminder:done", {
+            route: "note-clear",
+            path: item.file.path,
+            property,
         });
-        return this.moveTaskToFile(item, targetFile);
+        return true;
     }
 
     private async clearFileReminderProperty(file: TFile, property: string): Promise<void> {
@@ -681,230 +626,6 @@ export class OverdueService {
         });
         this.triggerFilesUpdated([file.path]);
         logger.flow("OverdueAction", "reminder-property:cleared", { path: file.path, property });
-    }
-
-    private buildTaskStatusPatch(status: string | null): Record<string, string | null> {
-        const now = (window as any).moment
-            ? (window as any).moment().format('YYYY-MM-DD HH:mm:ss')
-            : new Date().toISOString().replace('T', ' ').slice(0, 19);
-        const statusKey = this.getSettings().statusKey || "status";
-        const normalized = String(status || "").trim().toLowerCase();
-        const isDone = normalized === "complete" || normalized === "wont-do";
-        return {
-            [statusKey]: status,
-            completedDate: isDone ? now : null,
-        };
-    }
-
-    private async updateTaskLineProperties(item: OverdueItem, patch: Record<string, string | null>, reason = "patch"): Promise<boolean> {
-        if (typeof item.taskLine !== "number" || !Number.isFinite(item.taskLine)) {
-            logger.flowWarn("OverdueAction", "task-line:update-invalid-line", {
-                path: item.file?.path || "",
-                reason,
-                taskLine: item.taskLine,
-            });
-            return false;
-        }
-        const raw = await this.app.vault.cachedRead(item.file);
-        const lines = raw.split(/\r?\n/);
-        const originalLine = item.taskLine;
-        const resolvedIndex = this.findCurrentTaskLineIndex(lines, item);
-        if (resolvedIndex < 0 || resolvedIndex >= lines.length) {
-            logger.flowWarn("OverdueAction", "task-line:update-not-found", {
-                path: item.file?.path,
-                reason,
-                taskLine: item.taskLine,
-                taskTitle: item.taskTitle,
-                taskRawLine: item.taskRawLine,
-            });
-            new Notice("Could not find the task line to update.");
-            return false;
-        }
-        lines[resolvedIndex] = this.applyTaskCheckboxState(
-            this.applyInlinePropertyPatch(lines[resolvedIndex], patch),
-            patch[this.getSettings().statusKey || "status"] ?? patch.status ?? null,
-        );
-        await this.app.vault.modify(item.file, lines.join("\n"));
-        item.taskLine = resolvedIndex;
-        item.taskRawLine = lines[resolvedIndex];
-        this.triggerFilesUpdated([item.file.path]);
-        logger.flow("OverdueAction", "task-line:update-done", {
-            path: item.file.path,
-            reason,
-            originalLine,
-            resolvedLine: resolvedIndex,
-            patchKeys: Object.keys(patch).sort(),
-        });
-        return true;
-    }
-
-    private promptTargetFile(sourcePath: string): Promise<TFile | null> {
-        return new Promise((resolve) => {
-            new TargetFileSuggestModal(this.app, sourcePath, resolve).open();
-        });
-    }
-
-    private async moveTaskToFile(item: OverdueItem, targetFile: TFile): Promise<boolean> {
-        const context = {
-            sourcePath: item.file.path,
-            targetPath: targetFile?.path || "",
-            taskLine: item.taskLine,
-            taskTitle: item.taskTitle || "",
-        };
-        logger.flow("OverdueAction", "move-task:start", context);
-        if (!(targetFile instanceof TFile) || targetFile.extension?.toLowerCase() !== "md") {
-            new Notice("Choose a Markdown file.");
-            logger.flowWarn("OverdueAction", "move-task:invalid-target", context);
-            return false;
-        }
-        if (targetFile.path === item.file.path) {
-            new Notice("Choose a different note.");
-            logger.flowWarn("OverdueAction", "move-task:same-target", context);
-            return false;
-        }
-        if (typeof item.taskLine !== "number" || !Number.isFinite(item.taskLine)) {
-            new Notice("Could not resolve the task line to move.");
-            logger.flowWarn("OverdueAction", "move-task:invalid-source", context);
-            return false;
-        }
-
-        const attempt = await moveTaskViaGcm(
-            this.app,
-            {
-                path: item.file.path,
-                lineNumber: Math.max(0, Math.floor(item.taskLine)),
-                rawLine: item.taskRawLine,
-                title: item.taskTitle,
-            },
-            {
-                targetPath: targetFile.path,
-                sourcePolicy: "configured-daily-note",
-                resolution: "exact-or-identity",
-            },
-            {
-                kind: "user",
-                sourcePluginId: "tps-controller",
-                surface: "reminder-modal",
-            },
-        );
-        if (!attempt.available) {
-            new Notice("Update TPS Global Context Menu before moving reminder tasks.");
-            logger.flowWarn("OverdueAction", "move-task:gcm-unavailable", {
-                ...context,
-                requiredTaskApiVersion: 3,
-            });
-            return false;
-        }
-
-        const result = attempt.result;
-        if (!result?.ok || !result.changed) {
-            const detail = String(result?.error || "").trim();
-            new Notice(detail ? `Could not move task: ${detail}` : "Could not move the task.");
-            logger.flowWarn("OverdueAction", "move-task:gcm-rejected", {
-                ...context,
-                changed: result?.changed === true,
-                error: detail,
-            });
-            return false;
-        }
-
-        if (result.task) {
-            item.file = targetFile;
-            item.taskLine = result.task.lineNumber;
-            item.taskRawLine = result.task.rawLine;
-            item.taskTitle = result.task.title;
-            item.noteTitle = targetFile.basename;
-        }
-        new Notice(`Moved task to ${targetFile.basename}.`);
-        logger.flow("OverdueAction", "move-task:done", {
-            ...context,
-            route: "gcm-task-api-v3",
-            movedPath: result.task?.path || targetFile.path,
-            movedLine: result.task?.lineNumber ?? -1,
-        });
-        return true;
-    }
-
-
-    private findCurrentTaskLineIndex(lines: string[], item: OverdueItem): number {
-        const preferredIndex = typeof item.taskLine === "number" && Number.isFinite(item.taskLine)
-            ? Math.max(0, Math.floor(item.taskLine))
-            : -1;
-        if (preferredIndex >= 0 && this.isSameTaskLine(lines[preferredIndex] || "", item)) return preferredIndex;
-
-        const rawLine = String(item.taskRawLine || "");
-        if (rawLine) {
-            const exactIndex = lines.findIndex((line) => line === rawLine && this.isTaskLine(line || ""));
-            if (exactIndex >= 0) return exactIndex;
-        }
-
-        const normalizedTitle = this.normalizeTaskText(item.taskTitle || "");
-        if (!normalizedTitle) return -1;
-        return lines.findIndex((line) => this.isTaskLine(line || "") && this.normalizeTaskText(this.cleanTaskLineTitle(line || "")) === normalizedTitle);
-    }
-
-    private isSameTaskLine(line: string, item: OverdueItem): boolean {
-        if (!this.isTaskLine(line || "")) return false;
-        const rawLine = String(item.taskRawLine || "");
-        if (rawLine && line === rawLine) return true;
-        const normalizedTitle = this.normalizeTaskText(item.taskTitle || "");
-        return !!normalizedTitle && this.normalizeTaskText(this.cleanTaskLineTitle(line || "")) === normalizedTitle;
-    }
-
-
-    private isTaskLine(line: string): boolean {
-        return /^\s*(?:[-*+]|\d+[.)])\s+\[[^\]]?]\s+/.test(line);
-    }
-
-    private cleanTaskLineTitle(line: string): string {
-        return line
-            .replace(/^\s*(?:[-*+]|\d+[.)])\s+\[[^\]]?]\s+/, "")
-            .replace(/(?:<span\b[^>]*data-tps-inline-props="[^"]*"[^>]*>\s*<\/span>|<!--\s*tps-inline-props:[\s\S]*?\s*-->|\s*%%\s*tps-inline-props:[\s\S]*?\s*%%)/g, "")
-            .replace(/\[\^tps-inline:[^\]]+]/g, "")
-            .replace(/\[[^\[\]:]+::\s*[^\]]+\]/g, "")
-            .replace(/#[\w/-]+/g, "")
-            .replace(/\s+/g, " ")
-            .trim();
-    }
-
-    private normalizeTaskText(value: string): string {
-        return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
-    }
-
-    private applyTaskCheckboxState(line: string, status: string | null): string {
-        const normalized = String(status || "").trim().toLowerCase();
-        if (!normalized) return line;
-
-        const marker = normalized === "complete" || normalized === "completed" || normalized === "done"
-            ? "x"
-            : normalized === "wont-do" || normalized === "wont do" || normalized === "cancelled" || normalized === "canceled"
-                ? "-"
-                : normalized === "working" || normalized === "in-progress" || normalized === "inprogress"
-                    ? "/"
-                    : normalized === "holding" || normalized === "blocked" || normalized === "waiting"
-                        ? "?"
-                        : " ";
-
-        return line.replace(/^(\s*(?:[-*+]|\d+[.)])\s+\[)[^\]]?(\]\s+)/, `$1${marker}$2`);
-    }
-
-    private applyInlinePropertyPatch(line: string, patch: Record<string, string | null>): string {
-        let next = line;
-        for (const [key, rawValue] of Object.entries(patch)) {
-            const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-            const propRegex = new RegExp(`\\s*\\[${escapedKey}\\s*::\\s*[^\\]]*\\]`, "i");
-            if (rawValue == null || String(rawValue).trim() === "") {
-                next = next.replace(propRegex, "");
-                continue;
-            }
-            const token = `[${key}:: ${String(rawValue).trim()}]`;
-            if (propRegex.test(next)) {
-                next = next.replace(propRegex, ` ${token}`);
-            } else {
-                next = `${next.trimEnd()} ${token}`;
-            }
-        }
-        return next.replace(/\s+$/g, "");
     }
 
     async snoozeFile(file: TFile, minutes: number): Promise<void> {
@@ -1097,47 +818,5 @@ export class OverdueService {
 
     private triggerFilesUpdated(paths: string[]): void {
         emitFilesUpdated(this.app, paths, "tps-controller");
-    }
-}
-
-class TargetFileSuggestModal extends FuzzySuggestModal<TFile> {
-    private didChoose = false;
-    private didSettle = false;
-
-    constructor(
-        app: App,
-        private readonly excludedPath: string,
-        private readonly onChoose: (file: TFile | null) => void,
-    ) {
-        super(app);
-        this.setPlaceholder("Move task to note...");
-    }
-
-    getItems(): TFile[] {
-        return this.app.vault.getMarkdownFiles()
-            .filter((file) => file.path !== this.excludedPath)
-            .sort((a, b) => a.path.localeCompare(b.path));
-    }
-
-    getItemText(item: TFile): string {
-        return item.path;
-    }
-
-    onChooseItem(item: TFile): void {
-        this.didChoose = true;
-        this.settle(item);
-    }
-
-    onClose(): void {
-        super.onClose();
-        window.setTimeout(() => {
-            if (!this.didChoose) this.settle(null);
-        }, 0);
-    }
-
-    private settle(file: TFile | null): void {
-        if (this.didSettle) return;
-        this.didSettle = true;
-        this.onChoose(file);
     }
 }

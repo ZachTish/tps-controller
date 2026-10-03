@@ -259,7 +259,7 @@ export interface NativeCalendarCancellationState {
 export const DEFAULT_CONTROLLER_SETTINGS: TPSControllerSettings = {
     noteRules: emptyNoteRules(),
     // Calendar Sync
-    calendarStorageMode: "legacy",
+    calendarStorageMode: "native-records",
     syncIntervalMinutes: 5,
     noLossSyncMode: true,
     syncOnEventDelete: "nothing",
@@ -322,7 +322,7 @@ export const DEFAULT_CONTROLLER_SETTINGS: TPSControllerSettings = {
     // Notification Rules
     pollMinutes: 0.5,
     enableReminders: true,
-    inlineTaskReminders: "gcm",
+    inlineTaskReminders: "none",
     enableTimeTrackingHourlyReminders: true,
     reminders: [],
     alertState: {},
@@ -331,7 +331,7 @@ export const DEFAULT_CONTROLLER_SETTINGS: TPSControllerSettings = {
     globalIgnorePaths: ["System/"],
     globalIgnoreTags: ["archive", "template"],
     globalIgnoreStatuses: ["complete", "wont-do"],
-    globalIgnoreCheckboxStates: ["x", "-"],
+    globalIgnoreCheckboxStates: [],
     snoozeProperty: "reminderSnooze",
     notificationSortDirection: "asc",
     defaultAllDayBaseTime: "09:00",

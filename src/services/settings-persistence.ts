@@ -119,7 +119,7 @@ export function normalizeExternalCalendarsInPlace(
         delete calendar.autoCreateKanbanCancelledLane;
 
         calendar.preserveNotesOnExternalReschedule = calendar.preserveNotesOnExternalReschedule === true;
-        calendar.autoCreateMode = rawMode === "task" ? "task" : "note";
+        calendar.autoCreateMode = "note";
         calendar.autoCreateTaskDestination = calendar.autoCreateTaskDestination === "event-note"
             ? "event-note"
             : "daily-note";

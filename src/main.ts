@@ -225,7 +225,6 @@ export default class TPSControllerPlugin extends Plugin {
         this.calendarAutomation = new CalendarAutomationService(
             this.app,
             this.autoCreateService,
-            this.externalCalendarService,
             this.nativeCalendarRecordService,
             () => this.settings,
             () => this.getCalendarPlugin(),
@@ -600,7 +599,11 @@ export default class TPSControllerPlugin extends Plugin {
             ? loaded as Record<string, unknown>
             : {};
         const calendarIdMigrationChanged = countExternalCalendarsMissingId(data.externalCalendars) > 0;
-        const externalCalendarsBeforeIdMigration = calendarIdMigrationChanged
+        const inlineCalendarSettingChanged = Array.isArray(data.externalCalendars)
+            && data.externalCalendars.some((calendar) => calendar?.autoCreateMode === "task");
+        const inlineReminderSettingChanged = data.inlineTaskReminders !== undefined
+            && data.inlineTaskReminders !== "none";
+        const externalCalendarsBeforeNormalization = calendarIdMigrationChanged || inlineCalendarSettingChanged
             ? JSON.parse(JSON.stringify(data.externalCalendars || []))
             : null;
         this.settings = {
@@ -611,8 +614,11 @@ export default class TPSControllerPlugin extends Plugin {
         // Establish local intent before any migration mutates settings. Migration
         // saves can then merge only their changed fields into the latest data.
         this.persistedSettingsSnapshot = this.snapshotSettingsForDiff();
-        if (externalCalendarsBeforeIdMigration) {
-            this.persistedSettingsSnapshot.externalCalendars = externalCalendarsBeforeIdMigration;
+        if (externalCalendarsBeforeNormalization) {
+            this.persistedSettingsSnapshot.externalCalendars = externalCalendarsBeforeNormalization;
+        }
+        if (inlineReminderSettingChanged) {
+            this.persistedSettingsSnapshot.inlineTaskReminders = data.inlineTaskReminders;
         }
         const resolvedNotificationProvider = resolveNotificationDeliveryProvider(
             data.notificationDeliveryProvider,
@@ -674,7 +680,9 @@ export default class TPSControllerPlugin extends Plugin {
             || importedS3agleSettings
             || s3CredentialMigration.changed
             || notificationProviderMigrationChanged
-            || calendarIdMigrationChanged) {
+            || calendarIdMigrationChanged
+            || inlineCalendarSettingChanged
+            || inlineReminderSettingChanged) {
             try {
                 await this.saveSettings();
             } catch (error) {
@@ -725,9 +733,12 @@ export default class TPSControllerPlugin extends Plugin {
             delete (this.settings as any)[key];
         }
 
-        this.settings.calendarStorageMode = this.settings.calendarStorageMode === "native-records"
-            ? "native-records"
-            : "legacy";
+        // A saved legacy mode is retained as a paused migration marker. Calendar
+        // automation never enters its former line writer from this mode.
+        this.settings.calendarStorageMode = this.settings.calendarStorageMode === "legacy"
+            ? "legacy"
+            : "native-records";
+        this.settings.inlineTaskReminders = "none";
 
         this.settings.externalCalendars = normalizeExternalCalendarsInPlace(
             this.settings.externalCalendars,
@@ -739,9 +750,7 @@ export default class TPSControllerPlugin extends Plugin {
         );
 
         this.settings.reminders = normalizeReminderSettingsInPlace(this.settings.reminders || []);
-        if (!Array.isArray(this.settings.globalIgnoreCheckboxStates)) {
-            this.settings.globalIgnoreCheckboxStates = [...DEFAULT_CONTROLLER_SETTINGS.globalIgnoreCheckboxStates];
-        }
+        this.settings.globalIgnoreCheckboxStates = [];
     }
 
     async saveSettings() {

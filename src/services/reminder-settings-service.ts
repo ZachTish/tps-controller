@@ -2,8 +2,9 @@ import type { PropertyReminder } from "../types";
 
 export function normalizeReminderSettingsInPlace(reminders: PropertyReminder[]): PropertyReminder[] {
     for (const reminder of reminders) {
-        if (!Array.isArray(reminder.ignoreCheckboxStates)) reminder.ignoreCheckboxStates = [];
-        if (!Array.isArray(reminder.requiredCheckboxStates)) reminder.requiredCheckboxStates = [];
+        // Historical task-line filters cannot govern whole-note reminders.
+        reminder.ignoreCheckboxStates = [];
+        reminder.requiredCheckboxStates = [];
 
         if (!Array.isArray(reminder.sourceTypes)) continue;
         const sourceTypes = reminder.sourceTypes.filter((sourceType) =>

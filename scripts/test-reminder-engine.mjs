@@ -1718,7 +1718,7 @@ test('ignore-path edits invalidate every reminder run and refresh open notificat
   assert.match(mainSource, /runGeneration: number = this\.reminderRunGeneration/);
   assert.match(mainSource, /if \(runGeneration !== this\.reminderRunGeneration\) \{/);
   assert.doesNotMatch(mainSource, /runGeneration !== undefined && runGeneration !== this\.reminderRunGeneration/);
-  assert.equal((settingsTabSource.match(/this\.plugin\.refreshReminderPolicy\(\);/g) || []).length, 9);
+  assert.equal((settingsTabSource.match(/this\.plugin\.refreshReminderPolicy\(\);/g) || []).length, 6);
 });
 
 test('direct reminder delivery preserves ntfy ownership and adds role-agnostic local fallback', () => {
@@ -1821,6 +1821,11 @@ test('reminder settings normalization preserves live editor objects across rapid
   assert.deepEqual(reminders[0].sourceTypes, ['file']);
   assert.deepEqual(reminders[0].ignoreCheckboxStates, []);
   assert.deepEqual(reminders[0].requiredCheckboxStates, []);
+  editorRule.ignoreCheckboxStates = ['x'];
+  editorRule.requiredCheckboxStates = [' '];
+  normalizeReminderSettingsInPlace(reminders);
+  assert.deepEqual(editorRule.ignoreCheckboxStates, [], 'saved task-line filters cannot affect note reminders');
+  assert.deepEqual(editorRule.requiredCheckboxStates, [], 'saved task-line requirements cannot suppress note reminders');
   assert.match(mainSource, /normalizeReminderSettingsInPlace\(this\.settings\.reminders \|\| \[\]\)/);
   assert.doesNotMatch(mainSource, /const normalizedReminder = \{ \.\.\.reminder \}/);
 });
@@ -1931,8 +1936,8 @@ test('reminder candidate discovery normalizes own frontmatter keys without a per
 
   const result = await getReminderCandidateFiles(app, {}, [' scheduled ', 'dUe', '  ']);
 
-  assert.deepEqual(result.files.map(({ path }) => path), ['Alpha.md', 'Inline.md', 'Zeta.md']);
-  assert.deepEqual(cachedReads, ['Inherited.md', 'Inline.md', 'None.md']);
+  assert.deepEqual(result.files.map(({ path }) => path), ['Alpha.md', 'Zeta.md']);
+  assert.deepEqual(cachedReads, []);
 });
 
 for (const scenario of [
@@ -1940,10 +1945,10 @@ for (const scenario of [
   { name: 'GCM native records', mode: 'gcm', architecture: 'native-records', reads: 0 },
   { name: 'GCM unavailable', mode: 'gcm', reads: 0 },
   { name: 'GCM map fallback', mode: 'gcm', architecture: 'native-records', mapFallback: true, reads: 0 },
-  { name: 'GCM legacy', mode: 'gcm', architecture: 'legacy', reads: 1001 },
-  { name: 'explicit scheduled', mode: 'scheduled', reads: 1001 },
-  { name: 'explicit all', mode: 'all', reads: 1001 },
-  { name: 'missing mode preserves legacy behavior', reads: 1001 },
+  { name: 'GCM legacy', mode: 'gcm', architecture: 'legacy', reads: 0 },
+  { name: 'explicit scheduled', mode: 'scheduled', reads: 0 },
+  { name: 'explicit all', mode: 'all', reads: 0 },
+  { name: 'missing mode uses whole notes', reads: 0 },
 ]) {
   test(`reminder discovery avoids impossible inline work: ${scenario.name}`, async () => {
     const { getReminderCandidateFiles } = loadReminderCandidateModule();
@@ -1982,11 +1987,41 @@ test('notes-only reminder targets retain current body tags and frontmatter witho
   const app = { vault: { cachedRead: async () => { reads++; return 'Body #current-tag\n- [ ] Task [scheduled:: 2026-09-27] #task-tag'; } } };
   const file = { path: 'Scheduled.md', basename: 'Scheduled', extension: 'md' };
   const frontmatter = { scheduled: '2026-09-27', tags: ['note-tag'] };
-  const result = await buildReminderTargetsForFile(app, file, frontmatter, { inlineTaskReminders: 'none' });
+  const result = await buildReminderTargetsForFile(app, file, frontmatter, { inlineTaskReminders: 'all' });
   assert.equal(reads, 1, 'real frontmatter candidates must still inspect current prose tags');
   assert.deepEqual(result.map(target => target.targetKind), ['note']);
   assert.deepEqual(result[0].reminderTags, ['#note-tag', '#current-tag']);
   assert.deepEqual(frontmatter, { scheduled: '2026-09-27', tags: ['note-tag'] });
+});
+
+test('stale inline reminder actions never read or mutate the containing note', async () => {
+  const harness = loadCompiledOverdueServiceHarness();
+  let operations = 0;
+  const app = {
+    vault: {
+      cachedRead: async () => { operations++; throw new Error('unexpected read'); },
+      modify: async () => { operations++; throw new Error('unexpected write'); },
+    },
+    fileManager: {
+      processFrontMatter: async () => { operations++; throw new Error('unexpected frontmatter write'); },
+    },
+  };
+  const service = new harness.OverdueService(app, () => ({ statusKey: 'status', snoozeProperty: 'reminderSnooze' }));
+  const item = {
+    file: new harness.TFile('Daily/2026-08-10.md'),
+    targetKind: 'task',
+    taskLine: 2,
+    reminder: { property: 'scheduled' },
+  };
+
+  await service.setItemStatus(item, 'complete');
+  await service.snoozeItem(item, 10);
+  assert.equal(await service.completeItemFromNativeNotification(item), false);
+  assert.equal(await service.snoozeItemFromNativeNotification(item, 10), false);
+  assert.equal(await service.resolveTaskReminder(item), false);
+  assert.equal(operations, 0);
+  assert.equal(harness.openedModals.length, 0);
+  assert.equal(harness.moveCalls.length, 0);
 });
 
 test('reminder task parsing ignores task examples inside fenced code blocks', () => {
@@ -2000,7 +2035,7 @@ test('reminder task parsing ignores task examples inside fenced code blocks', ()
   assert.match(reminderTargetSource, /if \(inFencedCodeBlock\) continue;[\s\S]{0,500}const parsed = parseTaskReminderLine\(line\)/);
 });
 
-test('reminder target builder does not create task targets from fenced markdown examples', async () => {
+test('reminder target builder ignores task lines inside and outside code fences', async () => {
   const { buildReminderTargetsForFile } = loadReminderTargetModule();
   const content = [
     'Before',
@@ -2014,9 +2049,8 @@ test('reminder target builder does not create task targets from fenced markdown 
   const targets = await buildReminderTargetsForFile(app, file, {}, {});
   const taskTargets = targets.filter((target) => target.targetKind === 'task');
 
-  assert.equal(taskTargets.length, 1);
-  assert.equal(taskTargets[0].taskTitle, '[[Real Task]]');
-  assert.equal(taskTargets[0].taskLine, 4);
+  assert.equal(taskTargets.length, 0);
+  assert.deepEqual(targets.map((target) => target.targetKind), ['note']);
 });
 
 test('native calendar reminders use the semantic event title instead of a wikilink or dated filename', async () => {
@@ -2042,74 +2076,6 @@ test('native calendar reminders use the semantic event title instead of a wikili
 
   const regularFile = { basename: 'Project Notes' };
   assert.equal(buildReminderDisplayName(regularFile, { sourceType: 'file' }), 'Project Notes');
-});
-
-test('task-level reminder targets preserve task title and containing note', () => {
-  assert.match(reminderTargetSource, /parseTaskReminderLine/);
-  assert.match(reminderTargetSource, /sourceKey: `\$\{file\.path\}::task:\$\{index\}`/);
-  assert.match(reminderTargetSource, /targetKind: "task"/);
-  assert.match(reminderTargetSource, /taskTitle: parsed\.title/);
-  assert.match(reminderTargetSource, /taskRawLine: lines\[index\]/);
-  assert.match(reminderTargetSource, /const noteTitle = buildNoteDisplayName\(file, frontmatter\)/);
-  assert.match(reminderTargetSource, /noteTitle,/);
-  assert.match(reminderTargetSource, /props\[key\.toLowerCase\(\)\] = value/);
-  assert.match(overdueSource, /taskTitle: target\.taskTitle/);
-  assert.match(overdueSource, /taskRawLine: target\.taskRawLine/);
-  assert.match(overdueSource, /taskLine: target\.taskLine/);
-  assert.match(overdueSource, /item\.targetKind === "task" && typeof item\.taskLine === "number"/);
-  assert.match(overdueSource, /updateTaskLineProperties/);
-  assert.match(overdueSource, /applyInlinePropertyPatch/);
-  assert.match(notificationViewSource, /item\.targetKind === 'task' && item\.taskTitle/);
-  assert.match(notificationViewSource, /getItemNoteSubtitle/);
-  assert.match(notificationViewSource, /tps-notification-note-title/);
-});
-
-test('Daily Note task inheritance follows GCM while ignore tags stay scoped to each reminder target', async () => {
-  const policy = { available: true, isDailyNote: true, inheritUnscheduled: false };
-  const {
-    buildEffectiveReminderContextForTarget,
-    buildReminderTargetsForFile,
-    getReminderTagsForTarget,
-  } = loadReminderTargetModule(policy);
-  const { shouldIgnoreForReminder } = loadTimeCalculationModule();
-  const file = { path: 'System/Dailynotes/2026-08-10.md', basename: '2026-08-10', extension: 'md' };
-  const frontmatter = { scheduled: '2026-08-10', tags: ['dailynote'] };
-  const app = {
-    vault: {
-      async cachedRead() {
-        return [
-          'Daily context #journal',
-          '- [ ] Inherited task',
-          '- [ ] Explicit task #dailynote #taskonly [scheduled:: 2026-08-10 10:00]',
-        ].join('\n');
-      },
-    },
-  };
-
-  const targets = await buildReminderTargetsForFile(app, file, frontmatter, {});
-  const note = targets.find((target) => target.targetKind === 'note');
-  const inherited = targets.find((target) => target.taskTitle === 'Inherited task');
-  const explicit = targets.find((target) => target.taskTitle === 'Explicit task');
-  assert.ok(note);
-  assert.ok(inherited);
-  assert.ok(explicit);
-
-  assert.equal(buildEffectiveReminderContextForTarget(inherited, frontmatter, 'scheduled', {}), null);
-  assert.equal(
-    buildEffectiveReminderContextForTarget(explicit, frontmatter, 'scheduled', {}).propertyValue,
-    '2026-08-10 10:00',
-  );
-  assert.equal(
-    buildEffectiveReminderContextForTarget(note, frontmatter, 'scheduled', {}).propertyValue,
-    '2026-08-10',
-  );
-
-  const reminder = { ignoreTags: ['dailynote'] };
-  assert.equal(shouldIgnoreForReminder(file, null, frontmatter, reminder, [], [], [], [], getReminderTagsForTarget(note)), true);
-  assert.equal(shouldIgnoreForReminder(file, null, inherited.taskFrontmatter, reminder, [], [], [], [], getReminderTagsForTarget(inherited)), false);
-  assert.equal(shouldIgnoreForReminder(file, null, explicit.taskFrontmatter, reminder, [], [], [], [], getReminderTagsForTarget(explicit)), true);
-  assert.deepEqual(getReminderTagsForTarget(note).sort(), ['#dailynote', '#journal']);
-  assert.deepEqual(getReminderTagsForTarget(explicit).sort(), ['#dailynote', '#taskonly']);
 });
 
 test('Controller consumes only the versioned GCM Daily Note task policy and falls back compatibly', () => {
@@ -2144,20 +2110,6 @@ test('Controller consumes only the versioned GCM Daily Note task policy and fall
     isDailyNote: false,
     inheritUnscheduled: true,
   });
-});
-
-test('Controller preserves historical task date inheritance when the GCM policy API is unavailable', async () => {
-  const { buildEffectiveReminderContextForTarget, buildReminderTargetsForFile } = loadReminderTargetModule();
-  const file = { path: 'Notes/Project.md', basename: 'Project', extension: 'md' };
-  const frontmatter = { scheduled: '2026-08-10' };
-  const app = { vault: { cachedRead: async () => '- [ ] Inherited task' } };
-  const targets = await buildReminderTargetsForFile(app, file, frontmatter, {});
-  const task = targets.find((target) => target.targetKind === 'task');
-
-  assert.equal(
-    buildEffectiveReminderContextForTarget(task, frontmatter, 'scheduled', {}).propertyValue,
-    '2026-08-10',
-  );
 });
 
 test('notification sidebar uses task icons for task reminder rows', () => {
@@ -2268,7 +2220,7 @@ test('reminder rules evaluate checkbox states separately from statuses', () => {
   assert.match(typesSource, /ignoreCheckboxStates\?: string\[\]/);
   assert.match(typesSource, /requiredCheckboxStates\?: string\[\]/);
   assert.match(typesSource, /globalIgnoreCheckboxStates: string\[\]/);
-  assert.match(typesSource, /globalIgnoreCheckboxStates: \["x", "-"\]/);
+  assert.match(typesSource, /globalIgnoreCheckboxStates: \[\]/);
   assert.match(timeCalculationSource, /export function normalizeCheckboxState\(value: unknown\): string/);
   assert.match(timeCalculationSource, /raw === "space" \|\| raw === "blank" \|\| raw === "empty" \|\| raw === "open" \|\| raw === "todo"/);
   assert.match(timeCalculationSource, /export function hasRequiredCheckboxState\(fm: any, reminder: PropertyReminder\): boolean/);
@@ -2283,10 +2235,11 @@ test('reminder rules evaluate checkbox states separately from statuses', () => {
   assert.match(overdueSource, /hasRequiredStatus, hasRequiredCheckboxState,/);
   assert.match(overdueSource, /const ignoreCheckboxStates = settings\.globalIgnoreCheckboxStates \|\| \[\]/);
   assert.match(overdueSource, /ignoreStatuses, ignoreCheckboxStates/);
-  assert.match(settingsTabSource, /Ignore Checkbox States/);
-  assert.match(settingsTabSource, /Required Checkbox States/);
-  assert.match(reminderSettingsSource, /if \(!Array\.isArray\(reminder\.ignoreCheckboxStates\)\) reminder\.ignoreCheckboxStates = \[\]/);
-  assert.match(reminderSettingsSource, /if \(!Array\.isArray\(reminder\.requiredCheckboxStates\)\) reminder\.requiredCheckboxStates = \[\]/);
+  assert.doesNotMatch(settingsTabSource, /Ignore Checkbox States/);
+  assert.doesNotMatch(settingsTabSource, /Required Checkbox States/);
+  assert.match(reminderSettingsSource, /reminder\.ignoreCheckboxStates = \[\]/);
+  assert.match(reminderSettingsSource, /reminder\.requiredCheckboxStates = \[\]/);
+  assert.match(mainSource, /this\.settings\.globalIgnoreCheckboxStates = \[\]/);
 });
 
 test('migrated task records are never re-enqueued as reminders', () => {
@@ -2301,7 +2254,7 @@ test('migrated task records are never re-enqueued as reminders', () => {
   assert.match(timeCalculationSource, /if \(statuses\.has\("migrated"\) \|\| checkboxStates\.has\(">"\)\) \{/);
 });
 
-test('migrated task blocks suppress their nested scratchpad tasks from reminder discovery', async () => {
+test('legacy task blocks remain untouched by whole-note reminder discovery', async () => {
   const { buildReminderTargetsForFile } = loadReminderTargetModule();
   const file = { path: 'Daily/2026-08-10.md', basename: '2026-08-10', extension: 'md' };
   const app = {
@@ -2319,9 +2272,7 @@ test('migrated task blocks suppress their nested scratchpad tasks from reminder 
   };
 
   const targets = await buildReminderTargetsForFile(app, file, {}, {});
-  assert.deepEqual(targets.filter((target) => target.targetKind === 'task').map((target) => target.taskTitle), [
-    'Active task',
-  ]);
+  assert.deepEqual(targets.map((target) => target.targetKind), ['note']);
   assert.match(reminderTargetSource, /let migratedTaskIndent: number \| null = null/);
   assert.match(reminderTargetSource, /if \(parsed\.properties\.status === "migrated"\)/);
 });
@@ -2342,240 +2293,6 @@ test('open checklist reminders surface task rows instead of parent note rows', (
   assert.match(source, /notification\.sourceKey !== notification\.file\.path/);
   assert.match(source, /state\.triggered = false/);
   assert.match(source, /state\.lastTriggerKey = undefined/);
-});
-
-test('task reminder rows resolve schedule instead of showing a status pill', () => {
-  assert.match(reminderTargetSource, /taskPropertyKeys\?: string\[\]/);
-  assert.match(reminderTargetSource, /taskPropertyKeys: Object\.keys\(parsed\.properties\)/);
-  assert.match(overdueSource, /reminderPropertySource: this\.getReminderPropertySource\(target, reminder\.property\)/);
-  assert.match(overdueSource, /async resolveTaskReminder\(item: OverdueItem\): Promise<boolean>/);
-  assert.match(overdueSource, /item\.reminderPropertySource === "task"/);
-  assert.match(overdueSource, /private async clearFileReminderProperty\(file: TFile, property: string\): Promise<void>/);
-  assert.match(overdueSource, /await this\.updateTaskLineProperties\(item, \{ \[property\]: null \}, "clear-task-reminder"\)/);
-  assert.match(overdueSource, /return this\.moveTaskToFile\(item, targetFile\)/);
-  assert.match(notificationViewSource, /resolveOverdueTaskReminder\?\(item: OverdueItem\): Promise<boolean>/);
-  assert.match(notificationViewSource, /item\.sourceType !== 'external-event' && !!item\.reminder\.property/);
-  assert.match(notificationViewSource, /const shouldMoveTask = item\.targetKind === 'task' && item\.reminderPropertySource !== 'task'/);
-  assert.match(notificationViewSource, /const changed = this\.plugin\.resolveOverdueTaskReminder/);
-  assert.match(notificationViewSource, /if \(changed\) this\.removeItemOptimistically\(item\)/);
-  assert.match(notificationViewSource, /new Notice\('Could not move or clear the reminder task\.'\)/);
-  assert.match(notificationViewSource, /new ConfirmClearScheduledModal\(this\.app, item/);
-  assert.match(notificationViewSource, /class ConfirmClearScheduledModal extends Modal/);
-  assert.match(notificationViewSource, /text: 'Clear scheduled'/);
-  assert.match(notificationViewSource, /this\.refreshDebounced\(\)/);
-  assert.doesNotMatch(notificationViewSource, /window\.setTimeout\(\(\): void => void this\.refresh\(\), 100\)/);
-  assert.match(mainSource, /resolveOverdueTaskReminder\(item: OverdueItem\): Promise<boolean>/);
-});
-
-test('notification task moves use GCM v3 configured Daily Note semantics with user cause', () => {
-  assert.match(overdueSource, /private findCurrentTaskLineIndex\(lines: string\[\], item: OverdueItem\): number/);
-  assert.match(overdueSource, /this\.isSameTaskLine\(lines\[preferredIndex\] \|\| "", item\)/);
-  assert.match(overdueSource, /const rawLine = String\(item\.taskRawLine \|\| ""\)/);
-  assert.match(overdueSource, /lines\.findIndex\(\(line\) => line === rawLine && this\.isTaskLine\(line \|\| ""\)\)/);
-  assert.match(overdueSource, /private isSameTaskLine\(line: string, item: OverdueItem\): boolean/);
-  assert.match(overdueSource, /this\.normalizeTaskText\(this\.cleanTaskLineTitle\(line \|\| ""\)\) === normalizedTitle/);
-  assert.match(overdueSource, /const resolvedIndex = this\.findCurrentTaskLineIndex\(lines, item\)/);
-  assert.match(overdueSource, /item\.taskLine = resolvedIndex/);
-  assert.match(overdueSource, /item\.taskRawLine = lines\[resolvedIndex\]/);
-  assert.match(overdueSource, /const attempt = await moveTaskViaGcm\(/);
-  assert.match(overdueSource, /lineNumber: Math\.max\(0, Math\.floor\(item\.taskLine\)\)/);
-  assert.match(overdueSource, /rawLine: item\.taskRawLine/);
-  assert.match(overdueSource, /title: item\.taskTitle/);
-  assert.match(overdueSource, /sourcePolicy: "configured-daily-note"/);
-  assert.match(overdueSource, /resolution: "exact-or-identity"/);
-  assert.match(overdueSource, /kind: "user"/);
-  assert.match(overdueSource, /sourcePluginId: "tps-controller"/);
-  assert.match(overdueSource, /surface: "reminder-modal"/);
-  assert.match(overdueSource, /requiredTaskApiVersion: 3/);
-  assert.match(overdueSource, /move-task:gcm-rejected/);
-  assert.match(overdueSource, /route: "gcm-task-api-v3"/);
-  assert.match(overdueSource, /new TargetFileSuggestModal\(this\.app, sourcePath, resolve\)/);
-  assert.match(overdueSource, /\.filter\(\(file\) => file\.path !== this\.excludedPath\)/);
-  assert.doesNotMatch(overdueSource, /buildDailyNoteScratchpadMovedTaskBlock/);
-  assert.doesNotMatch(overdueSource, /completedDate: "null"/);
-  assert.match(overdueSource, /private didSettle = false/);
-  assert.match(overdueSource, /window\.setTimeout\(\(\) => \{/);
-  assert.match(overdueSource, /if \(!this\.didChoose\) this\.settle\(null\)/);
-  assert.match(overdueSource, /private settle\(file: TFile \| null\): void/);
-  assert.doesNotMatch(overdueSource, /preferredIndex >= 0 && this\.isTaskLine\(lines\[preferredIndex\] \|\| ""\)\) return preferredIndex/);
-});
-
-test('compiled reminder move picker excludes the source note and canceling does not call GCM', async () => {
-  const harness = loadCompiledOverdueServiceHarness();
-  harness.setMoveImplementation(async () => {
-    throw new Error('GCM should not be called when the picker is canceled');
-  });
-  const fixture = beginCompiledReminderMove(harness);
-
-  assert.equal(fixture.modal.placeholder, 'Move task to note...');
-  assert.deepEqual(
-    fixture.modal.getItems().map((file) => file.path),
-    ['Projects/Alpha.md', 'Projects/Zulu.md'],
-  );
-
-  const previousWindow = globalThis.window;
-  globalThis.window = {
-    setTimeout(callback) {
-      callback();
-      return 1;
-    },
-  };
-  try {
-    fixture.modal.onClose();
-    fixture.modal.onClose();
-    assert.equal(await fixture.pending, false);
-  } finally {
-    if (previousWindow === undefined) delete globalThis.window;
-    else globalThis.window = previousWindow;
-  }
-
-  assert.equal(harness.moveCalls.length, 0);
-  assert.deepEqual(harness.notices, []);
-  assert.equal(
-    harness.logs.filter(({ args }) => args[1] === 'resolve-reminder:canceled').length,
-    1,
-  );
-});
-
-test('compiled reminder moves honor every GCM v3 outcome without corrupting source coordinates', async (t) => {
-  const cases = [
-    {
-      name: 'unavailable API',
-      response: { available: false, result: null },
-      expected: false,
-      notice: 'Update TPS Global Context Menu before moving reminder tasks.',
-      logEvent: 'move-task:gcm-unavailable',
-    },
-    {
-      name: 'rejected mutation',
-      response: {
-        available: true,
-        result: { ok: false, changed: false, task: null, error: 'source is stale' },
-      },
-      expected: false,
-      notice: 'Could not move task: source is stale',
-      logEvent: 'move-task:gcm-rejected',
-    },
-    {
-      name: 'partial mutation report',
-      response: {
-        available: true,
-        result: { ok: false, changed: true, task: null, error: 'target copy may remain' },
-      },
-      expected: false,
-      notice: 'Could not move task: target copy may remain',
-      logEvent: 'move-task:gcm-rejected',
-    },
-    {
-      name: 'committed move with unavailable refreshed task',
-      response: {
-        available: true,
-        result: { ok: true, changed: true, task: null, error: 'refresh unavailable' },
-      },
-      expected: true,
-      notice: 'Moved task to Alpha.',
-      logEvent: 'move-task:done',
-      movedLine: -1,
-    },
-    {
-      name: 'committed move with refreshed target coordinates',
-      response: {
-        available: true,
-        result: {
-          ok: true,
-          changed: true,
-          task: {
-            path: 'Projects/Alpha.md',
-            lineNumber: 6,
-            rawLine: '- [ ] Moved task [tpsId:: task_move]',
-            title: 'Moved task',
-          },
-        },
-      },
-      expected: true,
-      notice: 'Moved task to Alpha.',
-      logEvent: 'move-task:done',
-      movedLine: 6,
-      updatesCoordinates: true,
-    },
-  ];
-
-  for (const scenario of cases) {
-    await t.test(scenario.name, async () => {
-      const harness = loadCompiledOverdueServiceHarness();
-      harness.setMoveImplementation(async () => scenario.response);
-      const fixture = beginCompiledReminderMove(harness);
-
-      fixture.modal.onChooseItem(fixture.targetFile);
-      assert.equal(await fixture.pending, scenario.expected);
-
-      assert.equal(harness.moveCalls.length, 1);
-      const [app, reference, target, cause] = harness.moveCalls[0];
-      assert.equal(app, fixture.app);
-      assert.deepEqual(reference, {
-        path: 'Daily/2026-08-10.md',
-        lineNumber: 12,
-        rawLine: '- [ ] Move me [scheduled:: 2026-08-10 09:00] [tpsId:: task_move]',
-        title: 'Move me',
-      });
-      assert.deepEqual(target, {
-        targetPath: 'Projects/Alpha.md',
-        sourcePolicy: 'configured-daily-note',
-        resolution: 'exact-or-identity',
-      });
-      assert.deepEqual(cause, {
-        kind: 'user',
-        sourcePluginId: 'tps-controller',
-        surface: 'reminder-modal',
-      });
-      assert.deepEqual(harness.notices, [scenario.notice]);
-      assert.ok(harness.logs.some(({ args }) => args[1] === scenario.logEvent));
-
-      if (scenario.updatesCoordinates) {
-        assert.equal(fixture.item.file, fixture.targetFile);
-        assert.equal(fixture.item.taskLine, 6);
-        assert.equal(fixture.item.taskRawLine, '- [ ] Moved task [tpsId:: task_move]');
-        assert.equal(fixture.item.taskTitle, 'Moved task');
-        assert.equal(fixture.item.noteTitle, 'Alpha');
-      } else {
-        assert.equal(fixture.item.file, fixture.sourceFile);
-        assert.equal(fixture.item.taskLine, 12.8);
-        assert.equal(
-          fixture.item.taskRawLine,
-          '- [ ] Move me [scheduled:: 2026-08-10 09:00] [tpsId:: task_move]',
-        );
-        assert.equal(fixture.item.taskTitle, 'Move me');
-        assert.equal(fixture.item.noteTitle, '2026-08-10');
-      }
-
-      if (scenario.expected) {
-        const doneLog = harness.logs.find(({ args }) => args[1] === 'move-task:done');
-        assert.equal(doneLog.args[2].route, 'gcm-task-api-v3');
-        assert.equal(doneLog.args[2].movedPath, 'Projects/Alpha.md');
-        assert.equal(doneLog.args[2].movedLine, scenario.movedLine);
-      }
-    });
-  }
-});
-
-test('compiled reminder move propagates a thrown GCM failure for the notification action boundary', async () => {
-  const harness = loadCompiledOverdueServiceHarness();
-  const failure = new Error('transport failed');
-  harness.setMoveImplementation(async () => {
-    throw failure;
-  });
-  const fixture = beginCompiledReminderMove(harness);
-
-  fixture.modal.onChooseItem(fixture.targetFile);
-  await assert.rejects(fixture.pending, (error) => error === failure);
-
-  assert.equal(harness.moveCalls.length, 1);
-  assert.deepEqual(harness.notices, []);
-  assert.equal(fixture.item.file, fixture.sourceFile);
-  assert.equal(fixture.item.taskLine, 12.8);
-  assert.equal(fixture.item.taskTitle, 'Move me');
-  assert.ok(harness.logs.some(({ args }) => args[1] === 'move-task:start'));
-  assert.equal(harness.logs.some(({ args }) => args[1] === 'move-task:done'), false);
 });
 
 test('notification sort direction can be reversed from settings', () => {
@@ -2618,22 +2335,7 @@ test('notification sidebar refreshes are coalesced to avoid action lag', () => {
 });
 
 
-test('inline reminder scope requires an own schedule and never inherits the note date', async () => {
-  const { buildReminderTargetsForFile } = loadReminderTargetModule();
-  const app = { vault: { cachedRead: async () => '- [ ] Unscheduled\n- [ ] Own [when:: 2026-09-15]\n- [ ] Empty [when:: ]' } };
-  const file = { path: 'Inbox/Scope.md', basename: 'Scope', extension: 'md' };
-  const frontmatter = { when: '2026-09-14', workflow: 'working' };
-  const settings = { inlineTaskReminders: 'scheduled', startProperty: 'when', statusKey: 'workflow' };
-  const targets = await buildReminderTargetsForFile(app, file, frontmatter, settings);
-  assert.deepEqual(targets.map(t => t.targetKind), ['note', 'task']);
-  assert.equal(targets[1].taskTitle, 'Own');
-  assert.equal(targets[1].taskFrontmatter.noteStatus, 'working');
-  assert.equal((await buildReminderTargetsForFile(app, file, frontmatter, {...settings, inlineTaskReminders: 'none'})).length, 1);
-  assert.equal((await buildReminderTargetsForFile(app, file, frontmatter, {...settings, inlineTaskReminders: 'all'})).length, 4);
-});
-
-
-test('GCM architecture scope is notes-only for atomic notes and while GCM is unavailable', async () => {
+test('saved GCM architecture modes cannot re-enable inline reminder targets', async () => {
   const { buildReminderTargetsForFile } = loadReminderTargetModule();
   const file = {path: 'Inbox/Scope.md', basename: 'Scope', extension: 'md'};
   const app = {vault: {cachedRead: async () => '- [ ] Own [scheduled:: 2026-09-15]\n- [ ] Plain'}};
@@ -2642,5 +2344,5 @@ test('GCM architecture scope is notes-only for atomic notes and while GCM is una
   app.plugins = {getPlugin: () => ({settings: {dataArchitectureMode: 'native-records'}})};
   assert.equal((await buildReminderTargetsForFile(app, file, {}, settings)).length, 1);
   app.plugins = {getPlugin: () => ({settings: {dataArchitectureMode: 'legacy'}})};
-  assert.equal((await buildReminderTargetsForFile(app, file, {}, settings)).length, 2);
+  assert.equal((await buildReminderTargetsForFile(app, file, {}, settings)).length, 1);
 });

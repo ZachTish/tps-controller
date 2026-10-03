@@ -79,7 +79,7 @@ function loadCalendarAutomation(logs, notices) {
 }
 
 function createHarness({
-  runAutoCreate,
+  runNativeSync,
   runCompletion = async () => {},
   onEvent = () => {},
   getReadiness = () => ({ ready: true, reason: "ready" }),
@@ -89,6 +89,7 @@ function createHarness({
   const events = [];
   const CalendarAutomationService = loadCalendarAutomation(logs, notices);
   const settings = {
+    calendarStorageMode: "native-records",
     externalCalendars: [{
       url: "webcal://calendar.example/feed.ics",
       enabled: true,
@@ -110,12 +111,13 @@ function createHarness({
     globalIgnorePaths: [],
     canceledStatusValue: "cancelled",
   };
-  const autoCreateCalls = [];
-  const autoCreateService = {
-    updateConfig() {},
-    async checkAndCreateMeetingNotes(...args) {
-      autoCreateCalls.push(args);
-      await runAutoCreate(...args);
+  const nativeSyncCalls = [];
+  const autoCreateService = { updateConfig() {} };
+  const nativeRecordService = {
+    async sync(...args) {
+      nativeSyncCalls.push(args);
+      await runNativeSync(...args);
+      return { fetched: 1, created: 0, updated: 0, archived: 0, failedFeeds: 0 };
     },
   };
   let service;
@@ -130,36 +132,50 @@ function createHarness({
   service = new CalendarAutomationService(
     app,
     autoCreateService,
-    {},
-    { sync: async () => ({ fetched: 0, created: 0, updated: 0, archived: 0, failedFeeds: 0 }) },
+    nativeRecordService,
     () => settings,
     () => null,
     runCompletion,
     getReadiness,
   );
-  return { service, autoCreateCalls, events, logs, notices };
+  return { service, settings, nativeSyncCalls, events, logs, notices };
 }
 
 function eventCount(events, name) {
   return events.filter((event) => event.name === name).length;
 }
 
+test("saved legacy calendar mode pauses before either sync writer", async () => {
+  const harness = createHarness({
+    async runNativeSync() {
+      assert.fail("native sync must wait for explicit whole-note activation");
+    },
+  });
+  harness.settings.calendarStorageMode = "legacy";
+  await harness.service.runSync(true);
+  assert.equal(harness.nativeSyncCalls.length, 0);
+  assert.equal(eventCount(harness.events, STARTED), 0);
+  assert.equal(eventCount(harness.events, COMPLETED), 0);
+  assert.deepEqual(harness.notices, ["Calendar sync is paused until whole-note event records are enabled in Controller settings."]);
+  assert.equal(harness.logs.some((entry) => entry.event === "skip:legacy-mode-paused"), true);
+});
+
 test("overlapping calendar sync callers join the physical run and preserve first-call options", async () => {
   const gate = deferred();
-  let autoCreateActive = false;
+  let nativeSyncActive = false;
   let physicalRuns = 0;
   let completionCalls = 0;
   const physicalOptions = [];
   const harness = createHarness({
-    async runAutoCreate(_calendarService, _urls, _filter, _configs, force, options) {
-      if (autoCreateActive) return;
-      autoCreateActive = true;
+    async runNativeSync(_calendars, _filter, force, backfillPastEvents) {
+      if (nativeSyncActive) return;
+      nativeSyncActive = true;
       physicalRuns += 1;
-      physicalOptions.push({ force, backfillPastEvents: options.backfillPastEvents });
+      physicalOptions.push({ force, backfillPastEvents });
       try {
         await gate.promise;
       } finally {
-        autoCreateActive = false;
+        nativeSyncActive = false;
       }
     },
     async runCompletion() {
@@ -182,7 +198,7 @@ test("overlapping calendar sync callers join the physical run and preserve first
 
   assert.deepEqual({
     allJoined: callers.every((caller) => caller === first),
-    autoCreateCalls: harness.autoCreateCalls.length,
+    nativeSyncCalls: harness.nativeSyncCalls.length,
     physicalRuns,
     completionCalls,
     startedEvents: eventCount(harness.events, STARTED),
@@ -191,7 +207,7 @@ test("overlapping calendar sync callers join the physical run and preserve first
     secondSettled,
   }, {
     allJoined: true,
-    autoCreateCalls: 1,
+    nativeSyncCalls: 1,
     physicalRuns: 1,
     completionCalls: 0,
     startedEvents: 1,
@@ -207,7 +223,7 @@ test("overlapping calendar sync callers join the physical run and preserve first
   assert.equal(eventCount(harness.events, COMPLETED), 1);
 
   await harness.service.runSync(true, { backfillPastEvents: true });
-  assert.equal(harness.autoCreateCalls.length, 2, "a fresh call must start after the joined run settles");
+  assert.equal(harness.nativeSyncCalls.length, 2, "a fresh call must start after the joined run settles");
   assert.equal(physicalRuns, 2);
   assert.deepEqual(physicalOptions[1], { force: true, backfillPastEvents: true });
   assert.equal(completionCalls, 2);
@@ -219,7 +235,7 @@ test("joined calendar sync failures reject every caller and clear the flight for
   let shouldFail = true;
   let completionCalls = 0;
   const harness = createHarness({
-    async runAutoCreate() {
+    async runNativeSync() {
       if (!shouldFail) return;
       await gate.promise;
       throw expectedFailure;
@@ -234,7 +250,7 @@ test("joined calendar sync failures reject every caller and clear the flight for
   const second = harness.service.runSync(true);
   await flushMicrotasks();
   assert.equal(first, second);
-  assert.equal(harness.autoCreateCalls.length, 1);
+  assert.equal(harness.nativeSyncCalls.length, 1);
 
   gate.resolve();
   const [firstFailure, secondFailure] = await Promise.all([
@@ -248,7 +264,7 @@ test("joined calendar sync failures reject every caller and clear the flight for
 
   shouldFail = false;
   await harness.service.runSync(true);
-  assert.equal(harness.autoCreateCalls.length, 2);
+  assert.equal(harness.nativeSyncCalls.length, 2);
   assert.equal(completionCalls, 1);
   assert.equal(eventCount(harness.events, COMPLETED), 1);
 });
@@ -257,7 +273,7 @@ test("a joined readiness skip clears the flight so a later ready call can run", 
   let ready = false;
   let completionCalls = 0;
   const harness = createHarness({
-    async runAutoCreate() {},
+    async runNativeSync() {},
     async runCompletion() {
       completionCalls += 1;
     },
@@ -272,7 +288,7 @@ test("a joined readiness skip clears the flight so a later ready call can run", 
   const second = harness.service.runSync();
   assert.equal(first, second);
   await Promise.all([first, second]);
-  assert.equal(harness.autoCreateCalls.length, 0);
+  assert.equal(harness.nativeSyncCalls.length, 0);
   assert.equal(completionCalls, 0);
   assert.equal(eventCount(harness.events, STARTED), 1);
   assert.equal(eventCount(harness.events, COMPLETED), 0);
@@ -280,7 +296,7 @@ test("a joined readiness skip clears the flight so a later ready call can run", 
 
   ready = true;
   await harness.service.runSync(true);
-  assert.equal(harness.autoCreateCalls.length, 1);
+  assert.equal(harness.nativeSyncCalls.length, 1);
   assert.equal(completionCalls, 1);
   assert.equal(eventCount(harness.events, STARTED), 2);
   assert.equal(eventCount(harness.events, COMPLETED), 1);
@@ -292,7 +308,7 @@ test("completion-maintenance failure remains joined and retryable without a fals
   let failCompletion = true;
   let completionCalls = 0;
   const harness = createHarness({
-    async runAutoCreate() {
+    async runNativeSync() {
       await gate.promise;
     },
     async runCompletion() {
@@ -305,7 +321,7 @@ test("completion-maintenance failure remains joined and retryable without a fals
   await flushMicrotasks();
   const second = harness.service.runSync(true);
   assert.equal(first, second);
-  assert.equal(harness.autoCreateCalls.length, 1);
+  assert.equal(harness.nativeSyncCalls.length, 1);
 
   gate.resolve();
   const [firstFailure, secondFailure] = await Promise.all([
@@ -319,26 +335,26 @@ test("completion-maintenance failure remains joined and retryable without a fals
 
   failCompletion = false;
   await harness.service.runSync(true);
-  assert.equal(harness.autoCreateCalls.length, 2);
+  assert.equal(harness.nativeSyncCalls.length, 2);
   assert.equal(completionCalls, 2);
   assert.equal(eventCount(harness.events, COMPLETED), 1);
 });
 
 test("a synchronous sync-start listener joins instead of re-entering calendar reconciliation", async () => {
   const gate = deferred();
-  let autoCreateActive = false;
+  let nativeSyncActive = false;
   let physicalRuns = 0;
   let nested;
   let reentered = false;
   const harness = createHarness({
-    async runAutoCreate() {
-      if (autoCreateActive) return;
-      autoCreateActive = true;
+    async runNativeSync() {
+      if (nativeSyncActive) return;
+      nativeSyncActive = true;
       physicalRuns += 1;
       try {
         await gate.promise;
       } finally {
-        autoCreateActive = false;
+        nativeSyncActive = false;
       }
     },
     onEvent(name, _payload, getService) {
@@ -351,7 +367,7 @@ test("a synchronous sync-start listener joins instead of re-entering calendar re
   const outer = harness.service.runSync(false, { backfillPastEvents: false });
   await flushMicrotasks();
   assert.equal(nested, outer);
-  assert.equal(harness.autoCreateCalls.length, 1);
+  assert.equal(harness.nativeSyncCalls.length, 1);
   assert.equal(physicalRuns, 1);
   assert.equal(eventCount(harness.events, STARTED), 1);
   assert.equal(eventCount(harness.events, COMPLETED), 0);

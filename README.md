@@ -1,5 +1,36 @@
 # TPS Controller
 
+## 3.0.0 — Whole-note calendar records and reminders
+
+Controller now creates and synchronizes external calendar occurrences as ordinary
+Markdown event notes. New installations use native event records. The Calendar
+settings no longer offer a storage-mode selector or per-feed task-item output;
+feed editors keep note folders, templates, reschedule actions, and sync safety.
+An older saved `legacy` calendar mode pauses sync instead of entering its former
+inline writer. Review the existing calendar items, then use **Use whole-note
+events** in Calendar rules to enable note sync. That action does not convert or
+delete historical task lines. Saved per-feed task output is normalized to note
+output when settings load.
+
+Reminders now target full notes and external events. The Inline task reminders
+selector is gone; saved values normalize to notes-only. Old task-line alerts
+cannot snooze, complete, move, or edit an inline task through Controller. Note
+reminders, note status/frontmatter actions, and read-only historical calendar
+quarantine review remain. No note migration, startup repair, or vault-wide
+conversion runs automatically.
+
+The global and per-rule checkbox-state reminder controls are also retired.
+Saved checkbox filters are ignored for whole-note reminders and are cleared on
+the next settings save; note status, tag, path, and time filters still apply.
+
+The default Calendar rules route still shows feed actions and one selected feed
+editor; Reminder rules retains its existing rule editor. Mobile uses the same
+compact settings strips and stacked controls. This release changes runtime
+behavior and saved mode interpretation, so it is versioned as a major release.
+The minimum supported Obsidian version remains 1.12.3. Full validation and
+Test-vault deployment evidence are in [3.0.0 release notes](release-notes/3.0.0.md).
+Production installation remains the user's BRAT pull.
+
 ## 2.7.0 — Calendar lifecycle and deterministic sync
 
 Native calendar notes now honor **No-Loss Sync Mode** for successful feeds: an

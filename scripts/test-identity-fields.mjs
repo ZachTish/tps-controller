@@ -91,26 +91,13 @@ test('Controller duplicate cleanup groups only by externalId or source-scoped le
   assert.doesNotMatch(duplicateCleanupSource, /parseFrontmatterDate/);
 });
 
-test('external calendar task target note setting commits full normalized paths', () => {
-  const targetSettingSource = settingsTabSource.slice(
-    settingsTabSource.indexOf('.setName("Task target note")'),
-    settingsTabSource.indexOf('.setName("Type Folder")'),
-  );
-
-  assert.match(settingsTabSource, /const normalizeTaskTargetNotePath = \(value: string\): string/);
-  assert.match(targetSettingSource, /const commit = async \(\) =>/);
-  assert.match(targetSettingSource, /calendar\.autoCreateTaskTargetPath = normalized/);
-  assert.match(targetSettingSource, /t\.inputEl\.addEventListener\("blur"/);
-  assert.match(targetSettingSource, /event\.key !== "Enter"/);
-  assert.doesNotMatch(targetSettingSource, /\.onChange\(async \(val\) => \{\s*calendar\.autoCreateTaskTargetPath = val\.trim\(\);\s*await save\(\);/);
-  assert.match(calendarAutomationSource, /private normalizeTaskTargetPath\(value: string\): string/);
-  assert.match(calendarAutomationSource, /this\.normalizeTaskTargetPath\(calendar\.autoCreateTaskTargetPath\)/);
-  assert.doesNotMatch(calendarAutomationSource, /Calendar\.md/);
-  assert.match(mainSource, /const normalizeTaskTargetPathSetting = \(value: string\): string/);
-  assert.match(mainSource, /normalizeExternalCalendarsInPlace\([\s\S]*normalizeTaskTargetPathSetting/);
-  assert.match(settingsTabSource, /normalized === "\.md"/);
-  assert.match(calendarAutomationSource, /normalized === "\.md"/);
-  assert.match(mainSource, /normalized === "\.md"/);
+test('external calendar settings cannot configure an inline task destination', () => {
+  assert.doesNotMatch(settingsTabSource, /\.setName\("Task target note"\)/);
+  assert.doesNotMatch(settingsTabSource, /\.setName\("Task destination"\)/);
+  assert.doesNotMatch(settingsTabSource, /\.setName\("Create as"\)/);
+  assert.match(settingsTabSource, /\.setName\("Type Folder"\)/);
+  assert.match(calendarAutomationSource, /skip:legacy-mode-paused/);
+  assert.doesNotMatch(calendarAutomationSource, /checkAndCreateMeetingNotes\(/);
 });
 
 test('GCM daily-note adapter distinguishes unavailable integration from an available result', async () => {
