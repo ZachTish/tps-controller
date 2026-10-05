@@ -233,7 +233,7 @@ export class ReminderEngine {
             try {
                 const cache = this.app.metadataCache.getFileCache(file);
                 const frontmatter = (cache?.frontmatter || {}) as Record<string, unknown>;
-                const targets = await buildReminderTargetsForFile(this.app, file, frontmatter, settings);
+                const targets = await buildReminderTargetsForFile(this.app, file, frontmatter, settings, true);
                 for (const target of targets) {
                     projected.push(...this.projectTarget({
                         target,
@@ -247,6 +247,9 @@ export class ReminderEngine {
                 }
             } catch (error) {
                 logger.flowError("ReminderEngine", "native-projection:file-error", error, { path: file.path });
+                // A failed/ambiguous source read is not an authoritative
+                // deletion. The existing publisher retains its last schedule.
+                throw error;
             }
         }
 

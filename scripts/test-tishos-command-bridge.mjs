@@ -991,6 +991,42 @@ test("schedule projection failure remains pending and reports unavailable until 
   assert.equal(harness.storage.getItem(PAIRING_STORAGE_KEY).includes("returnPending"), false);
 });
 
+test('an uncertain source projection preserves the exact last-good schedule and audit until a verified replacement', async (t) => {
+  let projectionFails = false;
+  let schedule = [{
+    title: 'Saved reminder', body: 'Synthetic source', fireAt: NOW + 60_000,
+    sourcePath: 'Inbox/Synthetic source.md', sourceKey: 'Inbox/Synthetic source.md',
+    reminderId: 'synthetic-five-minute-rule',
+  }];
+  const harness = createHarness({ notificationScheduleProvider: async () => {
+    if (projectionFails) throw new Error('Current reminder source could not be read or parsed');
+    return schedule;
+  } });
+  t.after(() => harness.service.stop());
+  await pairAndPublish(harness);
+  const path = `${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.json`;
+  const auditPath = `${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.audit.json`;
+  const previous = harness.files.get(path);
+  const previousAudit = harness.files.get(auditPath);
+  assert.ok(previous);
+  assert.ok(previousAudit);
+  const writesBefore = harness.writes.length;
+  projectionFails = true;
+  const refused = await harness.service.refreshCatalogs('uncertain-source');
+  assert.equal(refused.unavailableReason, 'native-notification-schedule-unavailable');
+  assert.deepEqual(refused.readyPairings, []);
+  assert.equal(harness.files.get(path), previous);
+  assert.equal(harness.files.get(auditPath), previousAudit);
+  assert.equal(harness.writes.length, writesBefore);
+
+  projectionFails = false;
+  schedule = [];
+  const verified = await harness.service.refreshCatalogs('verified-source-with-no-reminder');
+  assert.equal(verified.unavailableReason, undefined);
+  assert.deepEqual(JSON.parse(harness.files.get(path)).items, []);
+  assert.deepEqual(JSON.parse(harness.files.get(auditPath)).series, []);
+});
+
 test("pre-index pairing cannot publish an empty schedule or return until metadata resolves", async (t) => {
   let metadataReady = false;
   let providerCalls = 0;

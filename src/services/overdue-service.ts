@@ -1,4 +1,4 @@
-import { App, MarkdownView, Notice, TFile, WorkspaceLeaf, moment } from "obsidian";
+import { App, MarkdownView, Notice, TFile, WorkspaceLeaf, getFrontMatterInfo, moment, parseYaml } from "obsidian";
 import { NOTIFICATION_VIEW_TYPE } from "../views/notification-view";
 import * as logger from "../logger";
 import type { TPSControllerSettings, OverdueItem } from "../types";
@@ -491,6 +491,38 @@ export class OverdueService {
         return plugin?.bulkEditService || plugin?.api?.bulkEditService || null;
     }
 
+    private async requireGcmStatusResult(
+        file: TFile,
+        statusKey: string,
+        status: string | null,
+        changed: unknown,
+    ): Promise<void> {
+        if (typeof changed === "number" && Number.isSafeInteger(changed) && changed > 0) return;
+        // GCM returns zero for both refused/failed writes and genuine no-ops.
+        // Confirm a no-op from the exact current note, never stale metadata or
+        // another file that has since occupied its former path.
+        const path = file.path;
+        if (changed === 0 && this.app.vault.getAbstractFileByPath(path) === file) {
+            const content = await this.app.vault.read(file);
+            if (file.path === path && this.app.vault.getAbstractFileByPath(path) === file) {
+                const info = getFrontMatterInfo(content);
+                if (!info.exists && /^\ufeff?---(?:\r?\n|$)/u.test(content)) {
+                    throw new Error("Reminder frontmatter is incomplete.");
+                }
+                const hasYamlValue = info.frontmatter.split(/\r?\n/u).some(line => line.trim() && !line.trim().startsWith("#"));
+                const fm = info.exists && hasYamlValue ? parseYaml(info.frontmatter) : {};
+                if (fm && typeof fm === "object" && !Array.isArray(fm)
+                    && [Object.prototype, null].includes(Object.getPrototypeOf(fm))) {
+                    const keys = Object.keys(fm).filter(key => key.trim().toLowerCase() === statusKey.trim().toLowerCase());
+                    if (status === null && keys.length === 0) return;
+                    if (status !== null && keys.length === 1 && typeof fm[keys[0]] === "string"
+                        && fm[keys[0]].trim().toLowerCase() === status.trim().toLowerCase()) return;
+                }
+            }
+        }
+        throw new Error("The reminder status change was not applied. Review the note and try again.");
+    }
+
     async setItemStatus(item: OverdueItem, status: string | null): Promise<void> {
         if (item.targetKind === "task") {
             logger.flowWarn("OverdueAction", "task-line:status-disabled", { path: item.file.path });
@@ -509,18 +541,21 @@ export class OverdueService {
         if (bulkEditService) {
             if (isStatusClear) {
                 if (typeof bulkEditService.updateFrontmatter === "function") {
-                    await bulkEditService.updateFrontmatter([item.file], { [statusKey]: null });
+                    const changed = await bulkEditService.updateFrontmatter([item.file], { [statusKey]: null });
+                    await this.requireGcmStatusResult(item.file, statusKey, null, changed);
                     this.triggerFilesUpdated([item.file.path]);
                     logger.flow("OverdueAction", "status:set-done", { route: "gcm-update-frontmatter-clear", path: item.file.path });
                     return;
                 }
             } else if (typeof bulkEditService.setStatus === "function") {
-                await bulkEditService.setStatus([item.file], resolvedStatus);
+                const changed = await bulkEditService.setStatus([item.file], resolvedStatus);
+                await this.requireGcmStatusResult(item.file, statusKey, resolvedStatus, changed);
                 this.triggerFilesUpdated([item.file.path]);
                 logger.flow("OverdueAction", "status:set-done", { route: "gcm-set-status", path: item.file.path, status: resolvedStatus });
                 return;
             } else if (typeof bulkEditService.updateFrontmatter === "function") {
-                await bulkEditService.updateFrontmatter([item.file], { [statusKey]: resolvedStatus });
+                const changed = await bulkEditService.updateFrontmatter([item.file], { [statusKey]: resolvedStatus });
+                await this.requireGcmStatusResult(item.file, statusKey, resolvedStatus, changed);
                 this.triggerFilesUpdated([item.file.path]);
                 logger.flow("OverdueAction", "status:set-done", { route: "gcm-update-frontmatter", path: item.file.path, status: resolvedStatus });
                 return;
@@ -780,9 +815,11 @@ export class OverdueService {
 
     async markFileComplete(file: TFile): Promise<void> {
         logger.flow("OverdueAction", "mark-file-complete:start", { path: file.path });
+        const statusKey = this.getSettings().statusKey || "status";
         const bulkEditService = this.getGcmBulkEditService();
         if (typeof bulkEditService?.setStatus === "function") {
-            await bulkEditService.setStatus([file], "complete");
+            const changed = await bulkEditService.setStatus([file], "complete");
+            await this.requireGcmStatusResult(file, statusKey, "complete", changed);
             this.triggerFilesUpdated([file.path]);
             logger.flow("OverdueAction", "mark-file-complete:done", { path: file.path, route: "gcm-set-status" });
             return;

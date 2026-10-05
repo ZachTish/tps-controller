@@ -1,4 +1,4 @@
-import { TFile } from "obsidian";
+import { TFile, getFrontMatterInfo, parseYaml } from "obsidian";
 import type { ExternalCalendarEvent, TPSControllerSettings } from "../types";
 import { buildCalendarExternalId, getDailyNoteTaskSchedulePolicyViaGcm } from "../tps-gcm-api";
 import { resolveInlineTaskReminderMode } from "./reminder-runtime-policy";
@@ -17,6 +17,7 @@ export interface ReminderEvaluationTarget {
     suppressInheritedDailyNoteSchedule?: boolean;
     noteTitle?: string;
     taskFrontmatter?: Record<string, unknown>;
+    sourceFrontmatter?: Record<string, unknown>;
     externalEvent?: ExternalCalendarEvent;
 }
 
@@ -38,9 +39,10 @@ export async function buildReminderTargetsForFile(
     file: TFile,
     frontmatter: Record<string, unknown>,
     settings: TPSControllerSettings,
+    readCurrentSource = false,
 ): Promise<ReminderEvaluationTarget[]> {
     const inlineMode = resolveInlineTaskReminderMode(app, settings);
-    const noteTitle = buildNoteDisplayName(file, frontmatter);
+    let noteTitle = buildNoteDisplayName(file, frontmatter);
     const noteTarget: ReminderEvaluationTarget = {
         sourceKey: file.path,
         sourceType: "file",
@@ -50,12 +52,41 @@ export async function buildReminderTargetsForFile(
     const targets: ReminderEvaluationTarget[] = [noteTarget];
 
     const vault = (app as any)?.vault;
-    if (!vault || typeof vault.cachedRead !== "function" || file.extension?.toLowerCase() !== "md") return targets;
+    if (!vault || file.extension?.toLowerCase() !== "md"
+        || typeof (readCurrentSource ? vault.read : vault.cachedRead) !== "function") {
+        if (readCurrentSource) throw new Error("Current reminder source is unavailable.");
+        return targets;
+    }
 
     let content = "";
+    const sourcePath = file.path;
     try {
-        content = await vault.cachedRead(file);
-    } catch {
+        if (readCurrentSource && vault.getAbstractFileByPath(sourcePath) !== file) {
+            throw new Error("The reminder source changed before reading.");
+        }
+        content = await (readCurrentSource ? vault.read(file) : vault.cachedRead(file));
+        if (readCurrentSource && (file.path !== sourcePath || vault.getAbstractFileByPath(sourcePath) !== file)) {
+            throw new Error("The reminder source changed while reading.");
+        }
+        // Reuse the body read that already supplies tags/targets. Publishing
+        // gets one fresh source read; display-only paths retain cachedRead.
+        const info = getFrontMatterInfo(content);
+        if (!info.exists && /^\ufeff?---(?:\r?\n|$)/u.test(content)) {
+            throw new Error("Reminder frontmatter is incomplete.");
+        }
+        const hasYamlValue = info.frontmatter.split(/\r?\n/u).some(line => line.trim() && !line.trim().startsWith("#"));
+        const parsed = info.exists && hasYamlValue ? parseYaml(info.frontmatter) : {};
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
+            || ![Object.prototype, null].includes(Object.getPrototypeOf(parsed))) {
+            throw new Error("Reminder frontmatter must be a property map.");
+        }
+        frontmatter = parsed;
+        noteTarget.sourceFrontmatter = frontmatter;
+        noteTitle = buildNoteDisplayName(file, frontmatter);
+        noteTarget.noteTitle = noteTitle;
+        noteTarget.sourceKey = file.path;
+    } catch (error) {
+        if (readCurrentSource) throw error;
         return targets;
     }
 
@@ -175,8 +206,8 @@ export function buildEffectiveReminderContextForTarget(
     }
 
     return {
-        frontmatter: baseFrontmatter,
-        propertyValue: baseFrontmatter[reminderProperty],
+        frontmatter: target.sourceFrontmatter ?? baseFrontmatter,
+        propertyValue: (target.sourceFrontmatter ?? baseFrontmatter)[reminderProperty],
     };
 }
 

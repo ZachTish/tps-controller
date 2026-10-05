@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import moment from 'moment';
 import ts from 'typescript';
+import { load as parseYaml, dump as stringifyYaml } from 'js-yaml';
 import './test-notification-open-lifecycle.mjs';
 
 const source = readFileSync(new URL('../src/services/reminder-engine.ts', import.meta.url), 'utf8');
@@ -23,6 +24,12 @@ const overdueModalSource = readFileSync(new URL('../src/modals/overdue-modal.ts'
 const settingsTabSource = readFileSync(new URL('../src/settings-tab.ts', import.meta.url), 'utf8');
 const typesSource = readFileSync(new URL('../src/types.ts', import.meta.url), 'utf8');
 const gcmApiSource = readFileSync(new URL('../src/tps-gcm-api.ts', import.meta.url), 'utf8');
+
+function getFrontMatterInfo(content) {
+  const source = content.replace(/^\ufeff/u, '');
+  const match = /^---\r?\n/u.test(source) ? source.match(/^---\r?\n([\s\S]*?)^---(?:\r?\n|$)/mu) : null;
+  return { exists: !!match, frontmatter: match?.[1] || '' };
+}
 
 function loadTpsGcmApiModule() {
   const compiled = ts.transpileModule(gcmApiSource, {
@@ -50,7 +57,7 @@ function loadReminderTargetModule(taskSchedulePolicy = { available: false, isDai
         getDailyNoteTaskSchedulePolicyViaGcm: () => taskSchedulePolicy,
       };
     }
-    if (id === 'obsidian') return {};
+    if (id === 'obsidian') return { getFrontMatterInfo, parseYaml };
     if (id === './reminder-runtime-policy') return loadReminderRuntimePolicyModule();
     throw new Error(`Unexpected require: ${id}`);
   };
@@ -1984,9 +1991,9 @@ for (const scenario of [
 test('notes-only reminder targets retain current body tags and frontmatter without emitting tasks', async () => {
   const { buildReminderTargetsForFile } = loadReminderTargetModule();
   let reads = 0;
-  const app = { vault: { cachedRead: async () => { reads++; return 'Body #current-tag\n- [ ] Task [scheduled:: 2026-09-27] #task-tag'; } } };
   const file = { path: 'Scheduled.md', basename: 'Scheduled', extension: 'md' };
   const frontmatter = { scheduled: '2026-09-27', tags: ['note-tag'] };
+  const app = { vault: { cachedRead: async () => { reads++; return `---\n${stringifyYaml(frontmatter)}---\nBody #current-tag\n- [ ] Task [scheduled:: 2026-09-27] #task-tag`; } } };
   const result = await buildReminderTargetsForFile(app, file, frontmatter, { inlineTaskReminders: 'all' });
   assert.equal(reads, 1, 'real frontmatter candidates must still inspect current prose tags');
   assert.deepEqual(result.map(target => target.targetKind), ['note']);
@@ -2055,7 +2062,6 @@ test('reminder target builder ignores task lines inside and outside code fences'
 
 test('native calendar reminders use the semantic event title instead of a wikilink or dated filename', async () => {
   const { buildReminderDisplayName, buildReminderTargetsForFile } = loadReminderTargetModule();
-  const app = { vault: { cachedRead: async () => '' } };
   const file = {
     path: '2026-08-28 - Readable event record.md',
     basename: '2026-08-28 - Readable event record',
@@ -2067,6 +2073,7 @@ test('native calendar reminders use the semantic event title instead of a wikili
     title: '[[2026-08-28 - Readable event record|Linked event title]]',
     scheduled: '2026-08-28T14:00:00.000Z',
   };
+  const app = { vault: { cachedRead: async () => `---\n${stringifyYaml(frontmatter)}---\n` } };
 
   const [target] = await buildReminderTargetsForFile(app, file, frontmatter, {});
 

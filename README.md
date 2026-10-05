@@ -1,6 +1,63 @@
 # TPS Controller
 
-## 3.1.1 — Native Mac refresh invalidation — local candidate
+## 3.1.2 — Confirm reminder completion
+
+Note reminder status actions now honor GCM's committed-write result. A refused,
+cancelled or failed write no longer appears completed or emits a successful
+file-update signal. A zero-change result is accepted only when a fresh read of
+the same current note proves the requested status is already present (or a
+requested status clear is already absent); stale metadata or a replacement at
+the former path cannot confirm completion. Positive writes add no verification
+reads. GCM still owns its safety prompts, note mutation and filename handling;
+Controller adds no fallback writer, repair, deduplication, queue or retry.
+
+Signed schedule projection now parses each candidate's current saved frontmatter
+from the body read it already performed, using one fresh read instead of one
+cached read. Status, schedule, semantic title and tags use that same snapshot,
+so a just-saved completion or reopening does not wait for metadata indexing.
+Unreadable, malformed or replaced sources refuse publication and keep the last
+verified schedule; they never become an authoritative empty schedule. Valid
+removal of the schedule/frontmatter still removes the reminder. Discovery still
+uses metadata to select candidates, so a newly added schedule without an indexed
+property waits for the ordinary metadata event. There is no additional scan,
+cache, watcher or poller. Display-only calculations retain cachedRead and parse
+available current content; on an unavailable/invalid display read they preserve
+the existing best-effort metadata behavior, not publication authority.
+
+This release also includes the native Mac invalidation and serialized-publication
+changes from the locally installed but unpublished 3.1.1 candidate below. No
+settings, defaults, reminder identities or note schema change. The separate GCM
+completion/rename race fix is required to stop that writer's duplicate creation;
+Controller does not merge or delete existing duplicate notes.
+
+Focused completion/source regressions pass 32/32. The combined reminder and
+bridge selection passes 169 cases with three existing historical-comparison
+skips. Coverage includes awaited success/rejection, zero-result refusal versus
+authored no-op, file identity, completion/reopening ahead of metadata, source
+removal, uncertain parse/read retention, consistent title/tags and operation
+counts across 1,000 unrelated notes. Ten completion checks failed against the
+prior runtime; eleven source-freshness checks failed before the projection fix.
+The complete no-deploy declared suite passes 670 cases with three existing
+historical-comparison skips and no failures or cancellations; TypeScript and
+its production bundle build pass. Separately, 13 selected native TishOS
+notification-cancellation regressions pass in the isolated iPhone simulator
+using synthetic/mocked notification boundaries, not physical delivery evidence.
+The separate final production build and Test-vault deployment passed. Official
+Obsidian CLI reload/version checks confirmed Controller 3.1.2 and GCM 7.3.2;
+all four installed runtime artifact hashes match the final build. Two unique
+synthetic notes completed through the actual native-notification completion
+route and GCM rename, each changing six triggers to zero while retaining one
+file and its body. A held stale GCM write also rejected after a newer core
+frontmatter completion, preserving the completion date/body and zero triggers.
+Fixtures were archived after passing. Settings were cloned in memory and both
+plugins' data.json hashes stayed unchanged; GCM's recurrence-session lifecycle
+did change, so this is not a claim that all runtime state remained unchanged.
+No external delivery or production installation was tested. Test-vault validated;
+BRAT handoff, not a production installation. See GitHub releases for publication
+status; artifact hashes and verification details are in the release notes.
+Minimum Obsidian remains 1.12.3. See [3.1.2 release notes](release-notes/3.1.2.md).
+
+## Included 3.1.1 — Native Mac refresh invalidation
 
 On macOS, a completed signed Controller publication can send a bounded,
 authenticated, content-free signal to the existing paired TishOS app. The app
@@ -17,8 +74,8 @@ reminder rules, import settings and secret storage are unchanged.
 
 The full no-deploy suite passes 637 tests with three existing skips; focused
 bridge/mobile tests pass 80/80. The Node transport also interoperates with the
-real Swift listener. This is a local candidate, not a public GitHub release or
-proof of physical-widget background repaint.
+real Swift listener. This validation of the included 3.1.1 changes is not proof
+of physical-widget background repaint or production installation.
 
 ## 3.1.0 — Configurable native calendar fields
 
@@ -481,7 +538,7 @@ release; minimum Obsidian stays 1.12.3. Production installation is the BRAT hand
 
 Device roles, calendar synchronization, reminders, encrypted attachment sync, and shared Plaid transport.
 
-Current release: [2.7.0](https://github.com/ZachTish/tps-controller/releases/tag/2.7.0) · Obsidian 1.12.3+ · Desktop and mobile.
+Release status: [GitHub releases](https://github.com/ZachTish/tps-controller/releases) · Obsidian 1.12.3+ · Desktop and mobile. 3.1.2 is Test-vault validated for BRAT handoff, not a production installation; see GitHub releases for publication status.
 
 ## Install with BRAT
 
