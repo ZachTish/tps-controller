@@ -26,6 +26,12 @@ const notificationContractBuild = await build({
 });
 const notificationContract = await import(`data:text/javascript;base64,${Buffer.from(notificationContractBuild.outputFiles[0].text).toString("base64")}`);
 
+const nativeRefreshContractBuild = await build({
+  entryPoints: [fileURLToPath(new URL("src/services/tishos-native-mac-refresh-contract.ts", root))],
+  bundle: true, format: "esm", platform: "node", target: "node18", write: false,
+});
+const nativeRefreshContract = await import(`data:text/javascript;base64,${Buffer.from(nativeRefreshContractBuild.outputFiles[0].text).toString("base64")}`);
+
 const serviceBuild = await build({
   entryPoints: [fileURLToPath(new URL("src/services/tishos-command-bridge-service.ts", root))],
   bundle: true,
@@ -40,6 +46,7 @@ const serviceBuild = await build({
       builder.onLoad({ filter: /.*/, namespace: "test-stub" }, () => ({
         loader: "js",
         contents: `
+          export const Platform = { isDesktopApp: false, isMacOS: false };
           export class Modal {
             constructor(app) { this.app = app; this.modalEl = { addClass() {} }; this.titleEl = { setText() {} }; this.contentEl = { createEl() { return { setAttr() {}, addEventListener() {} }; }, createDiv() { return { createEl() { return { setAttr() {}, addEventListener() {} }; } }; }, empty() {} }; }
             open() { globalThis.__tishosBridgeModals?.push(this); this.onOpen?.(); }
@@ -93,6 +100,8 @@ function createHarness({
   notificationScheduleProvider,
   completeNotification = async () => true,
   snoozeNotification = async () => true,
+  nativeRefreshTransport,
+  nativeRefreshIsSupported = () => false,
 } = {}) {
   const files = new Map();
   const directories = new Set();
@@ -260,6 +269,8 @@ function createHarness({
       confirmLocalRevoke,
       notificationScheduleReadiness,
       notificationScheduleProvider,
+      nativeRefreshTransport,
+      nativeRefreshIsSupported,
       completeNotification: async (value) => {
         completions.push(value);
         return completeNotification(value);
@@ -728,6 +739,150 @@ test("removing a pending reminder series publishes silently for TishOS's next re
   assert.deepEqual(emptied.nativeNotificationRemovedSeriesPlatforms, ["ios"]);
 });
 
+test("completion during publication drains a coalesced refresh before resolving callers", async (t) => {
+  const completedEvent = {
+    title: "Completed event",
+    body: "Overdue",
+    fireAt: NOW + 60_000,
+    sourcePath: "Events/Completed.md",
+    sourceKey: "Events/Completed.md",
+    reminderId: "scheduled-event",
+  };
+  const remainingEvent = {
+    ...completedEvent,
+    title: "Still overdue",
+    sourcePath: "Events/Remaining.md",
+    sourceKey: "Events/Remaining.md",
+  };
+  let schedule = [completedEvent, { ...completedEvent, fireAt: NOW + 180_000 }, remainingEvent];
+  let providerCalls = 0;
+  const harness = createHarness({ notificationScheduleProvider: async () => {
+    providerCalls += 1;
+    return [...schedule];
+  } });
+  t.after(() => harness.service.stop());
+  await pairAndPublish(harness);
+  harness.openedURLs.splice(0);
+  const callsBefore = providerCalls;
+
+  schedule = schedule.map((item) => ({ ...item, body: "Publication already started" }));
+  const blockedWrite = harness.blockNextWrite();
+  const active = harness.service.refreshCatalogs("pre-completion");
+  await within(blockedWrite.entered, "initial publication");
+  schedule = [remainingEvent];
+  const refreshes = Array.from({ length: 10 }, () =>
+    harness.service.refreshCatalogs("native-notifications:file-modify"));
+  assert.ok(refreshes.every((refresh) => refresh === active), "callers share one serial drain");
+  blockedWrite.release();
+  const outcomes = await within(Promise.all([active, ...refreshes]), "completion refresh");
+
+  const published = JSON.parse(harness.files.get(
+    `${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.json`,
+  ));
+  assert.deepEqual(
+    published.items.map((item) => item.sourcePath),
+    [remainingEvent.sourcePath],
+    "all repeats of the completed event must disappear; unrelated reminders must remain",
+  );
+  assert.equal(providerCalls - callsBefore, 2, "a burst of changes needs just one fresh follow-up pass");
+  assert.ok(outcomes.every((outcome) => outcome.nativeNotificationRemovedSeriesPlatforms.includes("ios")));
+  const { mac, ...unsigned } = published;
+  assert.equal(await contract.verifyHmacSHA256Base64URL(
+    SECRET_BYTES, notificationContract.canonicalNotificationSchedule(unsigned), mac,
+  ), true, "the replacement must remain verifiable by TishOS");
+  assert.deepEqual(harness.openedURLs, [], "completion publication must remain passive");
+});
+
+test("a deletion during the follow-up pass also drains to a signed empty replacement", async (t) => {
+  let schedule = [{
+    title: "Last overdue event",
+    body: "Initial",
+    fireAt: NOW + 60_000,
+    sourcePath: "Events/Last.md",
+    sourceKey: "Events/Last.md",
+    reminderId: "scheduled-event",
+  }];
+  const blocks = [];
+  let providerCalls = 0;
+  const harness = createHarness({ notificationScheduleProvider: async () => {
+    providerCalls += 1;
+    const snapshot = [...schedule];
+    const block = blocks.shift();
+    if (block) {
+      block.entered.resolve();
+      await block.release.promise;
+    }
+    return snapshot;
+  } });
+  t.after(() => harness.service.stop());
+  await pairAndPublish(harness);
+  const callsBefore = providerCalls;
+  const first = { entered: deferred(), release: deferred() };
+  const second = { entered: deferred(), release: deferred() };
+  blocks.push(first, second);
+  let settled = false;
+  const active = harness.service.refreshCatalogs("initial");
+  void active.then(() => { settled = true; });
+  await within(first.entered.promise, "initial snapshot");
+  schedule = [{ ...schedule[0], body: "Changed while publishing" }];
+  const changed = harness.service.refreshCatalogs("native-notifications:file-modify");
+  first.release.resolve();
+  await within(second.entered.promise, "follow-up snapshot");
+  assert.equal(settled, false, "callers must wait for the fresh pass, not just the first publication");
+  schedule = [];
+  const deleted = harness.service.refreshCatalogs("native-notifications:file-delete");
+  second.release.resolve();
+  await within(Promise.all([active, changed, deleted]), "deletion refresh");
+
+  assert.equal(providerCalls - callsBefore, 3);
+  const path = `${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.json`;
+  const publishedBytes = harness.files.get(path);
+  const published = JSON.parse(publishedBytes);
+  assert.deepEqual(published.items, []);
+  const { mac, ...unsigned } = published;
+  assert.equal(await contract.verifyHmacSHA256Base64URL(
+    SECRET_BYTES, notificationContract.canonicalNotificationSchedule(unsigned), mac,
+  ), true, "deleting the final source still publishes an authoritative signed empty schedule");
+  const writesBefore = harness.writes.length;
+  await harness.service.refreshCatalogs("unchanged-after-drain");
+  assert.equal(harness.files.get(path), publishedBytes);
+  assert.equal(harness.writes.length, writesBefore, "a later unchanged refresh must retain write deduplication");
+});
+
+test("a failed publication does not discard a queued completion refresh", async (t) => {
+  let schedule = [{
+    title: "Completed after a write failure",
+    body: "Initial",
+    fireAt: NOW + 60_000,
+    sourcePath: "Events/Retry.md",
+    sourceKey: "Events/Retry.md",
+    reminderId: "scheduled-event",
+  }];
+  let providerCalls = 0;
+  const harness = createHarness({ notificationScheduleProvider: async () => {
+    providerCalls += 1;
+    return [...schedule];
+  } });
+  t.after(() => harness.service.stop());
+  await pairAndPublish(harness);
+  const callsBefore = providerCalls;
+  schedule = [{ ...schedule[0], body: "Blocked replacement" }];
+  const blocked = harness.blockNextWrite();
+  const active = harness.service.refreshCatalogs("before-write-failure");
+  await within(blocked.entered, "blocked replacement");
+  harness.failRenameOnce();
+  schedule = [];
+  const completed = harness.service.refreshCatalogs("native-notifications:file-modify");
+  blocked.release();
+  const [result] = await within(Promise.all([active, completed]), "recovery after completion");
+
+  assert.equal(providerCalls - callsBefore, 2);
+  assert.equal(result.failedClients, 0, "callers must receive the recovered pass outcome");
+  assert.deepEqual(JSON.parse(harness.files.get(
+    `${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.json`,
+  )).items, []);
+});
+
 test("advancing one series or aging out a delivered item does not foreground TishOS", async (t) => {
   let schedule = [{
     title: "Repeating task",
@@ -916,8 +1071,10 @@ test("pre-index pairing cannot publish an empty schedule or return until metadat
 test("stop clears verified schedule status even when an active publication settles afterward", async () => {
   const providerEntered = deferred();
   const providerRelease = deferred();
+  let providerCalls = 0;
   const harness = createHarness({
     notificationScheduleProvider: async () => {
+      providerCalls += 1;
       providerEntered.resolve();
       return providerRelease.promise;
     },
@@ -927,6 +1084,7 @@ test("stop clears verified schedule status even when an active publication settl
   harness.service.start();
   harness.fireLayout();
   await providerEntered.promise;
+  const queued = harness.service.refreshCatalogs("queued-before-stop");
   const stopped = harness.service.stop();
   providerRelease.resolve([{
     title: "Settles after stop",
@@ -936,7 +1094,9 @@ test("stop clears verified schedule status even when an active publication settl
     sourceKey: "Daily/Stopped.md::task:1",
     reminderId: "scheduled-task",
   }]);
-  await stopped;
+  await within(Promise.all([stopped, queued]), "stop with a queued refresh");
+  assert.equal(providerCalls, 1, "stop must discard the queued follow-up rather than start another pass");
+  assert.equal((await harness.service.refreshCatalogs("after-stop")).unavailableReason, "service-stopped");
 
   assert.deepEqual(
     harness.service.getStatus().clients.map((client) => ({
@@ -2106,9 +2266,10 @@ test("revoke waits out an active publisher so no stale catalog can reappear", as
     .finally(() => { revokeSettled = true; });
   await Promise.resolve();
   assert.equal(revokeSettled, false);
+  const queued = harness.service.refreshCatalogs("changed-while-revoking");
   block.release();
-  await refresh;
-  assert.equal((await revoke).accepted, true);
+  const [, , result] = await within(Promise.all([refresh, queued, revoke]), "revoke with a queued refresh");
+  assert.equal(result.accepted, true);
   assert.equal(harness.files.has(path), false);
   assert.equal(harness.service.getStatus().clients.length, 0);
 });
@@ -2292,6 +2453,116 @@ test("local revoke approval cannot mutate authority after stop", async () => {
   assert.equal(await revoke, false);
   assert.equal(harness.storage.getItem(PAIRING_STORAGE_KEY), pairingBefore);
   assert.equal(harness.service.getStatus().clients.length, 1);
+});
+
+test("optional native Mac invalidation follows only the terminal signed publication", async (t) => {
+  let schedule = [];
+  const requests = [];
+  const harness = createHarness({ notificationScheduleProvider: async () => schedule,
+    nativeRefreshIsSupported: () => true,
+    nativeRefreshTransport: async (body) => {
+      const request = JSON.parse(body); requests.push(request);
+      const published = JSON.parse(harness.files.get(`${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.json`));
+      assert.equal(published.items.length, 0, "only the terminal deletion replacement may be signaled");
+      const unsigned = { schemaVersion: 1, requestID: request.requestID, status: "queued" };
+      return { status: 202, body: JSON.stringify({ ...unsigned,
+        mac: await contract.hmacSHA256Base64URL(SECRET_BYTES, nativeRefreshContract.canonicalNativeMacRefreshResponse(unsigned)) }) };
+    } });
+  t.after(() => harness.service.stop());
+  await harness.service.handlePairRoute(pairParams(CLIENT, SECRET, { platform: "macos", device: "QA Mac" }));
+  harness.service.start(); harness.fireLayout(); await harness.service.refreshCatalogs("native-initial");
+  await within(harness.service.nativeRefreshSender.whenIdle(), "initial native signal", 1000);
+  assert.equal(requests.length, 1); requests.length = 0; harness.openedURLs.length = 0;
+
+  schedule = [{ title: "Temporary", body: "", fireAt: NOW + 60_000,
+    sourcePath: "Daily/Test.md", sourceKey: "Daily/Test.md::task:1", reminderId: "scheduled-task" }];
+  const blocked = harness.blockNextWrite();
+  const first = harness.service.refreshCatalogs("native-intermediate"); await blocked.entered;
+  schedule = [];
+  const terminal = harness.service.refreshCatalogs("native-deleted-during-publication");
+  assert.equal(first, terminal); assert.equal(requests.length, 0);
+  blocked.release(); const result = await terminal;
+  assert.equal(result.failedClients, 0);
+  await within(harness.service.nativeRefreshSender.whenIdle(), "terminal native signal", 1000);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].vaultName, VAULT); assert.equal(requests[0].clientID, CLIENT);
+  const { mac, ...unsigned } = requests[0];
+  assert.equal(await contract.verifyHmacSHA256Base64URL(SECRET_BYTES,
+    nativeRefreshContract.canonicalNativeMacRefreshRequest(unsigned), mac), true);
+  assert.deepEqual(harness.openedURLs, [], "an invalidation cannot open either app");
+});
+
+test("native invalidation never sends for mobile, non-Mac pairings, or unpublished schedules", async (t) => {
+  for (const configuration of [
+    { platform: "macos", supported: false, provider: async () => [] },
+    { platform: "ios", supported: true, provider: async () => [] },
+    { platform: "macos", supported: true, provider: undefined },
+    { platform: "macos", supported: true, provider: async () => { throw new Error("Synthetic projection failure"); } },
+  ]) {
+    let requests = 0;
+    const harness = createHarness({ nativeRefreshIsSupported: () => configuration.supported,
+      notificationScheduleProvider: configuration.provider,
+      nativeRefreshTransport: async () => { requests++; throw new Error("Must not send"); } });
+    t.after(() => harness.service.stop());
+    await harness.service.handlePairRoute(pairParams(CLIENT, SECRET, { platform: configuration.platform,
+      device: configuration.platform === "macos" ? "QA Mac" : "QA iPhone" }));
+    harness.service.start(); harness.fireLayout(); await harness.service.refreshCatalogs("native-scope-guard");
+    await harness.service.nativeRefreshSender.whenIdle(); assert.equal(requests, 0);
+  }
+});
+
+test("native invalidation requires the current terminal catalog, not stale notification readiness", async (t) => {
+  const requests = [];
+  const harness = createHarness({ notificationScheduleProvider: async () => [], nativeRefreshIsSupported: () => true,
+    nativeRefreshTransport: async (body) => { requests.push(JSON.parse(body)); return { status: 401, body: "denied" }; } });
+  t.after(() => harness.service.stop());
+  await harness.service.handlePairRoute(pairParams(CLIENT, SECRET, { platform: "macos", device: "QA Mac" }));
+  harness.service.start(); harness.fireLayout(); await harness.service.refreshCatalogs("native-ready-before-catalog-failure");
+  await harness.service.nativeRefreshSender.whenIdle(); assert.equal(requests.length, 1);
+  const generation = JSON.parse(harness.storage.getItem(PAIRING_STORAGE_KEY)).clients[0].generation;
+  harness.setRegistryAvailable(false);
+  const failed = await harness.service.refreshCatalogs("native-catalog-unavailable");
+  assert.equal(failed.unavailableReason, "command-registry-unavailable");
+  harness.service.nativeRefreshSender.signal({ vaultName: VAULT, clientID: CLIENT,
+    generation, lifecycle: harness.service.lifecycleGeneration });
+  await harness.service.nativeRefreshSender.whenIdle();
+  assert.equal(requests.length, 1, "a stale ready schedule cannot authenticate a failed catalog generation");
+  harness.setRegistryAvailable(true);
+  await harness.service.refreshCatalogs("native-catalog-recovered");
+  await harness.service.nativeRefreshSender.whenIdle();
+  assert.equal(requests.length, 2, "a new successful terminal publication restores the optional signal");
+});
+
+test("native transport failure cannot reject publication; stop drains it without foreground UI", async (t) => {
+  const entered = deferred(); const blocked = deferred();
+  const harness = createHarness({ notificationScheduleProvider: async () => [], nativeRefreshIsSupported: () => true,
+    nativeRefreshTransport: async () => { entered.resolve(); return blocked.promise; } });
+  t.after(() => harness.service.stop());
+  await harness.service.handlePairRoute(pairParams(CLIENT, SECRET, { platform: "macos", device: "QA Mac" }));
+  harness.service.start(); harness.fireLayout();
+  const result = await within(harness.service.refreshCatalogs("native-unresponsive-listener"), "publication while native listener blocks");
+  assert.equal(result.failedClients, 0); assert.equal(result.readyPairings.length, 1);
+  await entered.promise; harness.openedURLs.length = 0;
+  await within(harness.service.stop(), "native drain on stop");
+  blocked.resolve({ status: 503, body: "unavailable" });
+  assert.deepEqual(harness.openedURLs, []);
+});
+
+test("durable pairing revocation cancels pending native invalidations", async (t) => {
+  const requests = [];
+  const harness = createHarness({ notificationScheduleProvider: async () => [], nativeRefreshIsSupported: () => true,
+    nativeRefreshTransport: async (body) => { requests.push(JSON.parse(body)); return { status: 401, body: "denied" }; } });
+  t.after(() => harness.service.stop());
+  await harness.service.handlePairRoute(pairParams(CLIENT, SECRET, { platform: "macos", device: "QA Mac" }));
+  harness.service.start(); harness.fireLayout(); await harness.service.refreshCatalogs("native-before-revoke");
+  await harness.service.nativeRefreshSender.whenIdle(); assert.equal(requests.length, 1);
+  harness.service.nativeRefreshSender.signal({ vaultName: VAULT, clientID: CLIENT,
+    generation: JSON.parse(harness.storage.getItem(PAIRING_STORAGE_KEY)).clients[0].generation,
+    lifecycle: harness.service.lifecycleGeneration });
+  assert.equal(await harness.service.requestLocalRevoke(CLIENT), true);
+  await harness.service.nativeRefreshSender.whenIdle();
+  assert.equal(requests.length, 1);
+  assert.equal([...harness.secretValues.values()].every(value => value === ""), true);
 });
 
 test("source wiring keeps discovery, execution, and mobile-safe confirmation behind shared seams", async () => {

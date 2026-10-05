@@ -1,4 +1,4 @@
-import { App, Modal, Notice, type PluginManifest } from "obsidian";
+import { App, Modal, Notice, Platform, type PluginManifest } from "obsidian";
 import { executeCommandById, listCommands } from "../core/type-guards";
 import type { OverdueItem } from "../types";
 import * as logger from "../logger";
@@ -55,6 +55,11 @@ import {
     type TishOSNativeNotificationSeriesAuditItem,
     type TishOSNativeNotificationSchedule,
 } from "./tishos-native-notification-contract";
+import {
+    NativeMacRefreshSender,
+    type NativeMacRefreshIntent,
+    type NativeMacRefreshTransport,
+} from "./tishos-native-mac-refresh-sender";
 
 export const TISHOS_COMMAND_BRIDGE_PAIR_ROUTE = "tps-controller-command-bridge-pair";
 export const TISHOS_COMMAND_BRIDGE_RUN_ROUTE = "tps-controller-run-command";
@@ -179,6 +184,8 @@ interface TishOSCommandBridgeServiceOptions {
     notificationScheduleProvider?: () => Promise<readonly NativeNotificationProjectionValue[]>;
     completeNotification?: (value: NativeNotificationProjectionValue) => Promise<boolean>;
     snoozeNotification?: (value: NativeNotificationProjectionValue) => Promise<boolean>;
+    nativeRefreshTransport?: NativeMacRefreshTransport;
+    nativeRefreshIsSupported?: () => boolean;
 }
 
 interface NativeNotificationClientStatus {
@@ -405,6 +412,7 @@ export class TishOSCommandBridgeService {
     private layoutReady = false;
     private stopped = false;
     private refreshPromise: Promise<TishOSCommandBridgeRefreshOutcome> | null = null;
+    private pendingRefreshReason: string | null = null;
     private pollIntervalID: number | null = null;
     private readonly pendingReturnGenerations = new Map<string, string>();
     private activePairingLane: ActivePairingLane | null = null;
@@ -419,6 +427,8 @@ export class TishOSCommandBridgeService {
     private readonly snoozeNotification:
         ((value: NativeNotificationProjectionValue) => Promise<boolean>) | null;
     private readonly nativeNotificationStatusByClientID = new Map<string, NativeNotificationClientStatus>();
+    private readonly nativeRefreshSender: NativeMacRefreshSender;
+    private readonly nativeRefreshReadyGenerations = new Map<string, string>();
 
     constructor(
         private readonly app: App,
@@ -430,6 +440,12 @@ export class TishOSCommandBridgeService {
         this.notificationScheduleReadiness = options.notificationScheduleReadiness || null;
         this.completeNotification = options.completeNotification || null;
         this.snoozeNotification = options.snoozeNotification || null;
+        this.nativeRefreshSender = new NativeMacRefreshSender({
+            enabled: options.nativeRefreshIsSupported || (() => Platform.isDesktopApp && Platform.isMacOS),
+            resolveSecret: (intent) => this.nativeRefreshSecretIfCurrent(intent),
+            transport: options.nativeRefreshTransport,
+            onOutcome: (status) => logger.flow("TishOSCommandBridge", `native-mac-refresh:${status}`),
+        });
         this.confirmPairing = options.confirmPairing || (async (request) => {
             // Obsidian dismisses an open Settings modal while handing off an
             // external protocol URL. Opening our confirmation in that same
@@ -455,6 +471,7 @@ export class TishOSCommandBridgeService {
     start(): void {
         if (!this.stopped && this.layoutReady) return;
         this.stopped = false;
+        this.nativeRefreshSender.start();
         this.stopPromise = null;
         this.restorePendingReturnClients();
         this.app.workspace.onLayoutReady(() => {
@@ -470,18 +487,22 @@ export class TishOSCommandBridgeService {
     stop(): Promise<void> {
         if (this.stopPromise) return this.stopPromise;
         this.stopped = true;
+        this.pendingRefreshReason = null;
+        this.nativeRefreshReadyGenerations.clear();
         this.lifecycleGeneration += 1;
         this.layoutReady = false;
         if (this.pollIntervalID !== null) window.clearInterval(this.pollIntervalID);
         this.pollIntervalID = null;
         this.pendingReturnGenerations.clear();
         this.nativeNotificationStatusByClientID.clear();
+        const nativeRefreshDrain = this.nativeRefreshSender.stop();
         const commandDrain = this.commandRouteQueue;
         const refreshDrain = this.refreshPromise;
         const revocationDrain = this.revocationQueue;
         this.stopPromise = Promise.allSettled([
             commandDrain,
             revocationDrain,
+            nativeRefreshDrain,
             ...(refreshDrain ? [refreshDrain] : []),
         ]).then(() => {
             this.nativeNotificationStatusByClientID.clear();
@@ -624,27 +645,47 @@ export class TishOSCommandBridgeService {
 
     refreshCatalogs(reason = "manual"): Promise<TishOSCommandBridgeRefreshOutcome> {
         if (this.stopped) return Promise.resolve(this.unavailableRefresh("service-stopped"));
+        this.pendingRefreshReason = reason;
         if (this.refreshPromise) return this.refreshPromise;
-        const operation = this.refreshCatalogsInternal(reason).catch((error) => {
-            let pairedClients = 0;
+        this.nativeRefreshReadyGenerations.clear();
+        const lifecycle = this.lifecycleGeneration;
+
+        // Share one serial drain, not just the current snapshot. A completion or
+        // deletion arriving during publication needs a fresh pass before any
+        // waiting caller can treat the signed schedule as current.
+        const operation = Promise.resolve().then(async () => {
+            let outcome = this.unavailableRefresh("service-stopped");
             try {
-                pairedClients = this.loadPairingState().clients.length;
-            } catch {
-                // The failure result remains useful even when local state is unreadable.
+                while (this.isLifecycleActive(lifecycle) && this.pendingRefreshReason !== null) {
+                    const refreshReason = this.pendingRefreshReason;
+                    this.pendingRefreshReason = null;
+                    try {
+                        outcome = await this.refreshCatalogsInternal(refreshReason);
+                    } catch (error) {
+                        let pairedClients = 0;
+                        try {
+                            pairedClients = this.loadPairingState().clients.length;
+                        } catch {
+                            // The failure result remains useful even when local state is unreadable.
+                        }
+                        logger.flowWarn("TishOSCommandBridge", "catalog-refresh:failed", {
+                            reason: refreshReason,
+                            pairedClients,
+                            errorType: this.errorType(error),
+                        });
+                        outcome = this.unavailableRefresh("refresh-failure", pairedClients);
+                    }
+                }
+                return outcome;
+            } finally {
+                // Clear in the same turn as the final dirty check. Clearing in
+                // a later .then would let a new change join an already-finished drain.
+                if (this.refreshPromise === operation) this.refreshPromise = null;
             }
-            logger.flowWarn("TishOSCommandBridge", "catalog-refresh:failed", {
-                reason,
-                pairedClients,
-                errorType: this.errorType(error),
-            });
-            return this.unavailableRefresh("refresh-failure", pairedClients);
         });
         this.refreshPromise = operation;
-        const clear = (): void => {
-            if (this.refreshPromise === operation) this.refreshPromise = null;
-        };
         void operation.then((outcome) => {
-            clear();
+            this.signalNativeRefreshAfterPublication(outcome, lifecycle);
             this.returnToTishOSAfterPairingIfReady(outcome.readyPairings);
             if (outcome.nativeNotificationRemovedSeriesPlatforms.length > 0) {
                 // Publication is intentionally passive. iOS does not offer one
@@ -658,8 +699,34 @@ export class TishOSCommandBridgeService {
                     { platforms: outcome.nativeNotificationRemovedSeriesPlatforms },
                 );
             }
-        }, clear);
+        });
         return operation;
+    }
+
+    private signalNativeRefreshAfterPublication(outcome: TishOSCommandBridgeRefreshOutcome, lifecycle: number): void {
+        if (!this.isLifecycleActive(lifecycle) || this.refreshPromise || !this.notificationScheduleProvider) return;
+        try {
+            this.nativeRefreshReadyGenerations.clear();
+            for (const pairing of outcome.readyPairings) {
+                if (pairing.platform !== "macos") continue;
+                this.nativeRefreshReadyGenerations.set(pairing.clientID, pairing.generation);
+                this.nativeRefreshSender.signal({ vaultName: this.app.vault.getName(),
+                    clientID: pairing.clientID, generation: pairing.generation, lifecycle });
+            }
+        } catch { /* Optional invalidation cannot reject a completed publication. */ }
+    }
+
+    private nativeRefreshSecretIfCurrent(intent: NativeMacRefreshIntent): Uint8Array | null {
+        if (!this.isLifecycleActive(intent.lifecycle) || !this.layoutReady || this.refreshPromise
+            || this.pendingRefreshReason !== null || this.app.vault.getName() !== intent.vaultName
+            || this.nativeRefreshReadyGenerations.get(intent.clientID) !== intent.generation
+            || this.nativeNotificationStatusByClientID.get(intent.clientID)?.state !== "ready") return null;
+        try {
+            if (this.loadRevocationState().entries.some((entry) => entry.clientID === intent.clientID)) return null;
+            const pairing = this.loadPairingState().clients.find((candidate) => candidate.clientID === intent.clientID
+                && candidate.platform === "macos" && candidate.generation === intent.generation);
+            return pairing ? this.readPairingSecret(pairing) : null;
+        } catch { return null; }
     }
 
     private async refreshCatalogsInternal(reason: string): Promise<TishOSCommandBridgeRefreshOutcome> {
@@ -1803,6 +1870,8 @@ export class TishOSCommandBridgeService {
             const pairing = state.clients.find((candidate) => candidate.clientID === clientID);
             const revocations = this.loadRevocationState();
             if (revocations.entries.some((candidate) => candidate.clientID === clientID)) {
+                this.nativeRefreshSender.revoke(clientID);
+                this.nativeRefreshReadyGenerations.delete(clientID);
                 this.pendingReturnGenerations.delete(clientID);
                 this.nativeNotificationStatusByClientID.delete(clientID);
                 return true;
@@ -1828,6 +1897,8 @@ export class TishOSCommandBridgeService {
                 throw new Error("Vault-local storage did not confirm the command bridge revocation tombstone.");
             }
             this.pendingReturnGenerations.delete(clientID);
+            this.nativeRefreshSender.revoke(clientID);
+            this.nativeRefreshReadyGenerations.delete(clientID);
             this.nativeNotificationStatusByClientID.delete(clientID);
             return true;
         });

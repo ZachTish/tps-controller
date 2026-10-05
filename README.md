@@ -1,5 +1,25 @@
 # TPS Controller
 
+## 3.1.1 — Native Mac refresh invalidation — local candidate
+
+On macOS, a completed signed Controller publication can send a bounded,
+authenticated, content-free signal to the existing paired TishOS app. The app
+reads its authorized vault and publishes through native private CloudKit; no
+browser login, trigger file, note payload or new secret is added. A signed
+response means queued, not uploaded. Unsupported platforms and unavailable
+listeners keep the existing filesystem delivery path.
+
+Concurrent publication requests now join one serial drain, so a completion or
+deletion arriving during publication gets a fresh pass before callers treat
+the schedule as current. Stale, revoked, stopped or nonterminal pairings cannot
+send invalidations. Existing whole-note records, configured calendar fields,
+reminder rules, import settings and secret storage are unchanged.
+
+The full no-deploy suite passes 637 tests with three existing skips; focused
+bridge/mobile tests pass 80/80. The Node transport also interoperates with the
+real Swift listener. This is a local candidate, not a public GitHub release or
+proof of physical-widget background repaint.
+
 ## 3.1.0 — Configurable native calendar fields
 
 Native external-calendar sync now uses the configured title, status, and start
