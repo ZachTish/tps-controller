@@ -1,5 +1,25 @@
 # TPS Controller
 
+## 3.1.3 — Stop historical body scans during native reminder refresh
+
+Whole-note calendar matching no longer reads every Markdown body to discover
+retired inline event identities. Existing native-record snapshots, configured
+frontmatter identities, renamed/rescheduled matching and completion ownership
+remain unchanged. Legacy matching retains its inline reader. This corrects the
+existing matching route shared by reminder evaluation and signed publication;
+it adds no index, watcher, retry, settings migration or writer.
+
+Three matching passes over 4,001 synthetic notes previously made 12,003 body
+reads; the regression now requires zero. Completion still suppresses a matched
+external event and deletion releases the removed note's ownership. The installed
+3.1.2 Test-vault baseline read all 13,812 bodies on both cold and warm passes.
+Those background-window operation samples are not phone input-to-paint timings.
+Native-record cold indexing, configured frontmatter matching and real reminder
+candidate reads still have their existing costs. Final suite, installed
+verification and hashes are in [3.1.3 release notes](release-notes/3.1.3.md).
+Minimum Obsidian stays 1.12.3. This backward-compatible patch is a BRAT handoff,
+not a claim that production or the phone is updated.
+
 ## 3.1.2 — Confirm reminder completion
 
 Note reminder status actions now honor GCM's committed-write result. A refused,
@@ -538,7 +558,7 @@ release; minimum Obsidian stays 1.12.3. Production installation is the BRAT hand
 
 Device roles, calendar synchronization, reminders, encrypted attachment sync, and shared Plaid transport.
 
-Release status: [GitHub releases](https://github.com/ZachTish/tps-controller/releases) · Obsidian 1.12.3+ · Desktop and mobile. 3.1.2 is Test-vault validated for BRAT handoff, not a production installation; see GitHub releases for publication status.
+Release status: [GitHub releases](https://github.com/ZachTish/tps-controller/releases) · Obsidian 1.12.3+ · Desktop and mobile. 3.1.3 is Test-vault validated for BRAT handoff, not a production installation; see GitHub releases for publication status.
 
 ## Install with BRAT
 

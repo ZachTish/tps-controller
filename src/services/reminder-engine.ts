@@ -1075,7 +1075,11 @@ export class ReminderEngine {
                 }
             }
 
-            if (file.extension?.toLowerCase() === "md") {
+            // Whole-note calendar matching is already supplied by native
+            // identity and frontmatter above. Historical inline ownership is
+            // retained only for legacy storage, not scanned on every native
+            // reminder publication.
+            if (settings.calendarStorageMode !== "native-records" && file.extension?.toLowerCase() === "md") {
                 try {
                     const content = await this.app.vault.cachedRead(file);
                     for (const line of content.split(/\r?\n/)) {

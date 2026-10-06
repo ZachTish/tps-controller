@@ -652,6 +652,102 @@ test('native schedule projection is Controller-rule-owned and read-only', async 
   assert.deepEqual(settings.alertState, before, 'projection must not consume Controller delivery state');
 });
 
+function createExternalEventMatchOperationFixture(mode, unrelatedCount = 4000) {
+  const calendarId = 'calendar-native-body-ownership';
+  const sourceUrl = 'https://calendar.invalid/ownership.ics';
+  const matchingEvent = {
+    id: 'native-body-ownership-occurrence',
+    uid: 'native-body-ownership',
+    occurrenceIdentity: 'native-body-ownership-occurrence',
+    title: 'Original provider title',
+    description: '',
+    startDate: new Date('2026-10-15T14:00:00.000Z'),
+    endDate: new Date('2026-10-15T15:00:00.000Z'),
+    sourceUrl,
+    isAllDay: false,
+    isRecurring: false,
+  };
+  const unmatchedEvent = { ...matchingEvent, id: 'actually-unmatched', uid: 'actually-unmatched', occurrenceIdentity: 'actually-unmatched', title: 'Feed-only event' };
+  const canonicalID = buildCanonicalCalendarRecordId(calendarId, matchingEvent.occurrenceIdentity);
+  const counts = { enumeration: 0, metadata: 0, cachedRead: 0, snapshot: 0, feedFetch: 0 };
+  const records = [];
+  const harness = loadCompiledReminderEngineHarness({
+    gcmApi: { nativeRecords: {
+      snapshot: async () => { counts.snapshot++; return { token: 1, records }; },
+      inspect: () => null,
+    } },
+    parseFrontmatterDate: (value) => {
+      const date = new Date(value);
+      return Number.isFinite(date.getTime()) ? date : null;
+    },
+  });
+  const files = Array.from({ length: unrelatedCount }, (_, index) => new harness.TFile(`Notes/Ordinary ${index}.md`));
+  const renamedFile = new harness.TFile('Different folder/User renamed this event.md');
+  files.push(renamedFile);
+  records.push({ file: renamedFile, path: renamedFile.path, id: canonicalID, kind: 'calendar-event', frontmatter: {
+    tpsId: canonicalID, title: 'User renamed title', scheduled: '2026-10-16T16:00:00.000Z',
+  } });
+  const app = {
+    metadataCache: { getFileCache: () => { counts.metadata++; return null; } },
+    vault: {
+      getMarkdownFiles: () => { counts.enumeration++; return files; },
+      cachedRead: async () => { counts.cachedRead++; return '- [ ] Historical authored content\nOrdinary body'; },
+    },
+  };
+  const settings = {
+    calendarStorageMode: mode,
+    startProperty: 'scheduled', titleKey: 'title', eventIdKey: 'externalEventId', uidKey: 'tpsCalendarUid',
+    reminders: [{ enabled: true, sourceTypes: ['file', 'external-event'], includeUnmatchedExternalEvents: true }],
+    externalCalendars: [{ id: calendarId, enabled: true, url: sourceUrl }],
+  };
+  const engine = new harness.ReminderEngine(app, {
+    fetchEvents: async () => { counts.feedFetch++; return [matchingEvent, unmatchedEvent]; },
+  });
+  return { engine, app, settings, counts, files, records, renamedFile, matchingEvent, unmatchedEvent };
+}
+
+test('whole-note external-event matching does not read 4,000 unrelated bodies on repeated publications', async (t) => {
+  const fixture = createExternalEventMatchOperationFixture('native-records');
+  for (let run = 0; run < 3; run++) {
+    const unmatched = await fixture.engine.buildUnmatchedExternalReminderTargets([], fixture.settings);
+    assert.deepEqual(unmatched.map((target) => target.externalEvent.id), [fixture.unmatchedEvent.id],
+      'canonical native identity must match even when path, title and local schedule differ from the provider and core metadata is absent');
+  }
+  t.diagnostic(`synthetic operation counts: ${JSON.stringify(fixture.counts)}`);
+  assert.equal(fixture.counts.feedFetch, 3, 'the real unmatched-event route still evaluates the synthetic feed');
+  assert.equal(fixture.counts.snapshot, 3, 'existing authoritative native identity discovery remains in use');
+  assert.equal(fixture.counts.enumeration, 3, 'one existing vault enumeration per match pass; no new index or query');
+  assert.equal(fixture.counts.cachedRead, 0, 'native whole-note matching must not inspect retired inline calendar bodies');
+});
+
+test('legacy external-event matching retains authored hidden inline calendar identity', async () => {
+  const fixture = createExternalEventMatchOperationFixture('legacy', 0);
+  fixture.app.vault.cachedRead = async () => {
+    fixture.counts.cachedRead++;
+    return `- [ ] Historical event [scheduled:: ${fixture.matchingEvent.startDate.toISOString()}] %% tps-inline-props:${JSON.stringify({ externalEventId: fixture.unmatchedEvent.id })} %%`;
+  };
+  const unmatched = await fixture.engine.buildUnmatchedExternalReminderTargets([], fixture.settings);
+  assert.deepEqual(unmatched, [], 'native identity matches one occurrence and historical inline identity still matches the other in legacy mode');
+  assert.equal(fixture.counts.cachedRead, 1);
+  assert.equal(fixture.counts.feedFetch, 1);
+});
+
+test('native completed calendar ownership still matches and physical deletion releases the match', async () => {
+  const fixture = createExternalEventMatchOperationFixture('native-records', 0);
+  Object.assign(fixture.records[0].frontmatter, { status: 'complete', completedDate: '2026-10-06T12:00:00' });
+  const completed = await fixture.engine.buildUnmatchedExternalReminderTargets([], fixture.settings);
+  assert.deepEqual(completed.map((target) => target.externalEvent.id), [fixture.unmatchedEvent.id],
+    'authored completion must not resurrect the same occurrence as a pathless external reminder');
+
+  fixture.records.splice(0);
+  fixture.files.splice(0);
+  const deleted = await fixture.engine.buildUnmatchedExternalReminderTargets([], fixture.settings);
+  assert.deepEqual(deleted.map((target) => target.externalEvent.id), [fixture.matchingEvent.id, fixture.unmatchedEvent.id],
+    'current index discovery must not retain ownership from a physically removed note');
+  assert.equal(fixture.counts.snapshot, 2, 'each pass uses the current native snapshot');
+  assert.equal(fixture.counts.cachedRead, 0);
+});
+
 test('native calendar records suppress matched pathless external alerts while retaining truly unmatched events', async (t) => {
   const now = Date.parse('2026-08-25T12:00:00.000Z');
   const sourceUrl = 'https://calendar.invalid/native-records.ics';
