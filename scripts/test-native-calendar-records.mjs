@@ -127,11 +127,14 @@ function harness(initialEvents = [], options = {}) {
   let afterBatchEntryHook = null;
   let afterBatchEntryIndex = 0;
   let afterAuthoritativeRebuildHook = null;
-  let metadataChangedListener = null;
+  const metadataListeners = new Map();
+  const vaultListeners = new Map();
+  const cachedFrontmatters = new Map();
+  const operations = { inventory: 0, metadata: 0, inspect: 0, registeredEvents: 0, diskReads: 0, feedFetches: 0, snapshots: 0 };
   let settingsSaveCount = 0;
   let failSettingsSave = false;
   const settings = {
-    calendarStorageMode: 'native-records',
+    calendarStorageMode: options.calendarStorageMode || 'native-records',
     noLossSyncMode: false,
     syncOnEventDelete: 'nothing',
     canceledStatusValue: 'cancelled',
@@ -328,6 +331,7 @@ function harness(initialEvents = [], options = {}) {
     capabilities: { calendarTemplateRecords: options.calendarTemplateRecords !== false },
     isEnabled: () => true,
     inspect(frontmatter) {
+      operations.inspect += 1;
       const inspected = identity(frontmatter);
       return inspected?.id && inspected.kind && inspected.schemaVersion === 1
         ? {
@@ -341,6 +345,7 @@ function harness(initialEvents = [], options = {}) {
       return authoritativeHandles(kind);
     },
     async snapshot() {
+      operations.snapshots += 1;
       const snapshot = { token: authoritativeToken, revision: mutationRevision, records: authoritativeHandles() };
       const hook = afterSnapshotHook;
       afterSnapshotHook = null;
@@ -565,33 +570,49 @@ function harness(initialEvents = [], options = {}) {
         : null,
     },
     vault: {
-      getMarkdownFiles: () => [...files.values()],
+      getMarkdownFiles: () => { operations.inventory += 1; return [...files.values()]; },
       getAbstractFileByPath: (path) => files.get(path) || templates.get(path)?.file || null,
       getFileByPath: (path) => files.get(path) || null,
       read: async (file) => {
+        operations.diskReads += 1;
         if (!templates.has(file.path)) throw new Error('template-read-failed');
         return templates.get(file.path).source;
       },
-      on: () => ({}),
+      on: (eventName, listener) => {
+        const listeners = vaultListeners.get(eventName) || [];
+        listeners.push(listener);
+        vaultListeners.set(eventName, listeners);
+        return {};
+      },
     },
     metadataCache: {
-      getFileCache: (file) => cacheNullPaths.has(file.path)
-        ? null
-        : { frontmatter: frontmatters.get(file.path) },
+      getFileCache: (file) => {
+        operations.metadata += 1;
+        return cacheNullPaths.has(file.path)
+          ? null
+          : { frontmatter: cachedFrontmatters.has(file.path) ? cachedFrontmatters.get(file.path) : frontmatters.get(file.path) };
+      },
       getFirstLinkpathDest: (target) => files.get(target.endsWith('.md') ? target : `${target}.md`) || null,
       on: (eventName, listener) => {
-        if (eventName === 'changed') metadataChangedListener = listener;
+        const listeners = metadataListeners.get(eventName) || [];
+        listeners.push(listener);
+        metadataListeners.set(eventName, listeners);
         return {};
       },
     },
   };
   const external = {
     async fetchEventsWithStatus(url) {
+      operations.feedFetches += 1;
       if (fetchHook) return fetchHook(url);
       const state = feedStates.get(url) || { ok: true, events: [] };
       return { ok: state.ok, events: state.ok ? state.events : [], normalizedUrl: url, fromCache: false };
     },
   };
+  for (const [path, frontmatter] of options.initialRecords || []) {
+    files.set(path, makeFile(path));
+    frontmatters.set(path, structuredClone(frontmatter));
+  }
   const service = new NativeCalendarRecordService(app, external, () => settings, async () => {
     settingsSaveCount += 1;
     // Controller's real saveSettings() normalizes this map before persistence,
@@ -599,7 +620,10 @@ function harness(initialEvents = [], options = {}) {
     settings.nativeCalendarCancellationState = structuredClone(settings.nativeCalendarCancellationState);
     if (failSettingsSave) throw new Error('settings-save-failed');
   });
-  service.setup(() => {});
+  // The old service owned an eager scan and background listeners. Run that
+  // historical lifecycle, when present, so the operation-count regressions
+  // fail against the old implementation instead of bypassing the work.
+  if (typeof service.setup === 'function') service.setup(() => { operations.registeredEvents += 1; });
   const rebuildFromHandles = service.rebuildFromHandles.bind(service);
   service.rebuildFromHandles = (handles) => {
     rebuildFromHandles(handles);
@@ -640,6 +664,7 @@ function harness(initialEvents = [], options = {}) {
     mutationLog,
     preflightLog,
     api,
+    operations,
     get settingsSaveCount() { return settingsSaveCount; },
     seedRecord,
     seedRecordOnDisk,
@@ -667,8 +692,14 @@ function harness(initialEvents = [], options = {}) {
     setFailSettingsSave: (value) => { failSettingsSave = value; },
     emitMetadataChanged: (path, frontmatter) => {
       const file = files.get(path);
-      if (!file || !metadataChangedListener) throw new Error(`cannot emit MetadataCache changed for ${path}`);
-      metadataChangedListener(file, '', { frontmatter: structuredClone(frontmatter) });
+      if (!file) throw new Error(`cannot emit MetadataCache changed for ${path}`);
+      cachedFrontmatters.set(path, structuredClone(frontmatter));
+      for (const listener of metadataListeners.get('changed') || []) {
+        listener(file, '', { frontmatter: structuredClone(frontmatter) });
+      }
+    },
+    emitVaultEvent: (eventName, ...args) => {
+      for (const listener of vaultListeners.get(eventName) || []) listener(...args);
     },
   };
 }
@@ -743,6 +774,126 @@ function assertNoPhysicalVirtualFields(frontmatter) {
 function plannedUpdateKeys(entry) {
   return (entry?.updates || []).flatMap((updates) => Object.keys(updates));
 }
+
+test('calendar reconciliation owns no startup scan or background listeners in either storage mode', () => {
+  const initialRecords = Array.from({ length: 10_000 }, (_, index) => [
+    `ordinary-${index}.md`, { title: `Ordinary note ${index}`, type: 'note' },
+  ]);
+  for (const calendarStorageMode of ['legacy', 'native-records']) {
+    const h = harness([], { calendarStorageMode, initialRecords });
+    assert.deepEqual(h.operations, {
+      inventory: 0, metadata: 0, inspect: 0, registeredEvents: 0, diskReads: 0, feedFetches: 0, snapshots: 0,
+    }, calendarStorageMode);
+    assert.equal(h.service.recordsByPath.size, 0);
+    assert.equal(h.service.pathsById.size, 0);
+    assert.equal(h.mutationLog.length, 0);
+  }
+});
+
+test('ordinary metadata/create/rename/delete bursts do not read, index, fetch or mutate calendar records', () => {
+  const h = harness();
+  const before = { ...h.operations };
+  for (let index = 0; index < 20; index += 1) {
+    const path = `ordinary-${index}.md`;
+    const file = h.seedRecordOnDisk(path, { title: 'Ordinary note' });
+    h.emitVaultEvent('create', file);
+    h.emitMetadataChanged(path, { title: 'Changed ordinary note' });
+    h.emitVaultEvent('rename', file, `prior-${index}.md`);
+    h.deleteRecord(path);
+    h.emitVaultEvent('delete', file);
+  }
+  assert.deepEqual(h.operations, before);
+  assert.equal(h.service.recordsByPath.size, 0);
+  assert.equal(h.service.pathsById.size, 0);
+  assert.equal(h.mutationLog.length, 0);
+});
+
+test('plugin construction does not attach a separate calendar background owner', () => {
+  const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+  assert.equal(/nativeCalendarRecordService\.setup\s*\(/u.test(main), false);
+});
+
+test('first sync after idle uses current disk records, not stale or absent metadata delivery', async () => {
+  const incoming = event({ description: 'Current feed description' });
+  const id = canonicalId(calendar.id, incoming.occurrenceIdentity);
+  const path = `${buildNativeCalendarRecordFileName(incoming)}.md`;
+  const h = harness([incoming], { cacheNullPaths: [path] });
+  const current = canonicalFrontmatter(incoming, id, path, { description: 'Earlier feed description', tags: ['authored-on-disk'] });
+  h.seedRecordOnDisk(path, current);
+  h.emitMetadataChanged(path, { ...current, tags: ['obsolete-metadata-tag'] });
+  assert.equal(h.service.recordsByPath.size, 0);
+  const result = await h.service.sync([calendar], '', true, false);
+  assert.equal(result.created, 0);
+  assert.equal(result.updated, 1);
+  assert.equal(h.files.size, 1);
+  assert.deepEqual(h.frontmatters.get(path).tags, ['authored-on-disk']);
+  assert.equal(h.frontmatters.get(path).description, 'Current feed description');
+  assert.equal(h.operations.inventory, 0);
+  assert.equal(h.operations.metadata, 0);
+  assert.equal(h.operations.diskReads, 0, 'Controller uses GCM snapshot handles; the mocked GCM port owns authoritative reads');
+});
+
+test('idle local deletion and external reschedule reconcile from the next snapshot without watcher delivery', async () => {
+  const firstEvent = event();
+  const h = harness([firstEvent]);
+  await h.service.sync([calendar], '', true, false);
+  const [oldPath] = h.files.keys();
+  const id = h.frontmatters.get(oldPath).tpsId;
+  h.deleteRecord(oldPath);
+  const movedStart = futureDate(4, 13);
+  const moved = event({ startDate: movedStart, endDate: new Date(movedStart.getTime() + 45 * 60_000) });
+  h.setEvents([moved]);
+  const result = await h.service.sync([calendar], '', true, false);
+  assert.equal(result.created, 1);
+  assert.equal(h.files.size, 1);
+  const [nextPath] = h.files.keys();
+  assert.equal(h.files.has(oldPath), false);
+  assert.equal(h.frontmatters.get(nextPath).tpsId, id);
+  assert.equal(h.frontmatters.get(nextPath).scheduled, movedStart.toISOString());
+  h.setEvents([]);
+  h.settings.syncOnEventDelete = 'archive';
+  const disappeared = await h.service.sync([calendar], '', true, false);
+  assert.equal(disappeared.archived, 1);
+  assert.equal(h.frontmatters.get(nextPath).archived, true);
+  assert.equal(h.operations.registeredEvents, 0);
+});
+
+test('duplicate canonical calendar ownership arriving while idle blocks the next sync before mutation', async () => {
+  const incoming = event();
+  const id = canonicalId(calendar.id, incoming.occurrenceIdentity);
+  const h = harness([incoming]);
+  h.seedRecordOnDisk('one.md', canonicalFrontmatter(incoming, id, 'one.md'));
+  h.seedRecordOnDisk('two.md', canonicalFrontmatter(incoming, id, 'two.md'));
+  await assert.rejects(h.service.sync([calendar], '', true, false), /rejected duplicate identity/u);
+  assert.equal(h.mutationLog.length, 0);
+  assert.equal(h.service.syncPromise, null);
+});
+
+test('concurrent native sync calls share one authoritative snapshot plan after a pending fetch', async () => {
+  const incoming = event();
+  const id = canonicalId(calendar.id, incoming.occurrenceIdentity);
+  const path = `${buildNativeCalendarRecordFileName(incoming)}.md`;
+  const h = harness([incoming]);
+  let release;
+  const fetched = new Promise(resolve => { release = resolve; });
+  h.setFetchHook(async (url) => {
+    await fetched;
+    return { ok: true, events: [incoming], normalizedUrl: url, fromCache: false };
+  });
+  const first = h.service.sync([calendar], '', true, false);
+  const second = h.service.sync([calendar], '', true, false);
+  assert.equal(second, first);
+  h.seedRecordOnDisk(path, canonicalFrontmatter(incoming, id, path));
+  release();
+  const result = await first;
+  assert.equal(result.created, 0);
+  assert.equal(result.unchanged, 1);
+  assert.equal(h.operations.feedFetches, 1);
+  assert.equal(h.operations.snapshots, 1);
+  assert.equal(h.preflightLog.length, 1);
+  assert.equal(h.mutationLog.length, 0);
+  assert.equal(h.service.syncPromise, null);
+});
 
 test('canonical IDs are deterministic, privacy-safe, URL-independent, and contain the only persisted calendar identity', async () => {
   const firstEvent = event();
@@ -1505,10 +1656,18 @@ test('delayed stale MetadataCache delivery cannot poison authoritative sync payl
   const h = harness([incoming]);
   h.seedRecordOnDisk(path, current);
   h.setAfterAuthoritativeRebuildHook(() => {
+    const before = { ...h.operations };
+    const file = h.files.get(path);
     h.emitMetadataChanged(path, {
       ...current,
       tags: ['calendar-event', 'stale-cache-tag'],
     });
+    h.emitVaultEvent('create', file);
+    h.emitVaultEvent('rename', file, 'obsolete-path.md');
+    h.emitVaultEvent('delete', file);
+    assert.deepEqual(h.operations, before, 'queued cache/vault events do not touch the in-flight planning index');
+    assert.equal(h.mutationLog.length, 0);
+    assert.deepEqual(h.frontmatters.get(path), current, 'queued metadata is not current disk source');
   });
 
   const result = await h.service.sync([{ ...calendar, autoCreateTag: 'managed-calendar' }], '', true, false);

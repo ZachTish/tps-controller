@@ -165,7 +165,7 @@ export interface NativeCalendarSyncResult {
     failedFeeds: number;
 }
 
-/** Controller-owned, one-file-per-occurrence calendar reconciliation. */
+/** Snapshot-owned, one-file-per-occurrence calendar reconciliation. */
 export class NativeCalendarRecordService {
     readonly version = TPS_CONTROLLER_NATIVE_CALENDAR_RECORDS_VERSION;
     private readonly recordsByPath = new Map<string, IndexedCalendarRecord>();
@@ -178,28 +178,6 @@ export class NativeCalendarRecordService {
         private readonly getSettings: () => TPSControllerSettings,
         private readonly persistSettings: () => Promise<void> = async () => {},
     ) {}
-
-    setup(registerEvent: (event: unknown) => void): void {
-        this.rebuild();
-        registerEvent(this.app.metadataCache.on("changed", (file, _data, cache) => {
-            // A sync rebuilds this index from GCM's authoritative disk snapshot.
-            // MetadataCache can deliver an older queued event afterward without
-            // advancing GCM's mutation revision. Do not let that stale cache
-            // payload replace the snapshot-backed planning state.
-            if (!this.syncPromise) this.indexFile(file, cache?.frontmatter);
-        }));
-        registerEvent(this.app.vault.on("create", (file) => {
-            if (!this.syncPromise && file instanceof TFile) this.indexFile(file);
-        }));
-        registerEvent(this.app.vault.on("delete", (file) => {
-            if (!this.syncPromise && file instanceof TFile) this.removePath(file.path);
-        }));
-        registerEvent(this.app.vault.on("rename", (file, oldPath) => {
-            if (this.syncPromise) return;
-            this.removePath(oldPath);
-            if (file instanceof TFile) this.indexFile(file);
-        }));
-    }
 
     isEnabled(): boolean {
         return this.getSettings().calendarStorageMode === "native-records";
@@ -1405,13 +1383,10 @@ export class NativeCalendarRecordService {
         return getGcmApi(this.app)?.nativeRecords || null;
     }
 
-    private rebuild(): void {
-        this.recordsByPath.clear();
-        this.pathsById.clear();
-        for (const file of this.app.vault.getMarkdownFiles()) this.indexFile(file);
-    }
-
     private rebuildFromHandles(handles: GcmNativeRecordHandle[]): void {
+        // This planning state has no background owner. Every sync rebuilds it
+        // from GCM's authoritative snapshot after fetching the feeds, before
+        // any identity/property plan, and again after an applied batch.
         this.recordsByPath.clear();
         this.pathsById.clear();
         for (const handle of handles) {

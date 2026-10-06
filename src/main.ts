@@ -215,7 +215,6 @@ export default class TPSControllerPlugin extends Plugin {
             () => this.settings,
             () => this.saveSettings(),
         );
-        this.nativeCalendarRecordService.setup((event) => this.registerEvent(event as any));
         this.reminderEngine = new ReminderEngine(this.app, this.externalCalendarService);
         this.syncRequestService = new SyncRequestService(this.app, this.manifest.dir);
         this.syncConflictWatcher = new SyncConflictWatcher(this.app);

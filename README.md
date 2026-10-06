@@ -1,5 +1,28 @@
 # TPS Controller
 
+## 3.1.5 — Remove unused calendar startup work
+
+Native calendar reconciliation no longer scans all Markdown metadata at plugin
+startup or keeps a second index refreshed by metadata/create/delete/rename
+events. That index was not consumed between syncs: every calendar sync already
+fetches its feeds and rebuilds planning state from GCM's current authoritative
+snapshot before planning mutations. The existing snapshot, conflict checks,
+single-flight guard, token/revision validation, missing-event policies and
+reschedule behavior remain unchanged. No new cache, watcher, timer, writer,
+schema, settings migration or feature is added.
+
+An isolated installed 3.1.4 baseline with 10,000 synthetic ordinary notes made
+one inventory call, 10,000 metadata reads and 10,000 GCM inspections, and attached
+four unused listeners in both legacy and native calendar modes. This patch
+removes that work; authoritative per-sync discovery retains its existing cost.
+Regression coverage includes idle edits/deletions/reschedules, stale queued
+metadata, duplicate ownership, concurrent sync and mutation safety. Existing
+settings destinations, controls, commands and desktop/mobile layout are unchanged.
+Final evidence and limitations are recorded in
+[3.1.5 release notes](release-notes/3.1.5.md). Minimum Obsidian stays 1.12.3.
+This plugin update is a BRAT handoff, not a TishOS TestFlight build or evidence
+that production/physical devices have installed it.
+
 ## 3.1.4 — Keep reminder matching from blocking interactions
 
 Reminder matching reuses GCM's existing conflict-aware source snapshot instead of
