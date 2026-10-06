@@ -2123,7 +2123,8 @@ export default class TPSControllerPlugin extends Plugin {
         const plugin = (getPluginById(this.app, "tps-global-context-menu")
                     || getPluginById(this.app, "TPS-Global-Context-Menu (Dev)")) as any;
         if (!plugin) return null;
-        const api = plugin.api || {};
+        const api = plugin.api;
+        if (!api) return null;
         return {
             settings: plugin.settings ?? api.settings,
             services: api.services ?? plugin.sharedServices,

@@ -1,5 +1,32 @@
 # TPS Controller
 
+## 3.1.6 — Wait for GCM before maintenance
+
+Controller's GCM lookup now requires its published API before consulting private
+services. Recurrence, parent-link maintenance and hourly timer lookup cannot use
+partially initialized or unloaded GCM service objects. Once GCM publishes its API,
+the existing tick observes it directly and retains the same service receivers and
+compatibility fallbacks. No new availability state, listener, poller, retry, cache,
+writer, setting or UI change is added.
+
+Actual-source regressions cover absent/null/false APIs, removed unload authority,
+enabled and missing plugins, User role, legacy plugin ID, later publication and
+unrelated Calendar/Notifier lookups. The isolated actual Controller/GCM-method
+replay distinguishes the retired parent-repair no-op from still-active legacy
+self-link creation. Synthetic writer/link/safety boundaries do not establish
+physical delivery or input-to-paint latency. All 700 versioned checks pass.
+The full suite's three optional notification-open historical comparisons were
+then run separately against their exact released 0.3.5 baseline: all five
+lifecycle checks pass with no skips. TypeScript and a separate build-only
+verification pass. The ordinary build deployed the matching artifacts to TEST;
+a targeted reload preserved all eight active consumers' settings/data/enabled
+state and Controller's passive role. Installed actual-method controls pass 8/8,
+versus 4/8 before the fix. The TEST window was hidden and unfocused; private
+maintenance receivers were synthetic, and no real automation or physical UI
+timing was measured. Final evidence is in
+[3.1.6 release notes](release-notes/3.1.6.md).
+Minimum Obsidian remains 1.12.3; production installation is the user's BRAT pull.
+
 ## 3.1.5 — Remove unused calendar startup work
 
 Native calendar reconciliation no longer scans all Markdown metadata at plugin
