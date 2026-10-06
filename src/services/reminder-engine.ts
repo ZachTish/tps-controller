@@ -1007,17 +1007,31 @@ export class ReminderEngine {
         const terminalTitleKeys = new Set<string>();
         const authoritativeFrontmatterByPath = new Map<string, Record<string, unknown>>();
         const nativeRecords = getGcmApi(this.app)?.nativeRecords;
+        let conflictingPaths: Set<string> | null = null;
         try {
-            const handles = typeof nativeRecords?.snapshot === "function"
-                ? (await nativeRecords.snapshot()).records
+            const conflictAware = Number(nativeRecords?.version) >= 6
+                && nativeRecords?.capabilities?.conflictAwareSnapshots === true;
+            const snapshot = typeof nativeRecords?.snapshot === "function"
+                ? await nativeRecords.snapshot(undefined, conflictAware ? { includeConflicts: true } : undefined)
+                : null;
+            const handles = snapshot
+                ? snapshot.records
                 : typeof nativeRecords?.list === "function"
                     ? await nativeRecords.list("calendar-event")
                     : [];
+            // GCM supplies conflict diagnostics only after a complete, valid
+            // source snapshot. Disabled/invalid profiles omit them. Reuse that
+            // inspection and keep the existing fallback for conflicted paths.
+            const completeSnapshot = conflictAware && Array.isArray(snapshot?.conflicts);
             for (const handle of handles) {
-                if (String(handle.kind || "") !== "calendar-event") continue;
+                const isCalendarEvent = String(handle.kind || "") === "calendar-event";
+                if (!completeSnapshot && !isCalendarEvent) continue;
                 const identity = this.normalizeRecordIdentity(handle.id);
                 if (identity) recordIds.add(identity);
-                authoritativeFrontmatterByPath.set(handle.path, handle.frontmatter);
+                if (isCalendarEvent) authoritativeFrontmatterByPath.set(handle.path, handle.frontmatter);
+            }
+            if (completeSnapshot) {
+                conflictingPaths = new Set(snapshot!.conflicts!.map(conflict => conflict.path));
             }
         } catch (error) {
             // Reminder matching remains best-effort when GCM detects blocked
@@ -1032,9 +1046,9 @@ export class ReminderEngine {
             const cache = this.app.metadataCache.getFileCache(file);
             const fm = authoritativeFrontmatterByPath.get(file.path)
                 || (cache?.frontmatter || {}) as Record<string, unknown>;
-            const inspectedId = this.normalizeRecordIdentity(
-                getGcmApi(this.app)?.nativeRecords?.inspect?.(fm)?.id,
-            );
+            const inspectedId = conflictingPaths === null || conflictingPaths.has(file.path)
+                ? this.normalizeRecordIdentity(nativeRecords?.inspect?.(fm)?.id)
+                : null;
             const propertyId = this.normalizeRecordIdentity(this.findKeyInsensitive(fm, "tpsId"));
             if (inspectedId) recordIds.add(inspectedId);
             if (propertyId) recordIds.add(propertyId);

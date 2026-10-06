@@ -93,8 +93,11 @@ export async function buildReminderTargetsForFile(
     const lines = content.split(/\r?\n/);
     const noteTags = new Set(getFrontmatterReminderTags(frontmatter));
     noteTarget.reminderTags = [...noteTags];
-    const dailyNotePolicy = getDailyNoteTaskSchedulePolicyViaGcm(app as any, file);
-    const suppressInheritedDailyNoteSchedule = dailyNotePolicy.available
+    // Whole-note reminders never use the retired task inheritance policy.
+    const dailyNotePolicy = inlineMode === "none"
+        ? null
+        : getDailyNoteTaskSchedulePolicyViaGcm(app as any, file);
+    const suppressInheritedDailyNoteSchedule = dailyNotePolicy !== null && dailyNotePolicy.available
         && dailyNotePolicy.isDailyNote
         && !dailyNotePolicy.inheritUnscheduled;
     let inFencedCodeBlock = false;

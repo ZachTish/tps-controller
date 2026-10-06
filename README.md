@@ -1,5 +1,31 @@
 # TPS Controller
 
+## 3.1.4 — Keep reminder matching from blocking interactions
+
+Reminder matching reuses GCM's existing conflict-aware source snapshot instead of
+classifying every note again when one unrelated record has an identity conflict.
+Valid record identities come from that snapshot; only conflicted paths retain
+their individual inspection. Conflict diagnostics never grant an identity by
+themselves. Configured event fields, completion/deletion ownership and legacy
+inline matching remain intact. Older, disabled, invalid or failed snapshot APIs
+retain the previous matching path. No new cache, watcher, retry, writer, schema
+or settings change is introduced.
+
+Whole-note reminder targets also stop requesting GCM's retired inline-task
+inheritance policy. They still read current source for publishing and preserve
+frontmatter, prose tags, completion and reopening checks.
+
+Profiling the installed previous version identified an approximately 0.9-second
+CPU stretch inside event matching and a separate 1.15-second main-thread long
+task. A conflict-inclusive snapshot was already available without another
+whole-vault inspection. Regression tests cover repeated publications, empty and
+failed snapshots, custom mappings, duplicates and completion/deletion changes.
+Pair this update with GCM 7.3.6, which bounds conflict-diagnostic collection.
+Final validation and limitations are in [3.1.4 release notes](release-notes/3.1.4.md).
+This backward-compatible performance patch keeps Obsidian 1.12.3+ and applies to
+desktop and mobile. Test-vault verification is not physical-device acceptance
+or evidence that production has installed the release.
+
 ## 3.1.3 — Stop historical body scans during native reminder refresh
 
 Whole-note calendar matching no longer reads every Markdown body to discover
@@ -558,7 +584,7 @@ release; minimum Obsidian stays 1.12.3. Production installation is the BRAT hand
 
 Device roles, calendar synchronization, reminders, encrypted attachment sync, and shared Plaid transport.
 
-Release status: [GitHub releases](https://github.com/ZachTish/tps-controller/releases) · Obsidian 1.12.3+ · Desktop and mobile. 3.1.3 is Test-vault validated for BRAT handoff, not a production installation; see GitHub releases for publication status.
+Release status: [GitHub releases](https://github.com/ZachTish/tps-controller/releases) · Obsidian 1.12.3+ · Desktop and mobile. See the current release notes for validation and BRAT handoff; publication and production installation are separate.
 
 ## Install with BRAT
 

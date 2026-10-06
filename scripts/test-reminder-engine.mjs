@@ -45,7 +45,7 @@ function loadTpsGcmApiModule() {
   return module.exports;
 }
 
-function loadReminderTargetModule(taskSchedulePolicy = { available: false, isDailyNote: false, inheritUnscheduled: true }) {
+function loadReminderTargetModule(taskSchedulePolicy = { available: false, isDailyNote: false, inheritUnscheduled: true }, onPolicyRead = () => {}) {
   const compiled = ts.transpileModule(reminderTargetSource, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2018 },
   });
@@ -54,7 +54,10 @@ function loadReminderTargetModule(taskSchedulePolicy = { available: false, isDai
     if (id === '../tps-gcm-api') {
       return {
         buildCalendarExternalId: () => 'calendar:test',
-        getDailyNoteTaskSchedulePolicyViaGcm: () => taskSchedulePolicy,
+        getDailyNoteTaskSchedulePolicyViaGcm: () => {
+          onPolicyRead();
+          return taskSchedulePolicy;
+        },
       };
     }
     if (id === 'obsidian') return { getFrontMatterInfo, parseYaml };
@@ -669,13 +672,22 @@ function createExternalEventMatchOperationFixture(mode, unrelatedCount = 4000) {
   };
   const unmatchedEvent = { ...matchingEvent, id: 'actually-unmatched', uid: 'actually-unmatched', occurrenceIdentity: 'actually-unmatched', title: 'Feed-only event' };
   const canonicalID = buildCanonicalCalendarRecordId(calendarId, matchingEvent.occurrenceIdentity);
-  const counts = { enumeration: 0, metadata: 0, cachedRead: 0, snapshot: 0, feedFetch: 0 };
+  const counts = { enumeration: 0, metadata: 0, cachedRead: 0, snapshot: 0, inspect: 0, feedFetch: 0 };
   const records = [];
+  const conflicts = [];
+  const snapshotRequests = [];
+  const nativeRecords = {
+    version: 6,
+    capabilities: { conflictAwareSnapshots: true },
+    snapshot: async (...args) => {
+      counts.snapshot++;
+      snapshotRequests.push(args);
+      return { token: 1, revision: 1, records, conflicts };
+    },
+    inspect: () => { counts.inspect++; return null; },
+  };
   const harness = loadCompiledReminderEngineHarness({
-    gcmApi: { nativeRecords: {
-      snapshot: async () => { counts.snapshot++; return { token: 1, records }; },
-      inspect: () => null,
-    } },
+    gcmApi: { nativeRecords },
     parseFrontmatterDate: (value) => {
       const date = new Date(value);
       return Number.isFinite(date.getTime()) ? date : null;
@@ -703,7 +715,7 @@ function createExternalEventMatchOperationFixture(mode, unrelatedCount = 4000) {
   const engine = new harness.ReminderEngine(app, {
     fetchEvents: async () => { counts.feedFetch++; return [matchingEvent, unmatchedEvent]; },
   });
-  return { engine, app, settings, counts, files, records, renamedFile, matchingEvent, unmatchedEvent };
+  return { engine, app, settings, counts, files, records, conflicts, snapshotRequests, nativeRecords, renamedFile, matchingEvent, unmatchedEvent };
 }
 
 test('whole-note external-event matching does not read 4,000 unrelated bodies on repeated publications', async (t) => {
@@ -718,7 +730,81 @@ test('whole-note external-event matching does not read 4,000 unrelated bodies on
   assert.equal(fixture.counts.snapshot, 3, 'existing authoritative native identity discovery remains in use');
   assert.equal(fixture.counts.enumeration, 3, 'one existing vault enumeration per match pass; no new index or query');
   assert.equal(fixture.counts.cachedRead, 0, 'native whole-note matching must not inspect retired inline calendar bodies');
+  assert.equal(fixture.counts.inspect, 0, 'complete native snapshots must not repeat full schema inspection for 12,003 files');
+  assert.deepEqual(fixture.snapshotRequests, Array.from({ length: 3 }, () => [undefined, { includeConflicts: true }]));
 });
+
+test('complete native snapshots preserve mapped identities across kinds and current empty results', async () => {
+  const fixture = createExternalEventMatchOperationFixture('native-records', 0);
+  const record = fixture.records[0];
+  record.frontmatter = { 'Custom identity': record.id, when: '2026-11-01', status: 'complete' };
+  record.kind = 'task';
+  const mapped = await fixture.engine.buildUnmatchedExternalReminderTargets([], fixture.settings);
+  assert.deepEqual(mapped.map(target => target.externalEvent.id), [fixture.unmatchedEvent.id],
+    'snapshot handle identity is authoritative even when canonical properties are mapped and the kind differs');
+  fixture.records.splice(0);
+  fixture.app.metadataCache.getFileCache = () => ({ frontmatter: { __inspectedId: record.id } });
+  fixture.nativeRecords.inspect = () => { fixture.counts.inspect++; return { id: record.id }; };
+  const empty = await fixture.engine.buildUnmatchedExternalReminderTargets([], fixture.settings);
+  assert.deepEqual(empty.map(target => target.externalEvent.id), [fixture.matchingEvent.id, fixture.unmatchedEvent.id],
+    'a complete empty snapshot must not resurrect a removed mapped identity from stale metadata');
+  assert.equal(fixture.counts.inspect, 0);
+});
+
+test('conflict-aware reminder matching inspects only conflicting paths without claiming diagnostic IDs', async () => {
+  const fixture = createExternalEventMatchOperationFixture('native-records', 4000);
+  const id = fixture.records[0].id;
+  fixture.records.splice(0);
+  const duplicate = new fixture.renamedFile.constructor('Duplicate event.md');
+  fixture.files.push(duplicate);
+  for (const file of [fixture.renamedFile, duplicate]) {
+    fixture.conflicts.push({ path: file.path, ids: [id], kinds: ['calendar-event'], frontmatter: null });
+  }
+  let status = 'scheduled';
+  fixture.app.metadataCache.getFileCache = file => ({ frontmatter: fixture.conflicts.some(conflict => conflict.path === file.path)
+    ? { __inspectedId: id, status } : {} });
+  fixture.nativeRecords.inspect = fm => { fixture.counts.inspect++; return fm.__inspectedId ? { id: fm.__inspectedId } : null; };
+  for (const nextStatus of ['scheduled', 'complete']) {
+    status = nextStatus;
+    const unmatched = await fixture.engine.buildUnmatchedExternalReminderTargets([], fixture.settings);
+    assert.deepEqual(unmatched.map(target => target.externalEvent.id), [fixture.unmatchedEvent.id],
+      'duplicate owners and authored completion preserve the existing validated match');
+  }
+  fixture.files.splice(fixture.files.indexOf(duplicate), 1);
+  fixture.conflicts.splice(1, 1);
+  const retained = await fixture.engine.buildUnmatchedExternalReminderTargets([], fixture.settings);
+  assert.deepEqual(retained.map(target => target.externalEvent.id), [fixture.unmatchedEvent.id]);
+  fixture.nativeRecords.inspect = () => { fixture.counts.inspect++; return null; };
+  const unproven = await fixture.engine.buildUnmatchedExternalReminderTargets([], fixture.settings);
+  assert.deepEqual(unproven.map(target => target.externalEvent.id), [fixture.matchingEvent.id, fixture.unmatchedEvent.id],
+    'conflict diagnostics alone cannot claim ownership when inspection rejects the metadata');
+  fixture.files.splice(fixture.files.indexOf(fixture.renamedFile), 1);
+  fixture.conflicts.splice(0);
+  const deleted = await fixture.engine.buildUnmatchedExternalReminderTargets([], fixture.settings);
+  assert.deepEqual(deleted.map(target => target.externalEvent.id), [fixture.matchingEvent.id, fixture.unmatchedEvent.id]);
+  assert.equal(fixture.counts.inspect, 6, 'only two, two, one, one and zero conflicting paths are inspected across passes');
+  assert.equal(fixture.counts.cachedRead, 0);
+});
+
+for (const scenario of ['unsupported diagnostics', 'missing diagnostics', 'invalid configuration empty result', 'failed snapshot']) {
+  test(`reminder matching retains inspection fallback for ${scenario}`, async () => {
+    const fixture = createExternalEventMatchOperationFixture('native-records', 1);
+    const id = fixture.records[0].id;
+    fixture.records.splice(0);
+    fixture.app.metadataCache.getFileCache = file => ({ frontmatter: file === fixture.renamedFile ? { __inspectedId: id } : {} });
+    fixture.nativeRecords.inspect = fm => { fixture.counts.inspect++; return fm.__inspectedId ? { id: fm.__inspectedId } : null; };
+    if (scenario === 'unsupported diagnostics') fixture.nativeRecords.capabilities = {};
+    if (scenario !== 'unsupported diagnostics') {
+      fixture.nativeRecords.snapshot = async () => {
+        if (scenario === 'failed snapshot') throw new Error('Unreadable authoritative source');
+        return { token: 0, revision: 0, records: [] };
+      };
+    }
+    const unmatched = await fixture.engine.buildUnmatchedExternalReminderTargets([], fixture.settings);
+    assert.deepEqual(unmatched.map(target => target.externalEvent.id), [fixture.unmatchedEvent.id]);
+    assert.equal(fixture.counts.inspect, 2, 'uncertified discovery keeps the original best-effort per-file validation');
+  });
+}
 
 test('legacy external-event matching retains authored hidden inline calendar identity', async () => {
   const fixture = createExternalEventMatchOperationFixture('legacy', 0);
@@ -1978,6 +2064,44 @@ test('notification command expands and focuses the sidebar view leaf', () => {
   assert.doesNotMatch(overdueSource, /activateLeafTab/);
   assert.doesNotMatch(overdueSource, /leaf\.loadIfDeferred/);
   assert.doesNotMatch(overdueSource, /await \(leaf\.view as any\)\?\.refresh\?\.\(\)/);
+});
+
+test('whole-note target refreshes never request retired GCM task schedule policy', async () => {
+  let policyReads = 0;
+  let currentReads = 0;
+  let cachedReads = 0;
+  const { buildReminderTargetsForFile } = loadReminderTargetModule(
+    { available: true, isDailyNote: true, inheritUnscheduled: false },
+    () => { policyReads += 1; },
+  );
+  const files = Array.from({ length: 40 }, (_, index) => ({
+    path: `Daily/Fixture-${index}.md`, basename: `Fixture-${index}`, extension: 'md',
+  }));
+  let status = 'scheduled';
+  const content = () => `---\nscheduled: 2026-10-07 09:00\nstatus: ${status}\ntags: [frontmatter-tag]\n---\nProse #current-tag\n- [ ] Retired inline task [scheduled:: 2026-10-07 10:00] #task-only\n`;
+  const app = { vault: {
+    getAbstractFileByPath: (path) => files.find(file => file.path === path),
+    read: async () => { currentReads += 1; return content(); },
+    cachedRead: async () => { cachedReads += 1; return content(); },
+  } };
+  for (const inlineTaskReminders of ['none', 'gcm', 'scheduled', 'all']) {
+    for (let pass = 0; pass < 3; pass += 1) {
+      status = pass === 1 ? 'complete' : 'scheduled';
+      for (const file of files) {
+        const targets = await buildReminderTargetsForFile(
+          app, file, { scheduled: '2026-10-06 09:00', status: 'stale' },
+          { inlineTaskReminders, calendarStorageMode: 'native-records' }, pass !== 1,
+        );
+        assert.equal(targets.length, 1, 'saved historical inline settings still produce only note reminders');
+        assert.equal(targets[0].targetKind, 'note');
+        assert.equal(targets[0].sourceFrontmatter.status, status, 'completion and reopening use the current body');
+        assert.deepEqual(targets[0].reminderTags, ['#frontmatter-tag', '#current-tag']);
+      }
+    }
+  }
+  assert.equal(currentReads, 320, 'signed projections retain their one authoritative read per candidate');
+  assert.equal(cachedReads, 160, 'display refreshes retain their one cached read per candidate');
+  assert.equal(policyReads, 0, 'whole-note reminders must not trigger GCM daily-note settings resolution');
 });
 
 test('reminder candidate discovery includes task-line reminder entities without parent frontmatter', () => {
