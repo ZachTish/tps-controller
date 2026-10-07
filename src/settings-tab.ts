@@ -1306,45 +1306,54 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             }
         });
 
-        container.empty();
         const reminders = this.plugin.settings.reminders || [];
 
         if (reminders.length === 0) {
+            container.empty();
             const empty = container.createDiv({ cls: 'tps-empty-state' });
             empty.textContent = 'No reminder rules configured.';
             return;
         }
 
-        const reminderToolbar = container.createDiv({ cls: 'tps-reminder-rules-toolbar' });
-        const filterInput = reminderToolbar.createEl('input', {
-            cls: 'tps-reminder-rules-filter',
-            type: 'text',
-            placeholder: 'Filter rules by label, property, folder, or status'
-        });
-        filterInput.value = this.reminderRuleFilterQuery;
-        filterInput.addEventListener('input', () => {
-            this.reminderRuleFilterQuery = filterInput.value;
-            this.renderReminderRules(container);
-        });
-
-        const toolbarActions = reminderToolbar.createDiv({ cls: 'tps-reminder-rules-toolbar-actions' });
-        const expandAllBtn = toolbarActions.createEl('button', { text: 'Expand All' });
-        expandAllBtn.addEventListener('click', () => {
-            reminders.forEach((rem, index) => {
-                const ruleId = rem.id || `rule-${index}`;
-                this.reminderRuleViewState.set(ruleId, true);
+        // Keep the filter mounted while its results change, preserving typing/IME focus.
+        if (!container.querySelector('.tps-reminder-rules-toolbar')) {
+            container.empty();
+            const reminderToolbar = container.createDiv({ cls: 'tps-reminder-rules-toolbar' });
+            const filterInput = reminderToolbar.createEl('input', {
+                cls: 'tps-reminder-rules-filter',
+                type: 'text',
+                placeholder: 'Filter rules by label, property, folder, or status'
             });
-            this.renderReminderRules(container);
-        });
-
-        const collapseAllBtn = toolbarActions.createEl('button', { text: 'Collapse All' });
-        collapseAllBtn.addEventListener('click', () => {
-            reminders.forEach((rem, index) => {
-                const ruleId = rem.id || `rule-${index}`;
-                this.reminderRuleViewState.set(ruleId, false);
+            filterInput.setAttr('aria-label', 'Filter reminder rules');
+            filterInput.value = this.reminderRuleFilterQuery;
+            filterInput.addEventListener('input', () => {
+                this.reminderRuleFilterQuery = filterInput.value;
+                this.renderReminderRules(container);
             });
-            this.renderReminderRules(container);
-        });
+
+            const toolbarActions = reminderToolbar.createDiv({ cls: 'tps-reminder-rules-toolbar-actions' });
+            const expandAllBtn = toolbarActions.createEl('button', { text: 'Expand All' });
+            expandAllBtn.addEventListener('click', () => {
+                (this.plugin.settings.reminders || []).forEach((rem, index) => {
+                    const ruleId = rem.id || `rule-${index}`;
+                    this.reminderRuleViewState.set(ruleId, true);
+                });
+                this.renderReminderRules(container);
+            });
+
+            const collapseAllBtn = toolbarActions.createEl('button', { text: 'Collapse All' });
+            collapseAllBtn.addEventListener('click', () => {
+                (this.plugin.settings.reminders || []).forEach((rem, index) => {
+                    const ruleId = rem.id || `rule-${index}`;
+                    this.reminderRuleViewState.set(ruleId, false);
+                });
+                this.renderReminderRules(container);
+            });
+        }
+
+        const results = container.querySelector<HTMLElement>('.tps-controller-reminder-rule-results')
+            || container.createDiv({ cls: 'tps-controller-reminder-rule-results' });
+        results.empty();
 
         const normalizedQuery = this.reminderRuleFilterQuery.trim().toLowerCase();
         const visibleRules = reminders
@@ -1367,14 +1376,14 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             });
 
         if (visibleRules.length === 0) {
-            const emptyFiltered = container.createDiv({ cls: 'tps-empty-state' });
+            const emptyFiltered = results.createDiv({ cls: 'tps-empty-state' });
             emptyFiltered.textContent = 'No reminder rules match the current filter.';
             return;
         }
 
         visibleRules.forEach(({ rem, index }) => {
             const ruleId = rem.id || `rule-${index}`;
-            const ruleEl = container.createEl('details', { cls: 'tps-controller-reminder-rule' });
+            const ruleEl = results.createEl('details', { cls: 'tps-controller-reminder-rule' });
             ruleEl.dataset.ruleId = ruleId;
 
             if (this.reminderRuleViewState.get(ruleId)) {

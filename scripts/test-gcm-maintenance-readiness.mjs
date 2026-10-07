@@ -215,3 +215,23 @@ test('waiting for GCM does not affect Calendar or Notifier lookup contracts', ()
   assert.equal(h.controller.getNotifierPlugin(), h.notifier);
   assert.equal(h.counts.privateAccess + h.counts.inventory + h.counts.metadata + h.counts.provider, 0);
 });
+
+test('empty scope dispatches no recovery and never inventories or accesses GCM', async () => {
+  const h = createHarness(); await h.controller.runRecurrenceMaintenanceTick([]);
+  assertNoMaintenance(h); assert.equal(h.counts.registry, 0);
+});
+
+test('scoped dispatch preserves exact paths and receiver without a Controller inventory', async () => {
+  const h = createHarness(); const paths = ['Calendar/Changed.md'];
+  h.frame.recurrence.checkMissingRecurrences = async function(scope) {
+    assert.equal(this, h.frame.recurrence); assert.equal(scope, paths); h.counts.recurrence++;
+  };
+  await h.controller.runRecurrenceMaintenanceTick(paths);
+  assert.equal(h.counts.recurrence, 1); assert.equal(h.counts.inventory + h.counts.reads + h.counts.writes, 0);
+});
+
+test('recovery failure propagates to the calendar caller rather than reporting success', async () => {
+  const h = createHarness(); const failure = new Error('recurrence write failed');
+  h.frame.recurrence.checkMissingRecurrences = async () => { throw failure; };
+  await assert.rejects(h.controller.runRecurrenceMaintenanceTick(['Calendar/Changed.md']), error => error === failure);
+});

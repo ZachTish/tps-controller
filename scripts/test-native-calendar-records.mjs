@@ -3116,6 +3116,7 @@ test('settled repeat sync skips the write batch entirely',async()=>{
  h.api.applyIdentityChanges=async()=>{throw Error('Unchanged records must not enter a write batch')};
  const r=await h.service.sync([calendar],'',true,false);
  assert.equal(r.created,0);assert.equal(r.updated,0);assert.equal(r.unchanged,1);
+ assert.deepEqual(r.appliedPaths, [], 'unchanged owners must not be sent to recurrence recovery');
 });
 
 test('new occurrences use one validated path plan without replaying unchanged owners',async()=>{
@@ -3134,6 +3135,19 @@ test('new occurrences use one validated path plan without replaying unchanged ow
  assert.equal(planCalls,1);
  assert.equal(r.created,1);assert.equal(applied.length,1);assert.equal(applied[0].operation,'create');
  assert.deepEqual(h.mutationLog.slice(priorMutations).map(entry=>entry.type),['create']);
+ const createdPath=[...h.frontmatters].find(([,fm])=>fm.tpsId===canonicalId(calendar.id,'second-distinct'))[0];
+ assert.deepEqual(r.appliedPaths,[createdPath], 'only actual applied handles are sent, not all planned owners');
+});
+
+test('successful rename, cancellation and archive report their actual applied handle paths', async () => {
+ const original=event(); const h=harness([original]);
+ const run=h.api.applyIdentityChanges.bind(h.api); let expected=[];
+ h.api.applyIdentityChanges=async(...args)=>{ const result=await run(...args); expected=[...new Set(result.handles.map(handle=>handle.path))]; return result; };
+ const check=async()=>{ const result=await h.service.sync([calendar],'',true,false); assert.deepEqual(result.appliedPaths,expected); assert.ok(expected.length); };
+ await check();
+ h.setEvents([event({title:'Changed title'})]); await check();
+ h.setEvents([event({title:'Changed title',isCancelled:true})]); await check();
+ h.settings.syncOnEventDelete='archive'; h.setEvents([]); await check();
 });
 
 test('a generation change after planning is rejected at the write boundary',async()=>{

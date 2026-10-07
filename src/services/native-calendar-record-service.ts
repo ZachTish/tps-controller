@@ -155,6 +155,8 @@ function nativeCalendarFieldKeys(settings: TPSControllerSettings): NativeCalenda
 }
 
 export interface NativeCalendarSyncResult {
+    /** Final paths from the successfully applied, validated mutation handles. */
+    appliedPaths: string[];
     fetched: number;
     created: number;
     updated: number;
@@ -241,6 +243,7 @@ export class NativeCalendarRecordService {
         const cancellationStateSnapshot = cloneCancellationState(settings.nativeCalendarCancellationState);
         const plannedAtIso = new Date().toISOString();
         const result: NativeCalendarSyncResult = {
+            appliedPaths: [],
             fetched: 0,
             created: 0,
             updated: 0,
@@ -346,6 +349,7 @@ export class NativeCalendarRecordService {
                     throw new Error("TPS GCM returned a calendar batch result that differs from its authoritative plan.");
                 }
             }
+            result.appliedPaths = [...new Set(applied.map(handle => handle.path))];
         }
         await this.commitCancellationStateUpdates(mutationPlan.postApplyCancellationStateUpdatesById);
 

@@ -24,7 +24,7 @@ export class CalendarAutomationService {
         private nativeCalendarRecordService: NativeCalendarRecordService,
         private getSettings: () => TPSControllerSettings,
         private getCalendarPlugin: () => CalendarPluginAPI | null,
-        private onSyncComplete: () => Promise<void>,
+        private onSyncComplete: (appliedPaths: readonly string[]) => Promise<void>,
         private getSyncReadiness: () => { ready: boolean; reason: string }
     ) {}
 
@@ -159,7 +159,7 @@ export class CalendarAutomationService {
                 force,
                 options.backfillPastEvents,
             );
-            await this.onSyncComplete();
+            if (result.appliedPaths.length > 0) await this.onSyncComplete(result.appliedPaths);
             this.app.workspace.trigger(TPS_EVENTS.CALENDAR_SYNC_COMPLETED as any, {
                 sourcePluginId: "tps-controller",
                 timestamp: Date.now(),

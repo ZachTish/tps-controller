@@ -111,7 +111,7 @@ interface GcmPluginAPI {
         getActiveTimers?(): Promise<GcmTimeTrackingSession[]>;
     };
     bulkEditService?: {
-        checkMissingRecurrences?: () => Promise<void>;
+        checkMissingRecurrences?: (paths?: readonly string[]) => Promise<void>;
         reconcileParentChildLinksForParent?: (parentFile: TFile) => Promise<number>;
         ensureParentSelfLinkForParent?: (parentFile: TFile) => Promise<boolean>;
     };
@@ -227,7 +227,7 @@ export default class TPSControllerPlugin extends Plugin {
             this.nativeCalendarRecordService,
             () => this.settings,
             () => this.getCalendarPlugin(),
-            () => this.runRecurrenceMaintenanceTick(),
+            (paths) => this.runRecurrenceMaintenanceTick(paths),
             () => this.getCalendarSyncReadiness()
         );
         this.twoStageArchiveService = new TwoStageArchiveService(this.app, () => this.settings, () => this.saveSettings());
@@ -2133,7 +2133,8 @@ export default class TPSControllerPlugin extends Plugin {
         } as GcmPluginAPI;
     }
 
-    private async runRecurrenceMaintenanceTick(): Promise<void> {
+    private async runRecurrenceMaintenanceTick(paths?: readonly string[]): Promise<void> {
+        if (paths !== undefined && paths.length === 0) return;
         if (!this.deviceRoleManager.isController()) {
             logger.flow("Maintenance", "recurrence:skip-role", { role: this.deviceRoleManager.role });
             return;
@@ -2146,11 +2147,12 @@ export default class TPSControllerPlugin extends Plugin {
             return;
         }
         try {
-            logger.flow("Maintenance", "recurrence:start");
-            await checkMissing.call(gcm?.services?.recurrence || gcm?.bulkEditService);
+            logger.flow("Maintenance", "recurrence:start", { scope: paths === undefined ? "full" : "changed", paths: paths?.length });
+            await checkMissing.call(gcm?.services?.recurrence || gcm?.bulkEditService, paths);
             logger.flow("Maintenance", "recurrence:done");
         } catch (error) {
             logger.flowError("Maintenance", "recurrence:failed", error);
+            throw error;
         }
     }
 

@@ -1,5 +1,74 @@
 # TPS Controller
 
+## 3.1.7 — Scope recurrence recovery and preserve reminder filter focus
+
+Successful native calendar sync now gives GCM recurrence recovery the final paths
+returned by its validated mutation batch. Unchanged syncs perform no recurrence
+dispatch. Created, updated, renamed, canceled and archived records use their actual
+applied handles; failed or interrupted batches do not report success or trigger
+recovery. A thrown recovery failure now rejects the sync caller after logging instead of
+silently reporting successful settlement. Calendar planning, atomic protections,
+settings, device-role gates and the existing sync interval remain unchanged.
+
+GCM remains the sole recurrence worker. Pair this release with GCM 8.0.0 for scoped
+recovery and coalesced overlapping startup/sync requests. Older GCM versions remain
+functionally compatible but may ignore the scope and scan the full vault after a
+changed sync. No-argument GCM startup recovery and completion-driven recurrence
+remain intact. The calendar timer no longer incidentally checks unrelated notes
+after each sync; direct edits outside GCM's completion actions are covered by GCM's
+existing startup recovery. This adds no timer, watcher, cache, automatic retry,
+mailbox, settings migration or vault remediation.
+
+The reminder-rule filter also keeps its original input mounted while results
+change. Typing no longer detaches the focused input after the first character;
+multi-character input, no matches, clearing and IME composition preserve focus,
+selection and the existing listener. Only the result region is rebuilt. No new
+stored UI state, timer, settings value or rule evaluation is added.
+
+Actual-source regressions cover zero dispatches/inventories/reads/writes for the
+unchanged-sync callback, exact changed-path dispatch, no Controller inventory,
+role/API readiness, error propagation, validated creates/renames/cancellations/
+archives and exclusion of unchanged owners. The focused Controller checks pass
+159/159; paired GCM scope/protection/native-record/mutation-owner checks pass
+312/312, including actual dated and undated successor creation with stale metadata.
+The undated tracker regression reproduced two successors before the GCM source
+authority correction and creates one afterward. Recovery reuses its existing raw
+read and unchanged parser; current source owns the generation marker, completion
+and recurrence rule. Existing creation helpers retain their handled-failure
+Notice/log/false contract, while thrown worker errors reject joined callers after
+independent pending scopes drain. Reminder-filter and command-surface checks pass
+31/31; the exact 3.1.6 baseline fails two of four filter controls. These are synthetic boundary
+and operation-count tests, not provider delivery, physical-device latency or
+production measurements. The final versioned full suite passes 713/713 with no
+skips, including the three historical notification comparisons against the exact
+released 0.3.5 baseline. TypeScript and a separate final build-only gate pass with
+`TPS_NO_DEPLOY=1`.
+
+The ordinary build was then deployed and targeted reload loaded Controller 3.1.7
+beside GCM 8.0.0 in TEST. Installed compiled Calendar automation, Controller
+dispatch, the published GCM API and its actual worker passed the bounded replay:
+unchanged sync performs zero dispatches, inventories, metadata lookups, reads or
+writes; two applied ordinary paths cause one dispatch, two metadata lookups and
+zero inventories, source reads or writes. No-argument recovery still inventories
+1,000 synthetic notes once and inspects their metadata once each. Queued recovery
+while metadata remains stale creates exactly one successor for both dated and
+undated tracker rules. Vault, metadata, atomic writes, journal and daily-note
+classification boundaries are synthetic; no real notes, providers or recurrence
+state were changed. These operation counts do not establish input-to-paint or
+physical-device speed.
+
+Installed filter UI QA also passes with the actual settings renderer and native
+controls in Obsidian 1.14.4's separate, visible Settings window. TEST has no real
+reminder rules, so the fixture uses two immutable synthetic rules and refuses
+save/execution calls. Twelve native input events and thirteen snapshots preserve
+the same connected input, toolbar, owner-document focus and cursor. Typing
+`morning` shows one rule, `zzzz` shows none and clearing shows both. Save, reminder
+restart and policy-refresh attempts stay at zero. Cleanup restores the original
+settings nodes, instrumentation and leaf; real settings remain unchanged. The final ordinary production build passed with byte-identical artifacts and
+reported the test runtime unchanged. Public publication is the remaining handoff step. See
+[3.1.7 release notes](release-notes/3.1.7.md) for the tested artifact hashes.
+Minimum Obsidian stays 1.12.3. This backward-compatible performance patch is ready for the user’s BRAT pull after public publication; production installation remains separate.
+
 ## 3.1.6 — Wait for GCM before maintenance
 
 Controller's GCM lookup now requires its published API before consulting private

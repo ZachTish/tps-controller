@@ -80,6 +80,7 @@ function loadCalendarAutomation(logs, notices) {
 
 function createHarness({
   runNativeSync,
+  appliedPaths = ['Calendar/Changed.md'],
   runCompletion = async () => {},
   onEvent = () => {},
   getReadiness = () => ({ ready: true, reason: "ready" }),
@@ -117,7 +118,7 @@ function createHarness({
     async sync(...args) {
       nativeSyncCalls.push(args);
       await runNativeSync(...args);
-      return { fetched: 1, created: 0, updated: 0, archived: 0, failedFeeds: 0 };
+      return { fetched: 1, created: 0, updated: 0, archived: 0, failedFeeds: 0, appliedPaths };
     },
   };
   let service;
@@ -144,6 +145,23 @@ function createHarness({
 function eventCount(events, name) {
   return events.filter((event) => event.name === name).length;
 }
+
+test('unchanged sync performs zero recurrence dispatches, inventories, reads or writes', async () => {
+  const counts = { recoveries: 0, inventories: 0, reads: 0, writes: 0 };
+  const h = createHarness({ appliedPaths: [], async runNativeSync() {}, async runCompletion() {
+    counts.recoveries++; counts.inventories++; counts.reads++; counts.writes++;
+  } });
+  await h.service.runSync(); await h.service.runSync(true);
+  assert.deepEqual(counts, { recoveries: 0, inventories: 0, reads: 0, writes: 0 });
+  assert.equal(eventCount(h.events, COMPLETED), 2, 'unchanged sync still reports successful settlement');
+});
+
+test('changed sync sends only its successful applied paths to recurrence recovery', async () => {
+  const paths = ['Calendar/Created.md', 'Calendar/Renamed.md']; const scopes = [];
+  const h = createHarness({ appliedPaths: paths, async runNativeSync() {}, async runCompletion(scope) { scopes.push(scope); } });
+  await h.service.runSync();
+  assert.deepEqual(scopes, [paths]);
+});
 
 test("saved legacy calendar mode pauses before either sync writer", async () => {
   const harness = createHarness({
