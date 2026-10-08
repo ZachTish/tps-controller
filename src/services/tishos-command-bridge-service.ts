@@ -161,6 +161,13 @@ interface TishOSCommandBridgeRefreshOutcome extends TishOSCommandBridgeRefreshRe
     nativeNotificationRemovedSeriesPlatforms: TishOSPlatform[];
 }
 
+// Per-pass bookkeeping stays inside the serial drain. Command failures cannot
+// be cleared by a schedule-only pass; native failures can be replaced by it.
+interface BridgeRefreshPassOutcome extends TishOSCommandBridgeRefreshOutcome {
+    catalogFailedClientIDs?: string[];
+    nativeFailedClientIDs?: string[];
+}
+
 interface NativeNotificationRefreshOutcome {
     readyClientIDs: Set<string>;
     failedClientIDs: Set<string>;
@@ -413,6 +420,7 @@ export class TishOSCommandBridgeService {
     private stopped = false;
     private refreshPromise: Promise<TishOSCommandBridgeRefreshOutcome> | null = null;
     private pendingRefreshReason: string | null = null;
+    private pendingCatalogRefresh = false;
     private pollIntervalID: number | null = null;
     private readonly pendingReturnGenerations = new Map<string, string>();
     private activePairingLane: ActivePairingLane | null = null;
@@ -488,6 +496,7 @@ export class TishOSCommandBridgeService {
         if (this.stopPromise) return this.stopPromise;
         this.stopped = true;
         this.pendingRefreshReason = null;
+        this.pendingCatalogRefresh = false;
         this.nativeRefreshReadyGenerations.clear();
         this.lifecycleGeneration += 1;
         this.layoutReady = false;
@@ -643,9 +652,24 @@ export class TishOSCommandBridgeService {
         }, () => false, lifecycle);
     }
 
+    canRefreshNativeNotifications(): boolean {
+        if (this.stopped || !this.layoutReady || !this.notificationScheduleProvider) return false;
+        try { return this.loadPairingState().clients.length > 0; }
+        catch { return false; }
+    }
+
     refreshCatalogs(reason = "manual"): Promise<TishOSCommandBridgeRefreshOutcome> {
+        return this.queueRefresh(reason, true);
+    }
+
+    refreshNativeNotifications(reason = "note-change"): Promise<TishOSCommandBridgeRefreshOutcome> {
+        return this.queueRefresh(reason, false);
+    }
+
+    private queueRefresh(reason: string, includeCatalog: boolean): Promise<TishOSCommandBridgeRefreshOutcome> {
         if (this.stopped) return Promise.resolve(this.unavailableRefresh("service-stopped"));
         this.pendingRefreshReason = reason;
+        this.pendingCatalogRefresh ||= includeCatalog;
         if (this.refreshPromise) return this.refreshPromise;
         this.nativeRefreshReadyGenerations.clear();
         const lifecycle = this.lifecycleGeneration;
@@ -655,12 +679,33 @@ export class TishOSCommandBridgeService {
         // waiting caller can treat the signed schedule as current.
         const operation = Promise.resolve().then(async () => {
             let outcome = this.unavailableRefresh("service-stopped");
+            let catalogOutcome: { outcome: TishOSCommandBridgeRefreshOutcome; failedClientIDs: string[] } | null = null;
             try {
                 while (this.isLifecycleActive(lifecycle) && this.pendingRefreshReason !== null) {
                     const refreshReason = this.pendingRefreshReason;
+                    const refreshCatalog = this.pendingCatalogRefresh;
                     this.pendingRefreshReason = null;
+                    this.pendingCatalogRefresh = false;
                     try {
-                        outcome = await this.refreshCatalogsInternal(refreshReason);
+                        const { catalogFailedClientIDs = [], nativeFailedClientIDs = [], ...current } =
+                            await this.refreshCatalogsInternal(refreshReason, refreshCatalog);
+                        outcome = current;
+                        if (refreshCatalog) catalogOutcome = { outcome, failedClientIDs: catalogFailedClientIDs };
+                        else if (catalogOutcome) {
+                            const catalog = catalogOutcome.outcome;
+                            const failedCatalogClientIDs = catalogOutcome.failedClientIDs;
+                            const catalogUnavailable = catalog.unavailableReason === "native-notification-schedule-unavailable"
+                                ? undefined : catalog.unavailableReason;
+                            outcome = { ...outcome,
+                                publishedClients: catalog.publishedClients, unchangedClients: catalog.unchangedClients,
+                                commandCount: catalog.commandCount, invalidCommands: catalog.invalidCommands,
+                                ambiguousCommands: catalog.ambiguousCommands,
+                                failedClients: new Set([...failedCatalogClientIDs, ...nativeFailedClientIDs]).size,
+                                unavailableReason: outcome.unavailableReason || catalogUnavailable,
+                                readyPairings: catalogUnavailable ? [] : outcome.readyPairings.filter(
+                                    pairing => !failedCatalogClientIDs.includes(pairing.clientID)),
+                            };
+                        }
                     } catch (error) {
                         let pairedClients = 0;
                         try {
@@ -674,6 +719,7 @@ export class TishOSCommandBridgeService {
                             errorType: this.errorType(error),
                         });
                         outcome = this.unavailableRefresh("refresh-failure", pairedClients);
+                        if (refreshCatalog) catalogOutcome = { outcome, failedClientIDs: [] };
                     }
                 }
                 return outcome;
@@ -729,7 +775,7 @@ export class TishOSCommandBridgeService {
         } catch { return null; }
     }
 
-    private async refreshCatalogsInternal(reason: string): Promise<TishOSCommandBridgeRefreshOutcome> {
+    private async refreshCatalogsInternal(reason: string, includeCatalog = true): Promise<BridgeRefreshPassOutcome> {
         await this.retryPendingRevocations(`refresh:${reason}`);
         let state: StoredPairingState;
         let clients: StoredPairing[];
@@ -809,6 +855,19 @@ export class TishOSCommandBridgeService {
             }
         }
 
+        if (!includeCatalog) {
+            const readyPairings = clients.filter(pairing => pairing.catalogFingerprint
+                && (nativeNotificationReadyClientIDs === null || nativeNotificationReadyClientIDs.has(pairing.clientID)))
+                .map(pairing => ({ clientID: pairing.clientID, generation: pairing.generation, platform: pairing.platform }));
+            return {
+                ...this.unavailableRefresh("", clients.length), readyPairings,
+                nativeNotificationRemovedSeriesPlatforms: [...nativeNotificationRemovedSeriesPlatforms],
+                failedClients: nativeNotificationFailedClientIDs.size,
+                unavailableReason: nativeNotificationFailedClientIDs.size ? "native-notification-schedule-unavailable" : undefined,
+                nativeFailedClientIDs: [...nativeNotificationFailedClientIDs],
+            };
+        }
+
         const registryValues = listCommands(this.app);
         if (!registryValues) {
             logger.flowWarn("TishOSCommandBridge", "catalog-refresh:registry-unavailable", { reason, pairedClients: clients.length });
@@ -838,6 +897,7 @@ export class TishOSCommandBridgeService {
         let publishedClients = 0;
         let unchangedClients = 0;
         const failedClientIDs = new Set(nativeNotificationFailedClientIDs);
+        const catalogFailedClientIDs = new Set<string>();
         const readyPairings: Array<{ clientID: string; generation: string; platform: TishOSPlatform }> = [];
         const metadataChangedClients = new Set<string>();
         const publishedCatalogClientIDs = new Set<string>();
@@ -919,6 +979,7 @@ export class TishOSCommandBridgeService {
                 }
             } catch (error) {
                 failedClientIDs.add(pairing.clientID);
+                catalogFailedClientIDs.add(pairing.clientID);
                 if (logger.errorSummary(error).includes("one-megabyte bound")) {
                     logger.flowWarn("TishOSCommandBridge", "catalog-refresh:file-limit", {
                         reason,
@@ -958,7 +1019,10 @@ export class TishOSCommandBridgeService {
                     publishedClients,
                     errorType: this.errorType(error),
                 });
-                for (const clientID of publishedCatalogClientIDs) failedClientIDs.add(clientID);
+                for (const clientID of publishedCatalogClientIDs) {
+                    failedClientIDs.add(clientID);
+                    catalogFailedClientIDs.add(clientID);
+                }
                 publishedClients = 0;
             }
         }
@@ -989,6 +1053,8 @@ export class TishOSCommandBridgeService {
             ambiguousCommands: normalized.ambiguousDuplicateCount,
             readyPairings,
             nativeNotificationRemovedSeriesPlatforms: [...nativeNotificationRemovedSeriesPlatforms],
+            catalogFailedClientIDs: [...catalogFailedClientIDs],
+            nativeFailedClientIDs: [...nativeNotificationFailedClientIDs],
             ...(unavailableReason ? { unavailableReason } : {}),
         };
     }

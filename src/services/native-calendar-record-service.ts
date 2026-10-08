@@ -185,9 +185,9 @@ export class NativeCalendarRecordService {
         return this.getSettings().calendarStorageMode === "native-records";
     }
 
-    sync(calendars: ExternalCalendarConfig[], filter: string, force = false, backfillPastEvents = false): Promise<NativeCalendarSyncResult> {
+    sync(calendars: ExternalCalendarConfig[], filter: string, force = false, backfillPastEvents = false, isCurrent: () => boolean = () => true): Promise<NativeCalendarSyncResult> {
         if (this.syncPromise) return this.syncPromise;
-        const run = this.executeSync(calendars, filter, force, backfillPastEvents);
+        const run = this.executeSync(calendars, filter, force, backfillPastEvents, isCurrent);
         this.syncPromise = run;
         const clear = () => {
             if (this.syncPromise === run) this.syncPromise = null;
@@ -223,7 +223,12 @@ export class NativeCalendarRecordService {
         filter: string,
         force: boolean,
         backfillPastEvents: boolean,
+        isCurrent: () => boolean,
     ): Promise<NativeCalendarSyncResult> {
+        const assertCurrent = () => {
+            if (!isCurrent()) throw new Error("Calendar sync owner stopped; no further changes are authorized.");
+        };
+        assertCurrent();
         const api = this.requireApi();
         // One sync uses one missing-event policy from plan through execution.
         // A live settings edit must not introduce archive writes that were not
@@ -259,6 +264,7 @@ export class NativeCalendarRecordService {
         const rangeEnd = new Date();
         rangeEnd.setDate(rangeEnd.getDate() + 60);
         const contexts = await this.prepareCalendarContexts(calendars, settings, fieldKeys);
+        assertCurrent();
         const filterTerms = filter.split(",").map((value) => value.trim().toLocaleLowerCase()).filter(Boolean);
 
         // Fetch and validate the complete occurrence and migration plans before
@@ -271,11 +277,14 @@ export class NativeCalendarRecordService {
         // fetch and immediately before the complete migration/create plan. A
         // legacy note that arrives through Sync while fetching is therefore
         // migrated instead of duplicated under the canonical ID.
+        assertCurrent();
         const authoritativeSnapshot = await this.calendarSnapshot(api);
+        assertCurrent();
         this.rebuildFromHandles(authoritativeSnapshot.records);
         const migrationPlan = await this.prepareLegacyMigration(contexts, authoritativeSnapshot.records, fieldKeys);
         await this.prepareRescheduledOccurrences(prepared, authoritativeSnapshot.records, migrationPlan, filterTerms.length > 0, fieldKeys);
         await this.prepareCreationTemplates(prepared, migrationPlan);
+        assertCurrent();
         const mutationPlan = await this.preflightIdentityPlan(
             api,
             migrationPlan,
@@ -291,24 +300,30 @@ export class NativeCalendarRecordService {
             fieldKeys,
         );
 
+        assertCurrent();
         const boundaryRecords = this.automaticallyMutatedRecords(mutationPlan);
         await this.assertAutomaticallyMutableRecords(boundaryRecords, "planned-mutation");
 
         // Persist cancellation ownership before the corresponding frontmatter
         // write. If the vault batch is rejected or interrupted, the next sync
         // can distinguish a retry from a later user-owned status override.
+        assertCurrent();
         await this.commitCancellationStateUpdates(mutationPlan.preApplyCancellationStateUpdatesById);
 
         if (mutationPlan.entries.length) {
             await this.assertAutomaticallyMutableRecords(boundaryRecords, "mutation-boundary");
+            assertCurrent();
             const appliedResult = await api.applyIdentityChanges!(
                 mutationPlan.plannedBatch,
                 mutationPlan.entries,
                 this.cause("controller-calendar-sync"),
+                api.capabilities?.identityApplyCancellation === true ? { isCurrent } : undefined,
             );
+            assertCurrent();
             if (!appliedResult.ok || appliedResult.handles.length !== mutationPlan.entries.length) {
                 const recoverySnapshot = await this.calendarSnapshot(api);
                 this.rebuildFromHandles(recoverySnapshot.records);
+                assertCurrent();
                 await this.commitCancellationStateUpdates(
                     cancellationStateUpdatesForAppliedPrefix(
                         mutationPlan,
@@ -351,6 +366,7 @@ export class NativeCalendarRecordService {
             }
             result.appliedPaths = [...new Set(applied.map(handle => handle.path))];
         }
+        assertCurrent();
         await this.commitCancellationStateUpdates(mutationPlan.postApplyCancellationStateUpdatesById);
 
         const preReconciledIds = new Set<string>();

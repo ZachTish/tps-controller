@@ -29,7 +29,9 @@ import {
     calendarEventOccurrenceIdentity,
     deriveCalendarRecordId,
 } from "./calendar-record-identity";
-import { getGcmApi } from "../tps-gcm-api";
+import { getGcmApi, type GcmNativeRecordsApi } from "../tps-gcm-api";
+
+type IndexedReminderSnapshot = ReturnType<NonNullable<GcmNativeRecordsApi["indexedSnapshot"]>>;
 
 export interface PendingNotification {
     title: string;
@@ -224,15 +226,30 @@ export class ReminderEngine {
         horizonMs = 60 * 24 * 60 * 60 * 1000,
     ): Promise<ScheduledNativeNotification[]> {
         if (!settings.enableReminders || horizonMs <= 0) return [];
+        // Only a settled metadata index can reject candidates before a source
+        // read. A pending index is not evidence that existing alerts disappeared.
+        const nativeRecords = getGcmApi(this.app)?.nativeRecords;
+        const indexed = nativeRecords?.capabilities?.indexedSnapshot === true
+            && typeof nativeRecords.indexedSnapshot === "function"
+            ? nativeRecords.indexedSnapshot(undefined, { includeConflicts: true })
+            : undefined;
+        if (indexed && !indexed.ready) throw new Error("Reminder metadata index is not ready.");
         const horizonEnd = now + horizonMs;
         const projected: ScheduledNativeNotification[] = [];
-        const files = await this.getReminderCandidateFiles(settings);
+        let metadataSkipped = 0;
+        let sourceReads = 0;
+        const files = await this.getReminderCandidateFiles(settings, indexed !== undefined);
         const activeFiles = files.filter((file) => !this.isArchivedFile(file, settings.archiveFolder));
 
         for (const file of activeFiles) {
             try {
                 const cache = this.app.metadataCache.getFileCache(file);
                 const frontmatter = (cache?.frontmatter || {}) as Record<string, unknown>;
+                if (indexed && !this.metadataMayProjectReminder(file, cache, frontmatter, settings, now, horizonEnd)) {
+                    metadataSkipped += 1;
+                    continue;
+                }
+                sourceReads += 1;
                 const targets = await buildReminderTargetsForFile(this.app, file, frontmatter, settings, true);
                 for (const target of targets) {
                     projected.push(...this.projectTarget({
@@ -258,7 +275,7 @@ export class ReminderEngine {
         );
         if (needsExternalEvents) {
             try {
-                const targets = await this.buildUnmatchedExternalReminderTargets(files, settings);
+                const targets = await this.buildUnmatchedExternalReminderTargets(files, settings, undefined, indexed);
                 for (const target of targets) {
                     const event = target.externalEvent;
                     if (!event) continue;
@@ -301,10 +318,32 @@ export class ReminderEngine {
         if (settings.enableLogging) {
             logger.flow("ReminderEngine", "native-projection:done", {
                 candidateFiles: activeFiles.length,
+                metadataSkipped,
+                sourceReads,
                 projectedOccurrences: result.length,
             });
         }
         return result;
+    }
+
+    private metadataMayProjectReminder(
+        file: TFile, cache: unknown, frontmatter: Record<string, unknown>,
+        settings: TPSControllerSettings, now: number, horizonEnd: number,
+    ): boolean {
+        const rules = settings.reminders.filter(reminder => reminder.enabled && this.reminderIncludesSource(reminder, "file"));
+        if (!rules.length) return false;
+        // Missing/malformed metadata remains unknown. Inspect the actual cache
+        // value, not the empty map used by ordinary projection fallback.
+        const cachedFrontmatter = (cache as { frontmatter?: unknown } | null)?.frontmatter;
+        if (!cachedFrontmatter || typeof cachedFrontmatter !== "object" || Array.isArray(cachedFrontmatter)
+            || ![Object.prototype, null].includes(Object.getPrototypeOf(cachedFrontmatter))) return true;
+        let unknownProperty = false;
+        const eligible = this.projectTarget({
+            target: { sourceKey: file.path, sourceType: "file", targetKind: "note" },
+            fileRef: file, cache, baseFrontmatter: frontmatter, settings, now, horizonEnd, firstOnly: true,
+            onUnknownProperty: () => { unknownProperty = true; },
+        }).length > 0;
+        return eligible || unknownProperty;
     }
 
     private projectTarget(params: {
@@ -316,6 +355,8 @@ export class ReminderEngine {
         now: number;
         horizonEnd: number;
         reminderFilter?: (reminder: PropertyReminder) => boolean;
+        firstOnly?: boolean;
+        onUnknownProperty?: () => void;
     }): ScheduledNativeNotification[] {
         const { target, fileRef, cache, baseFrontmatter, settings, now, horizonEnd, reminderFilter } = params;
         const items: ScheduledNativeNotification[] = [];
@@ -345,8 +386,14 @@ export class ReminderEngine {
                     settings.nativeCalendarCancellationState,
                 ),
             )) continue;
+            if (!hasRequiredStatus(effectiveFm, reminder) || !hasRequiredCheckboxState(effectiveFm, reminder)) continue;
+            if (reminder.stopConditions.some((condition) => checkStopCondition(effectiveFm, condition))) continue;
             const { start: propTime, end: rangeEndTime } = parseTimeRange(propValue);
-            if (!propTime || !hasRequiredStatus(effectiveFm, reminder) || !hasRequiredCheckboxState(effectiveFm, reminder)) {
+            if (!propTime) {
+                // A settled property map with no configured key is known
+                // absent. An explicitly stored but unparseable value remains
+                // uncertain and requires the existing current-source read.
+                if (Object.prototype.hasOwnProperty.call(effectiveFm, reminder.property)) params.onUnknownProperty?.();
                 continue;
             }
             const normalizedPropValue = this.normalizeReminderPropertyValue(propValue);
@@ -388,8 +435,6 @@ export class ReminderEngine {
                 const requiresWorking = reminder.requiredStatuses?.some((status) => normalizeStatus(status) === "working");
                 if (isWorking && now < effectiveEndTime && !requiresWorking) continue;
             }
-            if (reminder.stopConditions.some((condition) => checkStopCondition(effectiveFm, condition))) continue;
-
             let fireAt = triggerTime;
             let repeatOrdinal = 0;
             const snoozeValue = effectiveFm[settings.snoozeProperty || "reminderSnooze"];
@@ -474,6 +519,7 @@ export class ReminderEngine {
                         },
                     } : {}),
                 });
+                if (params.firstOnly) return items;
                 projectedOccurrenceCount += 1;
                 if (
                     !reminder.repeatUntilComplete
@@ -532,11 +578,11 @@ export class ReminderEngine {
         return { notifications: visibleNotifications, stateChanged };
     }
 
-    private async getReminderCandidateFiles(settings: TPSControllerSettings): Promise<TFile[]> {
+    private async getReminderCandidateFiles(settings: TPSControllerSettings, includeUnknownMetadata = false): Promise<TFile[]> {
         const properties = (settings.reminders || [])
             .filter((reminder) => reminder.enabled)
             .map((reminder) => reminder.property);
-        const result = await discoverReminderCandidateFiles(this.app, settings, properties);
+        const result = await discoverReminderCandidateFiles(this.app, settings, properties, { includeUnknownMetadata });
         return result.files;
     }
 
@@ -878,6 +924,7 @@ export class ReminderEngine {
         files: TFile[],
         settings: TPSControllerSettings,
         stats?: ReminderEvaluationStats,
+        indexed?: IndexedReminderSnapshot,
     ): Promise<ReminderEvaluationTarget[]> {
         const calendars = (settings.externalCalendars || []).filter((calendar) => calendar.enabled !== false);
         const urls = Array.from(new Set(calendars.map((calendar) => normalizeCalendarUrl(calendar.url)).filter(Boolean)));
@@ -893,7 +940,7 @@ export class ReminderEngine {
         if (stats) stats.externalUrls = urls.length;
         if (!urls.length) return [];
 
-        const localIndex = await this.buildLocalEventMatchIndex(files, settings);
+        const localIndex = await this.buildLocalEventMatchIndex(files, settings, indexed);
         const rangeStart = moment().startOf("day").toDate();
         const rangeEnd = moment().add(60, "days").endOf("day").toDate();
         const seen = new Set<string>();
@@ -992,13 +1039,15 @@ export class ReminderEngine {
     private async buildLocalEventMatchIndex(
         _files: TFile[],
         settings: TPSControllerSettings,
+        indexed?: IndexedReminderSnapshot,
     ): Promise<LocalEventMatchIndex> {
-        return this.buildLocalEventMatchIndexFromVault(this.app.vault.getMarkdownFiles(), settings);
+        return this.buildLocalEventMatchIndexFromVault(this.app.vault.getMarkdownFiles(), settings, indexed);
     }
 
     private async buildLocalEventMatchIndexFromVault(
         files: TFile[],
         settings: TPSControllerSettings,
+        indexed?: IndexedReminderSnapshot,
     ): Promise<LocalEventMatchIndex> {
         const recordIds = new Set<string>();
         const eventIds = new Set<string>();
@@ -1011,9 +1060,9 @@ export class ReminderEngine {
         try {
             const conflictAware = Number(nativeRecords?.version) >= 6
                 && nativeRecords?.capabilities?.conflictAwareSnapshots === true;
-            const snapshot = typeof nativeRecords?.snapshot === "function"
+            const snapshot = indexed || (typeof nativeRecords?.snapshot === "function"
                 ? await nativeRecords.snapshot(undefined, conflictAware ? { includeConflicts: true } : undefined)
-                : null;
+                : null);
             const handles = snapshot
                 ? snapshot.records
                 : typeof nativeRecords?.list === "function"

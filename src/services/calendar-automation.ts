@@ -6,6 +6,8 @@ import * as logger from "../logger";
 import { TPS_EVENTS } from "../tps-events";
 import { NativeCalendarRecordService } from "./native-calendar-record-service";
 
+export type CalendarSyncOutcome = "completed" | "not-ready" | "paused" | "stopped";
+
 interface CalendarPluginAPI {
     getSettings?(): any;
 }
@@ -16,7 +18,10 @@ interface CalendarPluginAPI {
  */
 export class CalendarAutomationService {
     private calendarSyncIntervalId: number | null = null;
-    private activeSyncPromise: Promise<void> | null = null;
+    private activeSyncPromise: Promise<CalendarSyncOutcome> | null = null;
+    private stopped = false;
+    private lifecycleGeneration = 0;
+    private initialSyncPending = false;
 
     constructor(
         private app: App,
@@ -29,7 +34,10 @@ export class CalendarAutomationService {
     ) {}
 
     start(): void {
-        this.stop();
+        void this.stop();
+        this.stopped = false;
+        this.initialSyncPending = true;
+        const lifecycle = this.lifecycleGeneration;
 
         const settings = this.getSettings();
         const initialScanRoots = this.buildScanRoots(settings.externalCalendars || [], settings.archiveFolder);
@@ -56,7 +64,7 @@ export class CalendarAutomationService {
         // null for almost every file, byEventId is empty, and the service tries
         // to create notes that already exist → "File already exists" errors.
         this.app.workspace.onLayoutReady(() => {
-            void this.runSync();
+            if (!this.stopped && lifecycle === this.lifecycleGeneration) void this.fulfillStartupSync();
         });
 
         const minutes = Math.max(1, settings.syncIntervalMinutes || 5);
@@ -67,27 +75,41 @@ export class CalendarAutomationService {
             calendars: settings.externalCalendars?.length || 0,
         });
         this.calendarSyncIntervalId = window.setInterval(() => {
+            if (this.stopped || lifecycle !== this.lifecycleGeneration) return;
             logger.flow("CalendarSync", "loop:tick");
             void this.runSync();
         }, intervalMs);
     }
 
-    stop(): void {
+    stop(): Promise<void> {
+        this.stopped = true;
+        this.lifecycleGeneration += 1;
+        this.initialSyncPending = false;
         if (this.calendarSyncIntervalId !== null) {
             window.clearInterval(this.calendarSyncIntervalId);
             this.calendarSyncIntervalId = null;
             logger.flow("CalendarSync", "loop:stopped");
         }
+        return this.activeSyncPromise?.then(() => undefined, () => undefined) || Promise.resolve();
     }
 
-    runSync(force = false, options: { backfillPastEvents?: boolean } = {}): Promise<void> {
+    async fulfillStartupSync(): Promise<void> {
+        if (this.stopped || !this.initialSyncPending) return;
+        const lifecycle = this.lifecycleGeneration;
+        const outcome = await this.runSync();
+        if (lifecycle === this.lifecycleGeneration && outcome !== "not-ready") this.initialSyncPending = false;
+    }
+
+    runSync(force = false, options: { backfillPastEvents?: boolean } = {}): Promise<CalendarSyncOutcome> {
+        if (this.stopped) return Promise.resolve("stopped");
         const backfillPastEvents = options.backfillPastEvents === true;
         if (this.activeSyncPromise) {
             logger.flow("CalendarSync", "run:join-active", { force, backfillPastEvents });
             return this.activeSyncPromise;
         }
 
-        const run = Promise.resolve().then(() => this.executeSync(force, { backfillPastEvents }));
+        const lifecycle = this.lifecycleGeneration;
+        const run = Promise.resolve().then(() => this.executeSync(force, { backfillPastEvents }, lifecycle));
         this.activeSyncPromise = run;
         const clearActiveRun = () => {
             if (this.activeSyncPromise === run) this.activeSyncPromise = null;
@@ -96,87 +118,97 @@ export class CalendarAutomationService {
         return run;
     }
 
-    private async executeSync(force: boolean, options: { backfillPastEvents: boolean }): Promise<void> {
-        await logger.timeAsync("CalendarSync", "run", {
-            force,
-            backfillPastEvents: options.backfillPastEvents,
-        }, async () => {
-            const settings = this.getSettings();
-            if (settings.calendarStorageMode !== "native-records") {
-                logger.flowWarn("CalendarSync", "skip:legacy-mode-paused", { force });
-                if (force) new Notice("Calendar sync is paused until whole-note event records are enabled in Controller settings.");
-                return;
-            }
-            this.app.workspace.trigger(TPS_EVENTS.CALENDAR_SYNC_STARTED as any, {
-                sourcePluginId: "tps-controller",
-                timestamp: Date.now(),
+    private async executeSync(force: boolean, options: { backfillPastEvents: boolean }, lifecycle: number): Promise<CalendarSyncOutcome> {
+        const isCurrent = () => !this.stopped && lifecycle === this.lifecycleGeneration;
+        if (!isCurrent()) return "stopped";
+        try {
+            return await logger.timeAsync("CalendarSync", "run", {
                 force,
-            });
-            const readiness = this.getSyncReadiness();
-            logger.flow("CalendarSync", "readiness", readiness);
-            if (!readiness.ready) {
-                logger.flowWarn("CalendarSync", "skip:not-ready", { reason: readiness.reason, force });
-                if (force) new Notice(`Calendar Sync skipped: ${readiness.reason}`);
-                return;
-            }
+                backfillPastEvents: options.backfillPastEvents,
+            }, async () => {
+                const settings = this.getSettings();
+                if (settings.calendarStorageMode !== "native-records") {
+                    logger.flowWarn("CalendarSync", "skip:legacy-mode-paused", { force });
+                    if (force) new Notice("Calendar sync is paused until whole-note event records are enabled in Controller settings.");
+                    return "paused" as const;
+                }
+                const readiness = this.getSyncReadiness();
+                logger.flow("CalendarSync", "readiness", readiness);
+                if (!readiness.ready) {
+                    logger.flowWarn("CalendarSync", "skip:not-ready", { reason: readiness.reason, force });
+                    if (force) new Notice(`Calendar Sync skipped: ${readiness.reason}`);
+                    return "not-ready" as const;
+                }
 
-            let calendars: ExternalCalendarConfig[] = settings.externalCalendars || [];
-            let calendarSource = "controller-settings";
+                let calendars: ExternalCalendarConfig[] = settings.externalCalendars || [];
+                let calendarSource = "controller-settings";
 
-            if (!calendars.length) {
-                const calPlugin = this.getCalendarPlugin();
-                if (calPlugin) {
-                    const calSettings = calPlugin.getSettings?.();
-                    if (calSettings?.externalCalendars?.length) {
-                        calendars = calSettings.externalCalendars;
-                        calendarSource = "calendar-plugin-fallback";
-                        logger.flow("CalendarSync", "calendars:fallback", { calendars: calendars.length });
+                if (!calendars.length) {
+                    const calPlugin = this.getCalendarPlugin();
+                    if (calPlugin) {
+                        const calSettings = calPlugin.getSettings?.();
+                        if (calSettings?.externalCalendars?.length) {
+                            calendars = calSettings.externalCalendars;
+                            calendarSource = "calendar-plugin-fallback";
+                            logger.flow("CalendarSync", "calendars:fallback", { calendars: calendars.length });
+                        }
                     }
                 }
-            }
 
-            const urls: string[] = Array.from(new Set(
-                calendars
-                    .filter((c) => c.enabled !== false)
-                    .map((c) => normalizeCalendarUrl(c.url))
-                    .filter(Boolean)
-            ));
-            logger.flow("CalendarSync", "calendars:resolved", {
-                source: calendarSource,
-                calendars: calendars.length,
-                enabledUrls: urls.length,
-            });
+                const urls: string[] = Array.from(new Set(
+                    calendars
+                        .filter((c) => c.enabled !== false)
+                        .map((c) => normalizeCalendarUrl(c.url))
+                        .filter(Boolean)
+                ));
+                logger.flow("CalendarSync", "calendars:resolved", {
+                    source: calendarSource,
+                    calendars: calendars.length,
+                    enabledUrls: urls.length,
+                });
 
-            if (!urls.length) {
-                logger.flowWarn("CalendarSync", "skip:no-urls", { calendars: calendars.length, force });
-                if (force) new Notice("Calendar Sync skipped: no calendar URLs are configured.");
-                return;
-            }
+                if (!urls.length) {
+                    logger.flowWarn("CalendarSync", "skip:no-urls", { calendars: calendars.length, force });
+                    if (force) new Notice("Calendar Sync skipped: no calendar URLs are configured.");
+                    return "completed" as const;
+                }
+                if (!isCurrent()) return "stopped" as const;
+                this.app.workspace.trigger(TPS_EVENTS.CALENDAR_SYNC_STARTED as any, {
+                    sourcePluginId: "tps-controller", timestamp: Date.now(), force,
+                });
 
-            const result = await this.nativeCalendarRecordService.sync(
-                calendars,
-                settings.externalCalendarFilter,
-                force,
-                options.backfillPastEvents,
-            );
-            if (result.appliedPaths.length > 0) await this.onSyncComplete(result.appliedPaths);
-            this.app.workspace.trigger(TPS_EVENTS.CALENDAR_SYNC_COMPLETED as any, {
-                sourcePluginId: "tps-controller",
-                timestamp: Date.now(),
-                force,
-                urlCount: urls.length,
-                storage: "native-records",
+                const result = await this.nativeCalendarRecordService.sync(
+                    calendars,
+                    settings.externalCalendarFilter,
+                    force,
+                    options.backfillPastEvents,
+                    isCurrent,
+                );
+                if (!isCurrent()) return "stopped" as const;
+                if (result.appliedPaths.length > 0) await this.onSyncComplete(result.appliedPaths);
+                if (!isCurrent()) return "stopped" as const;
+                this.app.workspace.trigger(TPS_EVENTS.CALENDAR_SYNC_COMPLETED as any, {
+                    sourcePluginId: "tps-controller",
+                    timestamp: Date.now(),
+                    force,
+                    urlCount: urls.length,
+                    storage: "native-records",
+                });
+                logger.flow("CalendarSync", "run:completed", {
+                    force,
+                    urlCount: urls.length,
+                    storage: "native-records",
+                    fetched: result.fetched,
+                    created: result.created,
+                    updated: result.updated,
+                    failedFeeds: result.failedFeeds,
+                });
+                return "completed" as const;
             });
-            logger.flow("CalendarSync", "run:completed", {
-                force,
-                urlCount: urls.length,
-                storage: "native-records",
-                fetched: result.fetched,
-                created: result.created,
-                updated: result.updated,
-                failedFeeds: result.failedFeeds,
-            });
-        });
+        } catch (error) {
+            if (!isCurrent()) return "stopped";
+            throw error;
+        }
     }
 
     private buildScanRoots(calendars: ExternalCalendarConfig[], archiveFolder: string): string[] {

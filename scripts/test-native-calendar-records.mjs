@@ -3186,3 +3186,42 @@ test('new events omit status and cancellation restoration returns to an absent s
  h.setEvents([event()]);await h.service.sync([calendar],'',true,false);
  assert.equal(Object.hasOwn(h.frontmatters.get(path),'status'),false);
 });
+
+
+test('stopped owner after feed fetch cannot snapshot, plan, write cancellation state, or apply a note batch', async()=>{
+  const h=harness([event()]);let current=true;
+  h.setFetchHook(async()=>{current=false;return {ok:true,events:[event()],normalizedUrl:calendar.url,fromCache:false};});
+  await assert.rejects(h.service.sync([calendar],'',false,false,()=>current),/owner stopped/);
+  assert.equal(h.preflightLog.length,0);assert.equal(h.mutationLog.length,0);assert.equal(h.settingsSaveCount,0);
+  assert.equal(h.operations.diskReads,0);assert.equal(h.operations.snapshots,0);
+});
+
+
+for(const cancellable of [false,true]){
+  test(`calendar batch lifecycle capability contract preserves mixed-version behavior: ${cancellable}`,async()=>{
+    const h=harness([event()]);let optionsSeen;const original=h.api.applyIdentityChanges;
+    h.api.capabilities={...h.api.capabilities,identityApplyCancellation:cancellable};
+    h.api.applyIdentityChanges=async(...args)=>{optionsSeen=args[3];return original(...args);};
+    await h.service.sync([calendar],'',false,false,()=>true);
+    if(cancellable){assert.equal(typeof optionsSeen?.isCurrent,'function');assert.equal(optionsSeen.isCurrent(),true);}
+    else assert.equal(optionsSeen,undefined);
+    assert.equal(h.mutationLog.length,1);
+  });
+}
+
+test('an interrupted active batch preserves its prefix and stopped Controller does not start recovery snapshots/state writes',async()=>{
+  const h=harness([event(),event({id:'second',uid:'second',occurrenceIdentity:'second',title:'Second'})]);let current=true;
+  h.api.capabilities={...h.api.capabilities,identityApplyCancellation:true};
+  let entriesSeen=0;let stoppedSnapshots;
+  h.api.applyIdentityChanges=async(_plan,entries,_cause,options)=>{
+    assert.equal(options.isCurrent(),true);entriesSeen=entries.length;
+    // Bounded GCM transaction facade: the first atomic entry is already owned
+    // and committed. Actual GCM per-entry/atomic cancellation has its own suite.
+    const first=entries[0];const file=h.seedRecordOnDisk('Calendar Events/First.md',{...first.properties,tpsId:first.nextId});
+    current=false;stoppedSnapshots=h.operations.snapshots;assert.equal(options.isCurrent(),false);
+    return {ok:false,handles:[{file,path:file.path,id:first.nextId,kind:'calendar-event',frontmatter:h.frontmatters.get(file.path)}],failedIndex:1,error:'native-identity-apply-interrupted'};
+  };
+  await assert.rejects(h.service.sync([calendar],'',false,false,()=>current),/owner stopped/);
+  assert.equal(entriesSeen,2);assert.equal(h.files.size,1,'already committed prefix is preserved without rollback');
+  assert.equal(h.operations.snapshots,stoppedSnapshots);assert.equal(h.settingsSaveCount,0);
+});

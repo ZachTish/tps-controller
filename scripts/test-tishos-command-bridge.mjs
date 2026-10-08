@@ -116,6 +116,7 @@ function createHarness({
   const notices = [];
   const statOverrides = new Map();
   let adapterReadCount = 0;
+  let registryReadCount = 0;
   let unsafeReadAttempts = 0;
   let nextExistsBlock = null;
   const writeBlocks = [];
@@ -251,7 +252,7 @@ function createHarness({
       },
     },
     commands: {
-      listCommands() { return registryAvailable ? currentCommands : null; },
+      listCommands() { registryReadCount++; return registryAvailable ? currentCommands : null; },
       executeCommandById(id) {
         executions.push(id);
         if (throwOnExecute) throw new Error("command threw");
@@ -296,6 +297,7 @@ function createHarness({
     openedURLs,
     notices,
     fireLayout() { assert.ok(layoutCallback); layoutCallback(); },
+    registryReadCount() { return registryReadCount; },
     setCommands(value) { currentCommands = value; },
     setRegistryAvailable(value) { registryAvailable = value; },
     setExecuteResult(value) { currentExecuteResult = value; },
@@ -2615,7 +2617,7 @@ test("source wiring keeps discovery, execution, and mobile-safe confirmation beh
   assert.match(main, /registerObsidianProtocolHandler\(TISHOS_COMMAND_BRIDGE_REVOKE_ROUTE/);
   assert.match(main, /id: "refresh-tishos-command-bridge"/);
   assert.match(main, /const commandBridgeStop = this\.tishOSCommandBridgeService\?\.stop\(\)/);
-  assert.match(main, /await commandBridgeStop/);
+  assert.match(main, /await Promise\.all\(\[financeRelayStop, calendarStop, commandBridgeStop\]\)/);
   assert.match(bridgeService, /this\.modalEl\.addClass\("tps-keyboard-aware-modal"\)/);
   assert.match(packageJson, /test-tishos-command-bridge\.mjs/);
 });
@@ -2648,4 +2650,138 @@ test('large repeated schedules retain the previous exact output and inspect unse
   extra.repeatEverySeconds = 600;
   await assert.rejects(harness.service.buildNativeNotificationSeriesAuditItems([...values, extra], items), /cadence is inconsistent/);
   assert.deepEqual(await harness.service.buildNativeNotificationItems([...values, { ...values[0] }]), items);
+});
+
+
+test('note-only schedule refresh bypasses command registry, catalog reads and catalog writes', async t => {
+  let schedule=[{title:'Before',body:'',fireAt:NOW+60000,sourcePath:'Inbox/Reminder.md',sourceKey:'Inbox/Reminder.md',reminderId:'scheduled'}];
+  const h=createHarness({notificationScheduleProvider:async()=>schedule}); t.after(()=>h.service.stop());
+  const catalog=await pairAndPublish(h); const previous=h.files.get(catalog);
+  const registry=h.registryReadCount(); const writes=h.writes.length;
+  schedule=[{...schedule[0],title:'After'}];
+  await h.service.refreshNativeNotifications('note-change');
+  assert.equal(h.registryReadCount(),registry);
+  assert.equal(h.files.get(catalog),previous);
+  assert.equal(h.writes.slice(writes).some(write=>String(write.path||write).includes('command-bridge')),false);
+  const path=`${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.json`;
+  assert.equal(JSON.parse(h.files.get(path)).items[0].title,'After');
+});
+
+test('a full request arriving during a schedule-only pass is retained by the shared serial drain', async t => {
+  let block=null; let entered;
+  const h=createHarness({notificationScheduleProvider:async()=>{if(block){entered();await block;}return [];}});
+  t.after(()=>h.service.stop()); await pairAndPublish(h);
+  const registry=h.registryReadCount(); let release;
+  block=new Promise(resolve=>{release=resolve;}); const started=new Promise(resolve=>{entered=resolve;});
+  const note=h.service.refreshNativeNotifications('note-change'); await started;
+  h.setCommands([...COMMANDS,{id:'test:new',name:'New command'}]);
+  const full=h.service.refreshCatalogs('explicit-full'); assert.equal(note,full);
+  block=null; release(); const result=await full;
+  assert.equal(h.registryReadCount(),registry+1); assert.equal(result.commandCount,COMMANDS.length+1);
+});
+
+test('a queued note-only success replaces a failed full-pass native outcome without rebuilding the catalog', async t => {
+  let schedule = [{ title: 'Before', body: '', fireAt: NOW + 60_000,
+    sourcePath: 'Inbox/Reminder.md', sourceKey: 'Inbox/Reminder.md', reminderId: 'scheduled' }];
+  const h = createHarness({ notificationScheduleProvider: async () => schedule });
+  t.after(() => h.service.stop());
+  await pairAndPublish(h);
+  const registry = h.registryReadCount();
+  schedule = [{ ...schedule[0], title: 'Changing during publication' }];
+  const blocked = h.blockNextWrite();
+  const full = h.service.refreshCatalogs('full-refresh');
+  await within(blocked.entered, 'full native publication');
+  h.failRenameOnce();
+  schedule = [];
+  const note = h.service.refreshNativeNotifications('completion-during-publication');
+  assert.strictEqual(note, full);
+  blocked.release();
+  const result = await within(full, 'full-to-note recovery');
+  assert.equal(h.registryReadCount(), registry + 1, 'the later note pass performs no command work');
+  assert.equal(result.failedClients, 0, 'the final successful schedule is not reported as failed');
+  assert.equal(result.unavailableReason, undefined);
+  assert.equal(result.readyPairings.length, 1);
+  assert.equal(result.commandCount, COMMANDS.length, 'manual catalog feedback retains actual command counts');
+  assert.equal(result.unchangedClients, 1);
+  assert.equal('catalogFailedClientIDs' in result, false, 'internal pass bookkeeping is not exposed');
+  assert.equal('nativeFailedClientIDs' in result, false);
+  assert.deepEqual(JSON.parse(h.files.get(
+    `${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.json`,
+  )).items, []);
+});
+
+test('a successful note-only pass cannot clear an actual command publication failure', async t => {
+  let schedule = [{ title: 'Before', body: '', fireAt: NOW + 60_000,
+    sourcePath: 'Inbox/Reminder.md', sourceKey: 'Inbox/Reminder.md', reminderId: 'scheduled' }];
+  const h = createHarness({ notificationScheduleProvider: async () => schedule });
+  t.after(() => h.service.stop());
+  const catalog = await pairAndPublish(h);
+  const original = h.files.get(catalog);
+  const registry = h.registryReadCount();
+  h.setCommands([...COMMANDS, { id: 'test:new-command', name: 'New command' }]);
+  const blocked = h.blockNextWrite();
+  const full = h.service.refreshCatalogs('changed-command-registry');
+  await within(blocked.entered, 'command catalog publication');
+  h.failRenameOnce();
+  schedule = [];
+  const note = h.service.refreshNativeNotifications('completion-during-catalog-publication');
+  assert.strictEqual(note, full);
+  blocked.release();
+  const result = await within(full, 'catalog failure followed by successful schedule');
+  assert.equal(h.registryReadCount(), registry + 1);
+  assert.equal(h.files.get(catalog), original, 'the previous signed catalog remains valid');
+  assert.equal(result.failedClients, 1, 'native success does not mask the catalog failure');
+  assert.equal(result.commandCount, COMMANDS.length + 1);
+  assert.equal(result.readyPairings.length, 0, 'a failed catalog client is not advertised as fully ready');
+  assert.deepEqual(JSON.parse(h.files.get(
+    `${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.json`,
+  )).items, []);
+});
+
+test('a successful note-only pass preserves a full-pass command-registry refusal', async t => {
+  let block = null; let entered; let release;
+  const h = createHarness({ notificationScheduleProvider: async () => {
+    if (block) { entered(); await block; }
+    return [];
+  } });
+  t.after(() => h.service.stop());
+  await pairAndPublish(h);
+  h.setRegistryAvailable(false);
+  block = new Promise(resolve => { release = resolve; });
+  const started = new Promise(resolve => { entered = resolve; });
+  const full = h.service.refreshCatalogs('registry-unavailable');
+  await started;
+  const note = h.service.refreshNativeNotifications('note-change');
+  assert.strictEqual(note, full);
+  block = null; release();
+  const result = await within(full, 'catalog refusal followed by successful schedule');
+  assert.equal(result.unavailableReason, 'command-registry-unavailable');
+  assert.equal(result.readyPairings.length, 0);
+});
+
+
+test('a note burst during publication makes one subsequent pass; pending index retains the previous signed schedule',async t=>{
+  let calls=0;let wait=null;let entered;let ready=true;
+  let schedule=[{title:'Original',body:'',fireAt:NOW+60000,sourcePath:'Inbox/Reminder.md',sourceKey:'Inbox/Reminder.md',reminderId:'scheduled'}];
+  const h=createHarness({notificationScheduleProvider:async()=>{calls++;if(wait){entered();await wait;}if(!ready)throw new Error('Reminder metadata index is not ready.');return schedule;}});
+  t.after(()=>h.service.stop());await pairAndPublish(h);
+  const path=`${notificationContract.TISHOS_NATIVE_NOTIFICATION_ROOT}/${CLIENT}.json`;
+  const original=h.files.get(path);const registry=h.registryReadCount();const before=calls;
+  let release;wait=new Promise(r=>release=r);const started=new Promise(r=>entered=r);
+  const first=h.service.refreshNativeNotifications('file-change');await started;
+  for(let n=0;n<100;n++)assert.equal(h.service.refreshNativeNotifications('metadata-resolved'),first);
+  ready=false;wait=null;release();
+  const result=await first;assert.equal(result.unavailableReason,'native-notification-schedule-unavailable');
+  assert.equal(calls,before+2);assert.equal(h.files.get(path),original);assert.equal(h.registryReadCount(),registry);
+  ready=true;schedule=[{...schedule[0],title:'Settled'}];await h.service.refreshNativeNotifications('metadata-resolved');
+  assert.equal(JSON.parse(h.files.get(path)).items[0].title,'Settled');assert.equal(calls,before+3);
+});
+
+
+test('layout publication covers initial changes; note refresh availability requires a current paired consumer',async t=>{
+  let calls=0;const h=createHarness({notificationScheduleProvider:async()=>{calls++;return [];}});t.after(()=>h.service.stop());
+  h.service.start();assert.equal(h.service.canRefreshNativeNotifications(),false);
+  h.fireLayout();await h.service.refreshCatalogs('settle-unpaired');assert.equal(h.service.canRefreshNativeNotifications(),false);assert.equal(calls,0);
+  await h.service.handlePairRoute(pairParams(CLIENT,SECRET));assert.equal(h.service.canRefreshNativeNotifications(),true);
+  await h.service.stop();assert.equal(h.service.canRefreshNativeNotifications(),false);
 });

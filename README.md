@@ -1,5 +1,133 @@
 # TPS Controller
 
+## 3.1.8 — Bounded reminder work and startup ownership
+
+Controller continues to own its existing alert rules, signed schedules/catalogs,
+calendar import, explicit note rules, sync requests and configured automation.
+Ordinary note changes refresh only the notification schedule through the existing
+single serial bridge drain. Startup, pairing, manual catalog refresh and the
+existing 60-second catalog cadence retain full command discovery. A full request
+cannot be downgraded by a concurrent note-only request; events arriving during
+publication coalesce into one pending pass. The redundant metadata post-active
+retry is removed. A trailing schedule-only pass updates native readiness and
+errors without losing the full pass's command counts or masking an actual
+catalog failure. This per-pass bookkeeping is transient and never published.
+
+With GCM's additive `nativeRecords.capabilities.indexedSnapshot`, read-only
+notification matching uses its synchronous settled metadata projection instead
+of invoking an authoritative full-vault source snapshot. `ready: false` fails the
+whole publication and preserves the last signed schedule. An older GCM without
+that capability retains the existing source-authority path. The metadata
+projection has no mutation token and cannot authorize note writes or identity
+changes. Calendar imports retain authoritative source snapshots and exact plans.
+
+For a settled index, reminder eligibility reuses the same configured projection
+policy before reading bodies. Exclusions, required fields and stop conditions
+run before uncertainty. A missing rule key in a valid property map is known
+absent; missing metadata, malformed maps and explicitly invalid date values stay
+conservative. Eligible notes still receive one fresh source read and current
+exclusion/YAML/identity checks. Repeat/catch-up, snooze, all-day, horizon,
+completion and template policy remain configured. No hardcoded date cutoff,
+repair pass, persisted cache or replacement notification delivery is added.
+
+Startup file bursts do not create/cancel notification debounce timers before
+layout publication. Unpaired or unused reminder routes also do no note-driven
+timer work; changing settings can still publish an empty replacement to clear an
+old schedule. Known plugin state, assets and the Finance relay's configured
+request folder do not count as reminder-note changes. After first readiness,
+service-only metadata resolution does not refresh schedules or extend calendar
+settlement. A transient pending-note obligation preserves actual note changes
+through core metadata resolution; it is consumed before callbacks so a new event
+is not dropped.
+
+The obsolete Controller parent/child full-vault maintenance loop, its bootstrap
+poll and delayed startup dispatch are removed. GCM's owning create/edit actions
+remain responsible for relationships. Completion-driven recurrence and the
+existing scoped post-calendar-sync recovery remain unchanged.
+
+Calendar automation now returns explicit completed, not-ready, paused or stopped
+outcomes. A deferred run cannot acknowledge a hidden sync request. A single
+initial-sync obligation is fulfilled when readiness passes by the existing
+four-second request loop; no additional readiness timer is created. Role/mobile
+and lifecycle guards prevent old layout callbacks or stopped owners from
+starting new work. Shutdown invalidates APIs and stops all producers before
+awaiting active drains. An already entered atomic write cannot be rolled back;
+its owner is drained before teardown completes. With GCM's additive
+`identityApplyCancellation` capability, Controller passes an in-memory
+`isCurrent` predicate to the existing identity batch, which checks before later
+entries and atomic steps. A stopped batch preserves its committed prefix and
+starts no rollback or automatic retry. Older GCM versions retain their existing
+whole-batch drain behavior; coordinated updates provide the narrower stop bound.
+
+Unchanged settings batches perform zero load/save attempts, settings-change
+events or schedule refreshes. Missing attachment configuration is compared to
+the actual persisted value and therefore migrates once instead of requesting an
+unchanged migration save on every startup. No setting key, default or persisted
+UI field is added. Focused operation-count regressions cover unknown/current
+metadata, mixed date-rule keys, schedule/callback concurrency, startup storms,
+service-state resolution, save no-ops, lifecycle stop and readiness fulfillment.
+
+Source validation uses Node 24.19.0 and the exact historical `0.3.5` reference
+(`a8c13dbda82caa95807d4fce912334b8feb9583e`) for the suite's required
+notification-open comparison. The final versioned full suite passes 748 checks
+with zero failures, cancellations or skips; TypeScript and a separate build-only
+`TPS_NO_DEPLOY=1 npm run build` gate pass. The ordinary build deployed to TEST,
+and the TEST renderer reload loaded Controller 3.1.8 with GCM 8.1.0. All four source and
+installed artifacts are byte-identical. The final separate ordinary build retained those verified bytes;
+the numeric public release is the handoff for the user’s BRAT pull.
+
+The actual policy/candidate/target fixture with 4,049 notes, mixed date-rule keys
+and mostly excluded completed notes performs one inventory, 8,098 metadata
+lookups, two source reads, zero authority snapshots and zero writes. One read
+rejects a newly excluded current source; the other preserves a genuine reminder
+whose cached frontmatter is unavailable. The prior engine reads 4,048 sources in
+the same bounded fixture and drops that unknown-metadata reminder. Initial
+4,049-note invalidations make zero notification debounce/cancellation calls;
+100 service-only resolutions after readiness make zero reminder refreshes or
+calendar settlement extensions. One hundred unchanged settings batches perform
+zero loads, saves, events or schedule refreshes. A burst of 100 requests arriving
+inside one notification publication produces exactly one subsequent pass and no
+command registry work. These counts are separate from timing evidence.
+
+Installed QA repeats the 4,049-note reminder fixture through the loaded Controller
+engine, actual candidate discovery, parser and policy with memory-only vault/GCM
+boundaries: one inventory, 8,098 metadata lookups, two raw reads, one occurrence,
+zero writes and zero authority snapshots. Pending indexed readiness rejects
+before further inventory or reads. One hundred queries of the actual installed
+GCM indexed API perform zero raw/cached reads, inventories, writes or authority
+refreshes and return no mutation token. The isolated installed time-tracking
+class also checks its configured key, cold and repeated scans, same-stat edits,
+stale metadata, rename/delete, malformed-source refusal, disabled work and
+disposal. Original service/settings identities are restored; no physical
+fixtures, provider calls, real session mutations or settings saves occur.
+
+All eight active consumers remain enabled in TEST with outbound automation off.
+Controller persists only the intended existing `attachmentSync` default; after
+excluding that one-time migration, its settings hash matches the exact baseline.
+Sync-request runtime state changes naturally and is not claimed byte-unchanged.
+GCM, Health, Finance, Calendar and Linter state remain byte-unchanged; Navigator
+only acknowledges its 8.2.4-to-8.2.5 version update.
+
+Five 30-second foreground TEST warm captures before and after the combined
+Controller/GCM/Health/Navigator update observe median body readiness of
+10.868 to 8.514 seconds, GCM readiness of 14.886 to 9.187 seconds and Health
+readiness of 15.123 to 9.471 seconds. These measurements cover the combined
+update, not Controller alone. Total raw reads rise from 36 to 44 and cached reads
+from 34 to 73/74; the three repeated inventories are unchanged. TEST is unpaired
+for Controller notifications and has time tracking disabled, so these captures
+do not demonstrate lower total startup reads or exercise configured reminder
+publication. The targeted installed fixtures establish the bounded read savings
+for those routes separately. Warm readiness is not cold application startup,
+first-input latency, production performance or physical-phone timing.
+
+Full metadata inventory/sorting, eligible source verification and configured
+repeat projection remain. An actual calendar import still obtains source
+authority and validates its plan. The indexed and mid-batch stop improvements
+require the coordinated GCM capabilities; older releases retain their prior
+boundaries. No source count establishes production latency, cold vault readiness
+or physical mobile startup timing.
+
+
 ## 3.1.7 — Scope recurrence recovery and preserve reminder filter focus
 
 Successful native calendar sync now gives GCM recurrence recovery the final paths
@@ -64,10 +192,13 @@ save/execution calls. Twelve native input events and thirteen snapshots preserve
 the same connected input, toolbar, owner-document focus and cursor. Typing
 `morning` shows one rule, `zzzz` shows none and clearing shows both. Save, reminder
 restart and policy-refresh attempts stay at zero. Cleanup restores the original
-settings nodes, instrumentation and leaf; real settings remain unchanged. The final ordinary production build passed with byte-identical artifacts and
-reported the test runtime unchanged. Public publication is the remaining handoff step. See
+settings nodes, instrumentation and leaf; real settings remain unchanged. The
+final ordinary build passed with byte-identical artifacts and reported the test
+runtime unchanged. The public numeric
+[3.1.7 release](https://github.com/ZachTish/tps-controller/releases/tag/3.1.7)
+was published and is available through BRAT. See
 [3.1.7 release notes](release-notes/3.1.7.md) for the tested artifact hashes.
-Minimum Obsidian stays 1.12.3. This backward-compatible performance patch is ready for the user’s BRAT pull after public publication; production installation remains separate.
+Minimum Obsidian stays 1.12.3; production installation remains the user's BRAT pull.
 
 ## 3.1.6 — Wait for GCM before maintenance
 
@@ -88,7 +219,7 @@ The full suite's three optional notification-open historical comparisons were
 then run separately against their exact released 0.3.5 baseline: all five
 lifecycle checks pass with no skips. TypeScript and a separate build-only
 verification pass. The ordinary build deployed the matching artifacts to TEST;
-a targeted reload preserved all eight active consumers' settings/data/enabled
+a TEST renderer reload preserved all eight active consumers' settings/data/enabled
 state and Controller's passive role. Installed actual-method controls pass 8/8,
 versus 4/8 before the fix. The TEST window was hidden and unfocused; private
 maintenance receivers were synthetic, and no real automation or physical UI
@@ -841,3 +972,9 @@ GCM 3.5.1 separately removes repeated property-profile resolution from Controlle
 Validation includes the command-bridge suite and a 21,504-candidate regression whose complete item/audit hash matches the installed 2.6.1 output; it also exercises duplicate candidates and inconsistent unselected repeats. Required validation is `npm test`, a separate `npm run build`, test-only deployment and targeted reload. Installed benchmarks directly call the pure item/audit builders with synthetic inputs; no pairing, credentials, external provider or outbound publication is used. Results and artifact hashes are recorded in release notes. Minimum Obsidian remains 1.12.3. This backward-compatible performance fix is a patch release; physical iPhone timing and production BRAT installation are separate.
 
 Installed test-vault validation on 2026-09-26: the identical 21,504-candidate synthetic workload produced the same 128 items, one series and SHA-256 output digest before/after. Audit generation fell from 588.9 ms to 10.1 ms; item selection fell from 56.8 ms to 46.6 ms. These are one desktop before/after sample, not a device guarantee. All 593 declared-suite tests passed, with three existing optional historical-comparison tests skipped because no comparison checkout was configured. TypeScript and the separate production build passed. Targeted reload loaded 2.6.2. The clock override was restored, no publication was invoked, and runtime `data.json` remained byte-identical. No production artifacts or settings were changed.
+
+<!-- Startup implementation verification: 2026-10-08 -->
+
+Installed foreground interaction QA also clicked Navigator New note in a unique Inbox scope, opened the created item through normal Navigator selection, typed with the native keyboard and saved. Exactly one note was created; the visible body and saved source contained the typed marker. The trace counted 16 raw reads, 31 cached reads, one inventory, two process attempts and one modify across setup/creation/navigation/input inspection. The original leaf/query were restored and the owned fixture was archived byte-identically. This is a correctness check, not first-input latency or a controlled navigation benchmark.
+
+Final post-documentation verification: the separate ordinary production build passed, reported `target=test` with unchanged runtime bytes, and retained the already-loaded and QA-verified numeric version. Public release artifacts must match the SHA-256 receipt above. Production installation, full quit/reopen and vault-close/reopen comparisons, single-versus-two-window production profiling, first-use input latency and physical mobile acceptance remain rollout verification gates.

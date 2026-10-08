@@ -122,8 +122,10 @@ function createHarness({
     },
   };
   let service;
+  let layoutCallback;
   const app = {
     workspace: {
+      onLayoutReady(callback) {layoutCallback=callback;},
       trigger(name, payload) {
         events.push({ name, payload });
         onEvent(name, payload, () => service);
@@ -139,7 +141,7 @@ function createHarness({
     runCompletion,
     getReadiness,
   );
-  return { service, settings, nativeSyncCalls, events, logs, notices };
+  return { service, settings, nativeSyncCalls, events, logs, notices, fireLayout() {layoutCallback();} };
 }
 
 function eventCount(events, name) {
@@ -308,7 +310,7 @@ test("a joined readiness skip clears the flight so a later ready call can run", 
   await Promise.all([first, second]);
   assert.equal(harness.nativeSyncCalls.length, 0);
   assert.equal(completionCalls, 0);
-  assert.equal(eventCount(harness.events, STARTED), 1);
+  assert.equal(eventCount(harness.events, STARTED), 0);
   assert.equal(eventCount(harness.events, COMPLETED), 0);
   assert.deepEqual(harness.notices, ["Calendar Sync skipped: metadata cache not ready"]);
 
@@ -316,7 +318,7 @@ test("a joined readiness skip clears the flight so a later ready call can run", 
   await harness.service.runSync(true);
   assert.equal(harness.nativeSyncCalls.length, 1);
   assert.equal(completionCalls, 1);
-  assert.equal(eventCount(harness.events, STARTED), 2);
+  assert.equal(eventCount(harness.events, STARTED), 1);
   assert.equal(eventCount(harness.events, COMPLETED), 1);
 });
 
@@ -393,4 +395,39 @@ test("a synchronous sync-start listener joins instead of re-entering calendar re
   gate.resolve();
   await Promise.all([outer, nested]);
   assert.equal(eventCount(harness.events, COMPLETED), 1);
+});
+
+
+test('not-ready sync returns a deferred outcome and emits no started/completed events', async () => {
+  const h=createHarness({runNativeSync:async()=>{},getReadiness:()=>({ready:false,reason:'metadata pending'})});
+  assert.equal(await h.service.runSync(),'not-ready');
+  assert.equal(h.nativeSyncCalls.length,0); assert.deepEqual(h.events,[]);
+});
+
+test('stopping an active sync suppresses completion dispatch and later calls until restarted', async () => {
+  const hold=deferred(); let completions=0;
+  const h=createHarness({runNativeSync:()=>hold.promise,runCompletion:async()=>{completions++;}});
+  const pending=h.service.runSync(); await flushMicrotasks();
+  h.service.stop(); hold.resolve();
+  assert.equal(await pending,'stopped'); assert.equal(completions,0);
+  assert.equal(eventCount(h.events,COMPLETED),0);
+  assert.equal(await h.service.runSync(),'stopped'); assert.equal(h.nativeSyncCalls.length,1);
+});
+
+
+test('existing startup obligation survives readiness skips and stale layout callbacks after stop cannot revive it', async () => {
+  const priorWindow=globalThis.window; let intervals=0; let ready=false;
+  globalThis.window={setInterval(){intervals++; return intervals;},clearInterval(){}};
+  try {
+    const h=createHarness({runNativeSync:async()=>{},getReadiness:()=>({ready,reason:'settling'})});
+    h.service.start(); h.fireLayout(); await flushMicrotasks();
+    assert.equal(h.nativeSyncCalls.length,0);
+    for(let n=0;n<10;n++) await h.service.fulfillStartupSync();
+    assert.equal(h.nativeSyncCalls.length,0); assert.equal(intervals,1,'no new readiness timer');
+    ready=true; await h.service.fulfillStartupSync();
+    for(let n=0;n<100;n++) await h.service.fulfillStartupSync();
+    assert.equal(h.nativeSyncCalls.length,1,'initial ready sync exactly once');
+    await h.service.stop(); h.fireLayout(); await flushMicrotasks();
+    assert.equal(h.nativeSyncCalls.length,1);
+  } finally {globalThis.window=priorWindow;}
 });

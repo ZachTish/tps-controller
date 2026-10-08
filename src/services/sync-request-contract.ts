@@ -104,10 +104,10 @@ export function joinSyncRequestFulfillment<T>(
 }
 
 export async function executeSyncRequestGeneration(
-    execute: () => Promise<void>,
+    execute: () => Promise<void | boolean>,
     acknowledge: () => Promise<boolean>,
 ): Promise<boolean> {
-    await execute();
+    if (await execute() === false) return false;
     return acknowledge();
 }
 

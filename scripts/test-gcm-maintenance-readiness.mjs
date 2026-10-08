@@ -27,8 +27,7 @@ function loadActualMethods() {
   assert.ok(owner, 'Actual Controller owner must exist');
   const names = [
     'getGcmPlugin', 'getCalendarPlugin', 'getNotifierPlugin',
-    'runRecurrenceMaintenanceTick', 'runParentChildMaintenanceTick',
-    'hasFrontmatterKeyCaseInsensitive', 'getFrontmatterValueCaseInsensitive',
+    'runRecurrenceMaintenanceTick',
   ];
   const methods = names.map(name => {
     const method = owner.members.find(member => ts.isMethodDeclaration(member)
@@ -121,19 +120,18 @@ function assertNoMaintenance(h) {
   assert.deepEqual(work, { inventory: 0, metadata: 0, reads: 0, writes: 0, provider: 0,
     model: 0, recurrence: 0, reconcile: 0, selfLink: 0, privateAccess: 0 });
   assert.equal(h.controller.parentChildMaintenanceActivated, false,
-    'An unavailable dependency must not stop the existing bootstrap owner');
+    'Recurrence dependency readiness must not activate retired parent maintenance');
 }
 
-test('ready GCM API preserves shared recurrence, parent maintenance and exact method receivers', async () => {
+test('ready GCM API preserves shared recurrence and its exact method receiver', async () => {
   const h = createHarness();
   await h.controller.runRecurrenceMaintenanceTick();
-  await h.controller.runParentChildMaintenanceTick();
   assert.equal(h.counts.recurrence, 1);
-  assert.equal(h.counts.inventory, 1);
-  assert.equal(h.counts.metadata, 2);
-  assert.equal(h.counts.reconcile, 1);
-  assert.equal(h.counts.selfLink, 1);
-  assert.equal(h.controller.parentChildMaintenanceActivated, true);
+  assert.equal(h.counts.inventory, 0);
+  assert.equal(h.counts.metadata, 0);
+  assert.equal(h.counts.reconcile, 0);
+  assert.equal(h.counts.selfLink, 0);
+  assert.equal(h.controller.parentChildMaintenanceActivated, false);
   assert.equal(h.controller.getGcmPlugin().timeTracking, h.timeTracking);
 });
 
@@ -151,8 +149,7 @@ for (const apiState of ['missing', 'null', 'false']) {
   test(`unpublished GCM (${apiState} API) performs no private maintenance or vault/model/provider work`, async () => {
     const h = createHarness({ apiState });
     await h.controller.runRecurrenceMaintenanceTick();
-    await h.controller.runParentChildMaintenanceTick();
-    assertNoMaintenance(h);
+      assertNoMaintenance(h);
   });
 }
 
@@ -160,7 +157,6 @@ test('actual unload contract removes API authority even while old private servic
   const h = createHarness();
   delete h.gcm.api; // Check after unload has removed API authority, not during its event callback.
   await h.controller.runRecurrenceMaintenanceTick();
-  await h.controller.runParentChildMaintenanceTick();
   assertNoMaintenance(h);
 });
 
@@ -170,8 +166,7 @@ for (const state of [
   test(`disabled, missing or User-role GCM cannot activate maintenance: ${JSON.stringify(state)}`, async () => {
     const h = createHarness(state);
     await h.controller.runRecurrenceMaintenanceTick();
-    await h.controller.runParentChildMaintenanceTick();
-    assertNoMaintenance(h);
+      assertNoMaintenance(h);
   });
 }
 
@@ -180,29 +175,25 @@ test('an unrelated enabled plugin cannot grant GCM maintenance authority', async
   h.app.plugins.enabledPlugins.add('unrelated-plugin');
   h.app.plugins.plugins['unrelated-plugin'] = h.gcm;
   await h.controller.runRecurrenceMaintenanceTick();
-  await h.controller.runParentChildMaintenanceTick();
   assertNoMaintenance(h);
 });
 
 test('the existing next tick observes late publication without a new poller or cached availability state', async () => {
   const h = createHarness({ apiState: 'missing' });
   await h.controller.runRecurrenceMaintenanceTick();
-  await h.controller.runParentChildMaintenanceTick();
   assertNoMaintenance(h);
   h.publish();
   await h.controller.runRecurrenceMaintenanceTick();
-  await h.controller.runParentChildMaintenanceTick();
   assert.equal(h.counts.recurrence, 1);
-  assert.equal(h.counts.inventory, 1);
-  assert.equal(h.counts.metadata, 2);
-  assert.equal(h.counts.reconcile, 1);
-  assert.equal(h.counts.selfLink, 1);
+  assert.equal(h.counts.inventory, 0);
+  assert.equal(h.counts.metadata, 0);
+  assert.equal(h.counts.reconcile, 0);
+  assert.equal(h.counts.selfLink, 0);
 });
 
 test('canonical and existing legacy GCM registry IDs both require publication', async () => {
   const h = createHarness({ id: LEGACY_GCM_ID, apiState: 'missing' });
   await h.controller.runRecurrenceMaintenanceTick();
-  await h.controller.runParentChildMaintenanceTick();
   assertNoMaintenance(h);
   h.publish();
   await h.controller.runRecurrenceMaintenanceTick();

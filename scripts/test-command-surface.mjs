@@ -670,7 +670,7 @@ test("controller logging records settings causes and concise runtime outcomes", 
   assert.match(mainSource, /logger\.flow\("Automation", "start-all"/);
   assert.match(mainSource, /logger\.flow\("ReminderEngine", "check:result"/);
   assert.match(mainSource, /logger\.flow\("ReminderEngine", "delivery:prepared"/);
-  assert.match(mainSource, /logger\.flow\("ParentChildMaintenance", "candidates:resolved"/);
+  assert.doesNotMatch(mainSource, /ParentChildMaintenance/);
 });
 
 test("calendar sync logs native outcomes and a paused legacy setting", () => {

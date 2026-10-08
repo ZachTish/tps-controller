@@ -112,8 +112,6 @@ interface GcmPluginAPI {
     };
     bulkEditService?: {
         checkMissingRecurrences?: (paths?: readonly string[]) => Promise<void>;
-        reconcileParentChildLinksForParent?: (parentFile: TFile) => Promise<number>;
-        ensureParentSelfLinkForParent?: (parentFile: TFile) => Promise<boolean>;
     };
 }
 
@@ -159,17 +157,18 @@ export default class TPSControllerPlugin extends Plugin {
     private timeTrackingReminderStartupTimeoutId: number | null = null;
     private syncRequestIntervalId: number | null = null;
     private syncRequestFulfillmentPromise: Promise<void> | null = null;
-    private parentChildMaintenanceIntervalId: number | null = null;
+    private unloading = false;
+    private automationRunning = false;
+    private automationGeneration = 0;
     private twoStageArchiveIntervalId: number | null = null;
-    private parentChildBootstrapIntervalId: number | null = null;
     private tishOSNotificationRefreshTimeoutId: number | null = null;
-    private parentChildStartupResolvedHandled = false;
-    private parentChildMaintenanceActivated = false;
     private metadataIndexResolved = false;
+    private pendingNoteMetadataResolution = true;
     private calendarSyncSettledAt = Date.now() + 20_000;
     private readonly calendarSyncSettleWindowMs = 20_000;
     private persistedSettingsSnapshot: Record<string, unknown> | null = null;
     private readonly uncertainSettingsSaveKeys = new Set<string>();
+    private settingsSaveBatchChanged = false;
     private retainedLegacyS3Credentials: RetainedLegacyS3Credentials = {};
     private settingsTab: TPSControllerSettingTab | null = null;
     private controllerPeriodicReloadPreference: ControllerPeriodicReloadPreference;
@@ -249,7 +248,7 @@ export default class TPSControllerPlugin extends Plugin {
                 const completed = await this.overdueService.completeItemFromNativeNotification(target);
                 if (completed) {
                     this.refreshNotificationViews();
-                    void this.tishOSCommandBridgeService.refreshCatalogs(
+                    void this.tishOSCommandBridgeService.refreshNativeNotifications(
                         "notification-complete",
                     );
                 }
@@ -261,7 +260,7 @@ export default class TPSControllerPlugin extends Plugin {
                 const snoozed = await this.overdueService.snoozeItemFromNativeNotification(target, 10);
                 if (snoozed) {
                     this.refreshNotificationViews();
-                    void this.tishOSCommandBridgeService.refreshCatalogs(
+                    void this.tishOSCommandBridgeService.refreshNativeNotifications(
                         "notification-snooze",
                     );
                 }
@@ -448,7 +447,6 @@ export default class TPSControllerPlugin extends Plugin {
             void this.tishOSCommandBridgeService.handleNotificationActionRoute(params);
         });
         this.tishOSCommandBridgeService.start();
-        this.scheduleParentChildStartupAfterMetadataReadiness();
         this.startS3agleAttachmentAutomation();
 
         if (this.deviceRoleManager.isController()) {
@@ -465,18 +463,22 @@ export default class TPSControllerPlugin extends Plugin {
         }
 
         this.registerEvent(this.app.vault.on("create", (file) => {
+            if (!this.isNoteSourceFile(file)) return;
             this.deferCalendarSyncSettlementForFile(file, "file create");
             this.scheduleTishOSNativeNotificationRefresh("file-create");
         }));
         this.registerEvent(this.app.vault.on("modify", (file) => {
+            if (!this.isNoteSourceFile(file)) return;
             this.deferCalendarSyncSettlementForFile(file, "file modify");
             this.scheduleTishOSNativeNotificationRefresh("file-modify");
         }));
         this.registerEvent(this.app.vault.on("delete", (file) => {
+            if (!this.isNoteSourceFile(file)) return;
             this.deferCalendarSyncSettlementForFile(file, "file delete");
             this.scheduleTishOSNativeNotificationRefresh("file-delete");
         }));
         this.registerEvent(this.app.vault.on("rename", (file) => {
+            if (!this.isNoteSourceFile(file)) return;
             this.deferCalendarSyncSettlementForFile(file, "file rename");
             this.scheduleTishOSNativeNotificationRefresh("file-rename");
         }));
@@ -566,7 +568,12 @@ export default class TPSControllerPlugin extends Plugin {
     }
 
     async onunload() {
-        await this.financeRelay?.stop();
+        this.unloading = true;
+        delete (this as any).api;
+        delete (window as any).TPS;
+        // Invalidate every producer before awaiting any asynchronous drain.
+        const financeRelayStop = this.financeRelay?.stop();
+        const calendarStop = this.calendarAutomation?.stop();
         logger.flow("Lifecycle", "unload");
         this.controllerPeriodicReloadService?.dispose();
         if (this.tishOSNotificationRefreshTimeoutId !== null) {
@@ -576,12 +583,10 @@ export default class TPSControllerPlugin extends Plugin {
         const commandBridgeStop = this.tishOSCommandBridgeService?.stop();
         this.stopS3agleAttachmentAutomation();
         this.stopAllAutomation();
-        await commandBridgeStop;
+        this.stopReminderStateFlushTimer();
+        await Promise.all([financeRelayStop, calendarStop, commandBridgeStop]);
         await this.settingsSaveQueue.waitForIdle();
         await this.flushReminderStateNow();
-        this.stopReminderStateFlushTimer();
-        delete (this as any).api;
-        delete (window as any).TPS;
     }
 
     // ========================================================================
@@ -642,6 +647,7 @@ export default class TPSControllerPlugin extends Plugin {
         const attachmentSyncMigrationChanged = !data.attachmentSync
             || this.settings.s3agleAttachmentAutomation?.enabled === true
             || this.settings.s3agleAttachmentAutomation?.archiveUnreferencedBucketObjects === true;
+        if (attachmentSyncMigrationChanged) this.persistedSettingsSnapshot.attachmentSync = data.attachmentSync;
         try {
             this.settings.attachmentSync = normalizeAttachmentSyncSettings(data.attachmentSync, this.settings.s3agleAttachmentAutomation);
         } catch {
@@ -759,57 +765,44 @@ export default class TPSControllerPlugin extends Plugin {
         this.retryRetainedS3CredentialMigration();
         this.persistAlertStateToLocalStorage(this.settings.alertState);
         await this.settingsSaveQueue.requestSave();
-        this.scheduleTishOSNativeNotificationRefresh("settings-save");
     }
 
     private scheduleTishOSNativeNotificationRefresh(reason: string): void {
+        if (this.unloading) return;
+        // Layout publication covers the initial file burst. Disabled/unused
+        // reminder routes have no note-driven schedule work, while a real
+        // settings change must still clear a previously published schedule.
+        if (reason !== "settings-save" && (this.settings.notificationDeliveryProvider !== "tishos"
+            || !this.settings.enableReminders || !this.settings.reminders.some(reminder => reminder.enabled))) return;
+        if (!this.tishOSCommandBridgeService?.canRefreshNativeNotifications()) return;
         if (this.tishOSNotificationRefreshTimeoutId !== null) {
             window.clearTimeout(this.tishOSNotificationRefreshTimeoutId);
         }
         this.tishOSNotificationRefreshTimeoutId = window.setTimeout(() => {
             this.tishOSNotificationRefreshTimeoutId = null;
-            void this.tishOSCommandBridgeService
-                .refreshCatalogs(`native-notifications:${reason}`)
-                .then((result) => {
-                    if (
-                        reason === "metadata-resolved"
-                        && this.metadataIndexResolved
-                        && result.unavailableReason === "native-notification-schedule-unavailable"
-                    ) {
-                        return this.tishOSCommandBridgeService.refreshCatalogs(
-                            "native-notifications:metadata-resolved-post-active",
-                        );
-                    }
-                    return result;
-                });
+            void this.tishOSCommandBridgeService.refreshNativeNotifications(`native-notifications:${reason}`);
         }, 1_000);
     }
 
     private handleMetadataIndexResolved(): void {
+        const firstResolution = !this.metadataIndexResolved;
+        const noteMetadataPending = this.pendingNoteMetadataResolution;
+        // Consume before callbacks: a new note event during publication keeps
+        // its own obligation for the next core resolution.
+        this.pendingNoteMetadataResolution = false;
         this.metadataIndexResolved = true;
-        this.deferCalendarSyncSettlement("metadata cache resolved");
-        if (this.tishOSCommandBridgeService) {
+        if (firstResolution) this.deferCalendarSyncSettlement("metadata cache resolved");
+        if ((firstResolution || noteMetadataPending) && this.tishOSCommandBridgeService) {
             this.scheduleTishOSNativeNotificationRefresh("metadata-resolved");
         }
-        this.scheduleParentChildStartupAfterMetadataReadiness();
     }
 
-    private scheduleParentChildStartupAfterMetadataReadiness(): void {
-        if (!this.metadataIndexResolved) return;
-        if (!this.deviceRoleManager?.isController?.()) return;
-        if (this.parentChildStartupResolvedHandled) return;
-        this.parentChildStartupResolvedHandled = true;
-        window.setTimeout(() => {
-            void this.runParentChildMaintenanceTick();
-        }, 5000);
-    }
 
     private hasNativeNotificationMetadataReadiness(): boolean {
         if (this.metadataIndexResolved) return true;
         if (!hasCompleteMarkdownMetadataSnapshot(this.app)) return false;
         this.metadataIndexResolved = true;
         logger.flow("TishOSCommandBridge", "metadata-readiness:verified-cache-snapshot");
-        this.scheduleParentChildStartupAfterMetadataReadiness();
         return true;
     }
 
@@ -834,6 +827,7 @@ export default class TPSControllerPlugin extends Plugin {
     }
 
     private async persistSettingsSnapshot(snapshot: ControllerSettingsSaveSnapshot): Promise<void> {
+        if (snapshot.changedKeys.length === 0) return;
         logger.flow("Settings", "save:start", {
             changedKeys: snapshot.changedKeys,
             ...snapshot.summary,
@@ -848,10 +842,14 @@ export default class TPSControllerPlugin extends Plugin {
         }
         for (const key of snapshot.changedKeys) this.uncertainSettingsSaveKeys.delete(key);
         this.persistedSettingsSnapshot = snapshot.comparable;
+        this.settingsSaveBatchChanged = true;
         logger.flow("Settings", "save:done", { changedKeys: snapshot.changedKeys });
     }
 
     private finishSettingsSaveBatch(): void {
+        if (!this.settingsSaveBatchChanged) return;
+        this.settingsSaveBatchChanged = false;
+        this.scheduleTishOSNativeNotificationRefresh("settings-save");
         logger.setLoggingEnabled(this.settings.enableLogging);
         this.app.workspace.trigger(TPS_EVENTS.CONTROLLER_SETTINGS_CHANGED as any, {
             sourcePluginId: this.manifest.id,
@@ -1096,8 +1094,6 @@ export default class TPSControllerPlugin extends Plugin {
             timestamp: Date.now(),
             role,
         });
-        this.parentChildStartupResolvedHandled = false;
-        this.parentChildMaintenanceActivated = false;
         if (role === "controller") void this.enterControllerMode();
         else void this.exitControllerMode();
     }
@@ -1239,7 +1235,7 @@ export default class TPSControllerPlugin extends Plugin {
     // ========================================================================
 
     private startAllAutomation() {
-        if (Platform.isMobile) {
+        if (this.unloading || Platform.isMobile || !this.deviceRoleManager.isController()) {
             this.stopAllAutomation();
             logger.warn("Skipping automation startup on mobile.");
             return;
@@ -1251,12 +1247,13 @@ export default class TPSControllerPlugin extends Plugin {
             syncIntervalMinutes: this.settings.syncIntervalMinutes,
             calendarCount: this.settings.externalCalendars?.length || 0,
         });
+        this.automationRunning = true;
+        this.automationGeneration += 1;
+        this.calendarAutomation.start();
         void this.checkAndFulfillSyncRequests("controller-startup");
         this.startSyncRequestLoop();
-        this.calendarAutomation.start();
         this.startReminderLoop();
         this.startTimeTrackingReminderLoop();
-        this.startParentChildMaintenanceLoop();
         this.startTwoStageArchiveLoop();
         this.syncConflictWatcher.updateConfig(this.settings.archiveFolder, this.settings.eventIdKey);
         this.syncConflictWatcher.start();
@@ -1264,12 +1261,13 @@ export default class TPSControllerPlugin extends Plugin {
     }
 
     private stopAllAutomation() {
+        this.automationRunning = false;
+        this.automationGeneration += 1;
         logger.flow("Automation", "stop-all");
         this.calendarAutomation.stop();
         this.stopSyncRequestLoop();
         this.stopReminderLoop();
         this.stopTimeTrackingReminderLoop();
-        this.stopParentChildMaintenanceLoop();
         this.stopTwoStageArchiveLoop();
         this.syncConflictWatcher.stop();
     }
@@ -1349,7 +1347,19 @@ export default class TPSControllerPlugin extends Plugin {
         });
     }
 
+    private isNoteSourceFile(file: unknown): boolean {
+        const path = (file as { path?: unknown } | null)?.path;
+        if (typeof path !== "string" || !(file instanceof TFile) || !path.toLowerCase().endsWith(".md")) return false;
+        const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "").toLowerCase();
+        if ([".obsidian", ".tps", ".trash", ".tishos"].includes(normalized.split("/", 1)[0])) return false;
+        const relayFolder = this.financeRelay?.getRequestFolder?.();
+        const relayRoot = relayFolder?.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").toLowerCase();
+        return !relayRoot || (normalized !== relayRoot && !normalized.startsWith(`${relayRoot}/`));
+    }
+
     private deferCalendarSyncSettlementForFile(file: unknown, reason: string): void {
+        if (!this.isNoteSourceFile(file)) return;
+        this.pendingNoteMetadataResolution = true;
         const path = (file as { path?: unknown } | null)?.path;
         if (typeof path === "string" && !shouldDeferCalendarSyncSettlementForPath(path, reason, file instanceof TFile)) return;
         this.deferCalendarSyncSettlement(reason);
@@ -1407,15 +1417,25 @@ export default class TPSControllerPlugin extends Plugin {
     }
 
     private async fulfillOneSyncRequest(cause: "controller-startup" | "poll-interval"): Promise<void> {
+        const lifecycle = this.automationGeneration;
+        const isCurrent = () => this.automationRunning && lifecycle === this.automationGeneration
+            && !Platform.isMobile && this.deviceRoleManager.isController();
+        if (!isCurrent()) return;
+        await this.calendarAutomation.fulfillStartupSync();
+        if (!isCurrent()) return;
         const request = await this.syncRequestService.readRequest();
-        if (!request) return;
+        if (!request || !isCurrent()) return;
         await logger.timeAsync("SyncRequest", "fulfill", {
             cause,
             requestId: request.requestId,
             scope: request.scope,
         }, async () => {
             const acknowledged = await executeSyncRequestGeneration(async () => {
-                if (request.scope.includes("calendar")) await this.calendarAutomation.runSync();
+                if (request.scope.includes("calendar")) {
+                    const outcome = await this.calendarAutomation.runSync();
+                    if (outcome !== "completed") return false;
+                }
+                if (!isCurrent()) return false;
                 if (request.scope.includes("reminders")) await this.runReminderCheck();
                 if (request.scope.includes("s3agle-archive")) {
                     // Acknowledge old requests without removing local content.
@@ -1423,7 +1443,8 @@ export default class TPSControllerPlugin extends Plugin {
                         requests: request.s3agleArchiveRequests?.length || 0,
                     });
                 }
-            }, () => this.syncRequestService.acknowledgeRequest(request));
+                return isCurrent();
+            }, () => isCurrent() ? this.syncRequestService.acknowledgeRequest(request) : Promise.resolve(false));
             logger.flow("SyncRequest", "fulfill:acknowledged", {
                 requestId: request.requestId,
                 acknowledged,
@@ -1434,7 +1455,10 @@ export default class TPSControllerPlugin extends Plugin {
     private startSyncRequestLoop() {
         this.stopSyncRequestLoop();
         // Keep request fulfillment responsive for user-device manual sync commands.
+        const lifecycle = this.automationGeneration;
         this.syncRequestIntervalId = window.setInterval(() => {
+            if (!this.automationRunning || lifecycle !== this.automationGeneration
+                || Platform.isMobile || !this.deviceRoleManager.isController()) return;
             void this.checkAndFulfillSyncRequests("poll-interval");
         }, 4000);
     }
@@ -1690,37 +1714,6 @@ export default class TPSControllerPlugin extends Plugin {
         }
     }
 
-    private startParentChildMaintenanceLoop() {
-        this.stopParentChildMaintenanceLoop();
-        this.parentChildBootstrapIntervalId = window.setInterval(() => {
-            if (this.parentChildMaintenanceActivated) {
-                this.stopParentChildBootstrapLoop();
-                return;
-            }
-            void this.runParentChildMaintenanceTick();
-        }, 15000);
-        const minutes = Math.max(1, this.settings.syncIntervalMinutes || 5);
-        const intervalMs = minutes * 60 * 1000;
-        this.parentChildMaintenanceIntervalId = window.setInterval(() => {
-            void this.runParentChildMaintenanceTick();
-        }, intervalMs);
-    }
-
-    private stopParentChildMaintenanceLoop() {
-        this.stopParentChildBootstrapLoop();
-        if (this.parentChildMaintenanceIntervalId !== null) {
-            window.clearInterval(this.parentChildMaintenanceIntervalId);
-            this.parentChildMaintenanceIntervalId = null;
-        }
-    }
-
-    private stopParentChildBootstrapLoop() {
-        if (this.parentChildBootstrapIntervalId !== null) {
-            window.clearInterval(this.parentChildBootstrapIntervalId);
-            this.parentChildBootstrapIntervalId = null;
-        }
-    }
-
     private runReminderCheck(
         deliveryMode: ReminderDeliveryMode | null = this.getReminderDeliveryMode(),
         runGeneration: number = this.reminderRunGeneration,
@@ -1732,7 +1725,7 @@ export default class TPSControllerPlugin extends Plugin {
             ) {
                 logger.flow("ReminderEngine", "check:tishos-schedule-refresh");
                 return this.tishOSCommandBridgeService
-                    .refreshCatalogs("manual-reminder-check")
+                    .refreshNativeNotifications("manual-reminder-check")
                     .then(() => undefined);
             }
             logger.flow("ReminderEngine", "check:skip-disabled");
@@ -2156,212 +2149,4 @@ export default class TPSControllerPlugin extends Plugin {
         }
     }
 
-    private async runParentChildMaintenanceTick(): Promise<void> {
-        if (!this.deviceRoleManager.isController()) {
-            logger.flow("ParentChildMaintenance", "skip-role", { role: this.deviceRoleManager.role });
-            return;
-        }
-
-        const gcm = this.getGcmPlugin();
-        const reconcile = gcm?.bulkEditService?.reconcileParentChildLinksForParent;
-        const ensureSelfLink = gcm?.bulkEditService?.ensureParentSelfLinkForParent;
-        if (typeof reconcile !== "function" && typeof ensureSelfLink !== "function") {
-            logger.flowWarn("ParentChildMaintenance", "skip-unavailable");
-            return;
-        }
-        this.parentChildMaintenanceActivated = true;
-
-        const parentKey = String(gcm?.services?.parents?.getParentKey?.() || gcm?.settings?.parentLinkFrontmatterKey || "childOf").trim() || "childOf";
-        const childKey = String(gcm?.settings?.childLinkFrontmatterKey || "parentOf").trim() || "parentOf";
-
-        const parentCandidates = new Map<string, TFile>();
-        const files = this.app.vault.getMarkdownFiles();
-        for (const file of files) {
-            const frontmatter = (this.app.metadataCache.getFileCache(file)?.frontmatter || {}) as Record<string, any>;
-            if (!frontmatter || typeof frontmatter !== "object") continue;
-
-            if (this.hasFrontmatterKeyCaseInsensitive(frontmatter, childKey)) {
-                parentCandidates.set(file.path, file);
-            }
-
-            const parentRaw = this.getFrontmatterValueCaseInsensitive(frontmatter, parentKey);
-            const targets = gcm?.services?.links?.extractTargetsFromValue?.(parentRaw, true)
-                || this.extractLinkTargetsFromAny(parentRaw);
-            for (const target of targets) {
-                const parentFile = gcm?.services?.links?.resolveToFile?.(target, file.path)
-                    || this.resolveLinkTargetToFile(target, file.path);
-                if (parentFile) {
-                    parentCandidates.set(parentFile.path, parentFile);
-                }
-            }
-        }
-
-        logger.flow("ParentChildMaintenance", "candidates:resolved", {
-            files: files.length,
-            candidates: parentCandidates.size,
-            parentKey,
-            childKey,
-            hasReconcile: typeof reconcile === "function",
-            hasEnsureSelfLink: typeof ensureSelfLink === "function",
-        });
-        if (!parentCandidates.size) return;
-
-        let totalUpdates = 0;
-        let failed = 0;
-        for (const parentFile of parentCandidates.values()) {
-            try {
-                if (typeof reconcile === "function") {
-                    const updated = await reconcile.call(gcm?.bulkEditService, parentFile);
-                    if (typeof updated === "number") {
-                        totalUpdates += updated;
-                    }
-                }
-                if (typeof ensureSelfLink === "function") {
-                    const selfUpdated = await ensureSelfLink.call(gcm?.bulkEditService, parentFile);
-                    if (selfUpdated) {
-                        totalUpdates += 1;
-                    }
-                }
-            } catch (error) {
-                failed++;
-                logger.flowWarn("ParentChildMaintenance", "parent:failed", {
-                    path: parentFile.path,
-                    error: logger.errorSummary(error),
-                });
-            }
-        }
-
-        logger.flow("ParentChildMaintenance", "done", {
-            candidates: parentCandidates.size,
-            totalUpdates,
-            failed,
-        });
-    }
-
-    private hasFrontmatterKeyCaseInsensitive(frontmatter: Record<string, any>, key: string): boolean {
-        const normalized = String(key || "").trim().toLowerCase();
-        if (!normalized) return false;
-        return Object.keys(frontmatter || {}).some((candidate) => candidate.toLowerCase() === normalized);
-    }
-
-    private getFrontmatterValueCaseInsensitive(frontmatter: Record<string, any>, key: string): any {
-        const normalized = String(key || "").trim().toLowerCase();
-        if (!normalized) return undefined;
-        const match = Object.keys(frontmatter || {}).find((candidate) => candidate.toLowerCase() === normalized);
-        return match ? frontmatter[match] : undefined;
-    }
-
-    private extractLinkTargetsFromAny(value: any): string[] {
-        const output = new Set<string>();
-        const visited = new Set<any>();
-
-        const consume = (candidate: any): void => {
-            if (candidate == null) return;
-            if (Array.isArray(candidate)) {
-                if (visited.has(candidate)) return;
-                visited.add(candidate);
-                candidate.forEach((entry) => consume(entry));
-                return;
-            }
-            if (typeof candidate === "object") {
-                if (visited.has(candidate)) return;
-                visited.add(candidate);
-                Object.values(candidate).forEach((entry) => consume(entry));
-                return;
-            }
-            if (typeof candidate !== "string" && typeof candidate !== "number" && typeof candidate !== "boolean") {
-                return;
-            }
-
-            const text = String(candidate).trim();
-            if (!text) return;
-            for (const target of this.extractLinkTargetsFromText(text)) {
-                output.add(target);
-            }
-        };
-
-        consume(value);
-        return Array.from(output.values());
-    }
-
-    private extractLinkTargetsFromText(rawText: string): string[] {
-        const text = String(rawText || "").trim();
-        if (!text) return [];
-        const targets = new Set<string>();
-
-        const add = (rawTarget: string) => {
-            const normalized = this.normalizeLinkTarget(rawTarget);
-            if (normalized) targets.add(normalized);
-        };
-
-        const wikiPattern = /!?\[\[([^[\]]+)\]\]/g;
-        let wikiMatch: RegExpExecArray | null = null;
-        while ((wikiMatch = wikiPattern.exec(text)) !== null) {
-            add(wikiMatch[1]);
-        }
-
-        const markdownPattern = /!?\[[^\]]*]\(([^)]+)\)/g;
-        let markdownMatch: RegExpExecArray | null = null;
-        while ((markdownMatch = markdownPattern.exec(text)) !== null) {
-            add(markdownMatch[1]);
-        }
-
-        if (targets.size === 0) {
-            add(text);
-        }
-
-        return Array.from(targets.values());
-    }
-
-    private normalizeLinkTarget(rawTarget: string): string {
-        let target = String(rawTarget || "").trim();
-        if (!target) return "";
-
-        if (target.startsWith("<") && target.endsWith(">")) {
-            target = target.slice(1, -1).trim();
-        }
-
-        target = target.replace(/^['"]|['"]$/g, "").trim();
-
-        const pipeIndex = target.indexOf("|");
-        if (pipeIndex >= 0) {
-            target = target.slice(0, pipeIndex).trim();
-        }
-
-        const hashIndex = target.indexOf("#");
-        if (hashIndex >= 0) {
-            target = target.slice(0, hashIndex).trim();
-        }
-
-        if (!target) return "";
-
-        try {
-            target = decodeURIComponent(target);
-        } catch {
-            // Keep raw value when malformed URI segments are present.
-        }
-
-        return target.replace(/^\/+/, "").trim();
-    }
-
-    private resolveLinkTargetToFile(rawTarget: string, sourcePath: string): TFile | null {
-        const target = this.normalizeLinkTarget(rawTarget);
-        if (!target) return null;
-
-        const viaCache =
-            this.app.metadataCache.getFirstLinkpathDest(target, sourcePath)
-            || this.app.metadataCache.getFirstLinkpathDest(target.replace(/\.md$/i, ""), sourcePath);
-        if (viaCache instanceof TFile) return viaCache;
-
-        const normalized = normalizePath(target);
-        const direct = this.app.vault.getAbstractFileByPath(normalized);
-        if (direct instanceof TFile) return direct;
-
-        if (!normalized.endsWith(".md")) {
-            const withMd = this.app.vault.getAbstractFileByPath(`${normalized}.md`);
-            if (withMd instanceof TFile) return withMd;
-        }
-
-        return null;
-    }
 }

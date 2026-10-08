@@ -80,7 +80,7 @@ export interface GcmNativeRecordSnapshot {
 
 export interface GcmNativeRecordsApi {
   version?: number;
-  capabilities?: { calendarTemplateRecords?: boolean; conflictAwareSnapshots?: boolean };
+  capabilities?: { calendarTemplateRecords?: boolean; conflictAwareSnapshots?: boolean; indexedSnapshot?: boolean; identityApplyCancellation?: boolean };
   isEnabled?: () => boolean;
   create?: (
     kind: 'calendar-event',
@@ -102,6 +102,12 @@ export interface GcmNativeRecordsApi {
     cause?: Record<string, unknown>,
   ) => Promise<GcmNativeRecordHandle | null>;
   inspect?: (frontmatter: unknown) => GcmNativeRecordInspection | null;
+  /** Read-only metadata projection. Not a mutation plan or source authority. */
+  indexedSnapshot?: (kind?: string, options?: { includeConflicts?: boolean }) => {
+    ready: boolean;
+    records: GcmNativeRecordHandle[];
+    conflicts?: GcmNativeRecordSnapshot['conflicts'];
+  };
   /** API v6: authoritative on-disk enumeration; virtual compatibility fields may be projected in handles. */
   list?: (kind?: string) => Promise<GcmNativeRecordHandle[]>;
   /** API v6: authoritative records plus identity and mutation revisions for plan validation. */
@@ -163,6 +169,7 @@ export interface GcmNativeRecordsApi {
       fileName?: string;
     }>,
     cause?: Record<string, unknown>,
+    options?: { isCurrent?: () => boolean },
   ) => Promise<{
     ok: boolean;
     handles: GcmNativeRecordHandle[];

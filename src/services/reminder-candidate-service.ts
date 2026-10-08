@@ -6,8 +6,7 @@ const TASK_LINE_PATTERN = /^\s*(?:[-*+]|\d+[.)])\s+\[[^\]]?]\s+/;
 const INLINE_PROPERTY_PATTERN = /\[([^\[\]:]+)::\s*([^\]]+)\]/g;
 const FENCED_CODE_BLOCK_PATTERN = /^\s*(```|~~~)/;
 
-function hasReminderFrontmatter(file: TFile, app: App, reminderProperties: Set<string>): boolean {
-    const frontmatter = app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+function hasReminderFrontmatter(frontmatter: Record<string, unknown> | undefined, reminderProperties: Set<string>): boolean {
     if (!frontmatter) return false;
 
     for (const key of Object.keys(frontmatter)) {
@@ -47,6 +46,7 @@ export async function getReminderCandidateFiles(
     app: App,
     settings: TPSControllerSettings,
     reminderProperties: string[],
+    options: { includeUnknownMetadata?: boolean } = {},
 ): Promise<{ files: TFile[] }> {
     const properties = reminderProperties.map((property) => String(property || "").trim()).filter(Boolean);
     if (!properties.length) return { files: [] };
@@ -59,7 +59,15 @@ export async function getReminderCandidateFiles(
         .sort((a, b) => a.path.localeCompare(b.path));
 
     for (const file of markdownFiles) {
-        if (hasReminderFrontmatter(file, app, propertySet)) {
+        const cache = app.metadataCache.getFileCache(file);
+        const frontmatter = cache?.frontmatter;
+        const unknownMetadata = !cache || !frontmatter || typeof frontmatter !== "object"
+            || Array.isArray(frontmatter) || ![Object.prototype, null].includes(Object.getPrototypeOf(frontmatter));
+        if (options.includeUnknownMetadata && unknownMetadata) {
+            files.push(file);
+            continue;
+        }
+        if (hasReminderFrontmatter(frontmatter, propertySet)) {
             files.push(file);
             continue;
         }

@@ -262,7 +262,7 @@ test("Controller retries failed fulfillment and atomically preserves newer reque
   assert.match(mainSource, /this\.fulfillOneSyncRequest\(cause\)\.catch/);
   assert.match(mainSource, /"fulfill:failed"/);
   assert.match(mainSource, /executeSyncRequestGeneration\(async \(\) =>/);
-  assert.match(mainSource, /\(\) => this\.syncRequestService\.acknowledgeRequest\(request\)/);
+  assert.match(mainSource, /\(\) => isCurrent\(\) \? this\.syncRequestService\.acknowledgeRequest\(request\)/);
   assert.match(serviceSource, /this\.app\.vault\.adapter\.process\(this\.requestPath/);
   assert.match(serviceSource, /this\.app\.vault\.adapter\.exists\(this\.requestPath/);
   assert.match(serviceSource, /this\.app\.vault\.adapter\.read\(this\.requestPath/);
@@ -277,6 +277,6 @@ test("Controller retries failed fulfillment and atomically preserves newer reque
   assert.match(mainSource, /"startup-write:failed"/);
 
   const actions = mainSource.indexOf('if (request.scope.includes("calendar"))');
-  const acknowledgement = mainSource.indexOf("() => this.syncRequestService.acknowledgeRequest(request)");
+  const acknowledgement = mainSource.indexOf("() => isCurrent() ? this.syncRequestService.acknowledgeRequest(request)");
   assert.ok(actions >= 0 && acknowledgement > actions, "acknowledgement must happen only after requested actions finish");
 });

@@ -138,7 +138,7 @@ test("Controller persists one provider, gates all routes, and isolates local fal
   assert.match(typesSource, /notificationDeliveryProvider: "tishos"/);
   assert.doesNotMatch(typesSource, /enableLocalReminderNoticesOnUserDevices/);
   assert.match(mainSource, /notificationScheduleProvider: \(\) => this\.settings\.notificationDeliveryProvider === "tishos"[\s\S]*Promise\.resolve\(\[\]\)/);
-  assert.match(mainSource, /notificationDeliveryProvider === "tishos"[\s\S]*refreshCatalogs\("manual-reminder-check"\)/);
+  assert.match(mainSource, /notificationDeliveryProvider === "tishos"[\s\S]*refreshNativeNotifications\("manual-reminder-check"\)/);
   assert.match(mainSource, /this\.settings\.notificationDeliveryProvider !== "ntfy"[\s\S]*TimeTrackingReminder/);
   assert.match(mainSource, /supportsTishOSNativeNotifications: supportsTishOSNotificationDelivery\(Platform\)/);
   assert.match(mainSource, /deliveryMode === "local-obsidian"[\s\S]*route: "local-obsidian"[\s\S]*return;/);
@@ -158,7 +158,7 @@ test("Controller persists one provider, gates all routes, and isolates local fal
     mainSource.indexOf('this.app.metadataCache.on("resolved"') < mainSource.indexOf("await this.loadSettings()"),
     "metadata readiness must be registered before asynchronous settings migration can yield",
   );
-  assert.match(mainSource, /metadata-resolved-post-active/);
+  assert.doesNotMatch(mainSource, /metadata-resolved-post-active/);
   assert.match(reminderDeliveryStatusSource, /localDeliveryMode === 'local-obsidian'[\s\S]*Local Obsidian notices are active while Obsidian is open/);
 });
 

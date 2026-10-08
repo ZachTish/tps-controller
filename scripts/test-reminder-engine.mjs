@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import {execFileSync} from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import moment from 'moment';
@@ -7,7 +8,7 @@ import ts from 'typescript';
 import { load as parseYaml, dump as stringifyYaml } from 'js-yaml';
 import './test-notification-open-lifecycle.mjs';
 
-const source = readFileSync(new URL('../src/services/reminder-engine.ts', import.meta.url), 'utf8');
+const source = process.env.TPS_REMINDER_BASELINE_REF ? execFileSync('git',['show',`${process.env.TPS_REMINDER_BASELINE_REF}:src/services/reminder-engine.ts`],{encoding:'utf8'}) : readFileSync(new URL('../src/services/reminder-engine.ts', import.meta.url), 'utf8');
 const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
 const overdueSource = readFileSync(new URL('../src/services/overdue-service.ts', import.meta.url), 'utf8');
 const reminderCandidateSource = readFileSync(new URL('../src/services/reminder-candidate-service.ts', import.meta.url), 'utf8');
@@ -134,7 +135,7 @@ function loadNotificationSignatureModule() {
   return module.exports;
 }
 
-function loadTimeCalculationModule() {
+function loadTimeCalculationModule(getAllTags = () => []) {
   const compiled = ts.transpileModule(timeCalculationSource, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2018 },
   });
@@ -143,7 +144,7 @@ function loadTimeCalculationModule() {
     if (id === 'obsidian') {
       return {
         moment,
-        getAllTags: () => [],
+        getAllTags,
       };
     }
     if (id === '../utils') {
@@ -358,6 +359,7 @@ function loadCompiledReminderEngineHarness(options = {}) {
         hasExplicitTimeInValue: options.hasExplicitTimeInValue || (() => true),
         getReminderTriggerBase: options.getReminderTriggerBase || ((start) => start),
         getReminderCancellationStatuses: options.getReminderCancellationStatuses || ((_fm, status) => [status]),
+        ...options.timeCalculation,
       };
     }
     if (id === './reminder-target-service') {
@@ -369,7 +371,7 @@ function loadCompiledReminderEngineHarness(options = {}) {
     }
     if (id === './external-calendar-service') return { ExternalCalendarService: class {} };
     if (id === './reminder-candidate-service') {
-      return { getReminderCandidateFiles: async () => ({ files: options.candidateFiles || [] }) };
+      return { getReminderCandidateFiles: options.getReminderCandidateFiles || (async () => ({ files: options.candidateFiles || [] })) };
     }
     if (id === './reminder-delivery-window') {
       return {
@@ -2105,18 +2107,18 @@ test('whole-note target refreshes never request retired GCM task schedule policy
 });
 
 test('reminder candidate discovery includes task-line reminder entities without parent frontmatter', () => {
-  assert.match(reminderCandidateSource, /function hasReminderFrontmatter\(file: TFile, app: App, reminderProperties: Set<string>\): boolean/);
+  assert.match(reminderCandidateSource, /function hasReminderFrontmatter\(frontmatter: Record<string, unknown> \| undefined, reminderProperties: Set<string>\): boolean/);
   assert.match(reminderCandidateSource, /async function hasReminderInlineTaskProperty\(file: TFile, app: App, reminderProperties: Set<string>\): Promise<boolean>/);
   assert.equal(reminderCandidateSource.includes('const TASK_LINE_PATTERN = /^\\s*(?:[-*+]|\\d+[.)])\\s+\\[[^\\]]?]\\s+/;'), true);
   assert.equal(reminderCandidateSource.includes('const INLINE_PROPERTY_PATTERN = /\\[([^\\[\\]:]+)::\\s*([^\\]]+)\\]/g;'), true);
-  assert.match(reminderCandidateSource, /if \(hasReminderFrontmatter\(file, app, propertySet\)\) \{/);
+  assert.match(reminderCandidateSource, /if \(hasReminderFrontmatter\(frontmatter, propertySet\)\) \{/);
   assert.match(reminderCandidateSource, /for \(const key of Object\.keys\(frontmatter\)\) \{/);
   assert.match(reminderCandidateSource, /reminderProperties\.has\(key\.trim\(\)\.toLowerCase\(\)\)/);
   assert.doesNotMatch(reminderCandidateSource, /const keys = new Set/);
   assert.match(reminderCandidateSource, /await app\.vault\.cachedRead\(file\)/);
   assert.match(reminderCandidateSource, /if \(!TASK_LINE_PATTERN\.test\(line\)\) continue;/);
   assert.match(reminderCandidateSource, /if \(key && reminderProperties\.has\(key\)\) return true;/);
-  assert.match(source, /discoverReminderCandidateFiles\(this\.app, settings, properties\)/);
+  assert.match(source, /discoverReminderCandidateFiles\(this\.app, settings, properties, \{ includeUnknownMetadata \}\)/);
   assert.match(overdueSource, /getReminderCandidateFiles\(\s*this\.app,/);
 });
 
@@ -2572,4 +2574,140 @@ test('saved GCM architecture modes cannot re-enable inline reminder targets', as
   assert.equal((await buildReminderTargetsForFile(app, file, {}, settings)).length, 1);
   app.plugins = {getPlugin: () => ({settings: {dataArchitectureMode: 'legacy'}})};
   assert.equal((await buildReminderTargetsForFile(app, file, {}, settings)).length, 1);
+});
+
+
+function startupProjectionHarness({ready = true, indexed = true, cached = {scheduled: 2000}, fresh = cached, throws = false} = {}) {
+  const counts = {reads: 0, snapshots: 0, indexed: 0, writes: 0};
+  const files = [];
+  const nativeRecords = {version: 6, capabilities: {indexedSnapshot: indexed, conflictAwareSnapshots: true},
+    indexedSnapshot() { counts.indexed++; return {ready, records: [], conflicts: []}; },
+    async snapshot() { counts.snapshots++; return {records: [], conflicts: []}; }};
+  const h = loadCompiledReminderEngineHarness({candidateFiles: files, gcmApi: {nativeRecords},
+    parseTimeRange: value => ({start: Number(value) || null, end: null}),
+    shouldIgnoreForReminder: (_file, _cache, fm) => fm.status === 'complete',
+    buildEffectiveReminderContextForTarget: (target, fm, property) => {
+      const source = target.sourceFrontmatter || fm;
+      return {frontmatter: source, propertyValue: source[property]};
+    },
+    async buildReminderTargetsForFile(_app, file, _fm, _settings, current) {
+      assert.equal(current, true); counts.reads++;
+      if (throws) throw new Error('malformed source');
+      return [{sourceKey: file.path, sourceType: 'file', targetKind: 'note', sourceFrontmatter: fresh}];
+    },
+  });
+  files.push(new h.TFile('Inbox/Reminder.md'));
+  const settings = {enableReminders: true, reminders: [{id:'scheduled',enabled:true,property:'scheduled',
+    offsetMinutes:0,repeatUntilComplete:false,repeatIntervalMinutes:5,maxRepeats:-1,stopConditions:[],
+    sourceTypes:['file'], title:'Reminder', body:'', allDayFilter:'false'}],alertState:{},
+    archiveFolder:'_archive',globalIgnorePaths:[],globalIgnoreTags:[],globalIgnoreStatuses:[],
+    globalIgnoreCheckboxStates:[],externalCalendars:[],calendarStorageMode:'native-records'};
+  const app = {metadataCache: {getFileCache: () => cached ? {frontmatter:cached} : null},
+    vault: {getMarkdownFiles: () => files}};
+  return {engine:new h.ReminderEngine(app, {}),settings,counts};
+}
+
+test('indexed-ready rule-ineligible notes perform zero source reads; an eligible change reads once', async () => {
+  const h = startupProjectionHarness({cached:{scheduled:2000,status:'complete'}});
+  assert.deepEqual(await h.engine.projectScheduledNotifications(h.settings,1000), []);
+  assert.equal(h.counts.reads,0);
+  const changed = startupProjectionHarness({cached:{scheduled:2000,status:'open'}});
+  assert.equal((await changed.engine.projectScheduledNotifications(changed.settings,1000)).length,1);
+  assert.equal(changed.counts.reads,1);
+});
+
+test('pending indexed metadata never falls back to authority or publishes an empty replacement', async () => {
+  const h=startupProjectionHarness({ready:false});
+  await assert.rejects(h.engine.projectScheduledNotifications(h.settings,1000),/not ready/i);
+  assert.equal(h.counts.reads,0); assert.equal(h.counts.snapshots,0);
+});
+
+for (const cached of [null, {scheduled:''}, {scheduled:'invalid'}, {scheduled:[]}]) {
+  test(`unknown cached reminder evidence conservatively reads: ${JSON.stringify(cached)}`, async () => {
+    const h=startupProjectionHarness({cached,fresh:{scheduled:2000}});
+    assert.equal((await h.engine.projectScheduledNotifications(h.settings,1000)).length,1);
+    assert.equal(h.counts.reads,1);
+  });
+}
+
+test('eligible cached metadata cannot override current exclusions; YAML failure remains a failed publication', async () => {
+  const h=startupProjectionHarness({fresh:{scheduled:2000,status:'complete'}});
+  assert.deepEqual(await h.engine.projectScheduledNotifications(h.settings,1000),[]);
+  assert.equal(h.counts.reads,1);
+  const broken=startupProjectionHarness({throws:true});
+  await assert.rejects(broken.engine.projectScheduledNotifications(broken.settings,1000),/malformed source/);
+});
+
+test('mixed GCM versions retain authoritative source reads for cached exclusions', async () => {
+  const h=startupProjectionHarness({indexed:false,cached:{scheduled:2000,status:'complete'},fresh:{scheduled:2000}});
+  assert.equal((await h.engine.projectScheduledNotifications(h.settings,1000)).length,1);
+  assert.equal(h.counts.reads,1);
+});
+
+
+test('read-only indexed external matching uses zero authority snapshots and preserves native occurrence ownership', async () => {
+  const f=createExternalEventMatchOperationFixture('native-records');
+  f.nativeRecords.capabilities.indexedSnapshot=true;
+  let indexed=0;
+  f.nativeRecords.indexedSnapshot=()=>{indexed++;return {ready:true,records:f.records,conflicts:f.conflicts};};
+  const snapshot=f.nativeRecords.indexedSnapshot();
+  const targets=await f.engine.buildUnmatchedExternalReminderTargets([],f.settings,undefined,snapshot);
+  assert.deepEqual(targets.map(t=>t.externalEvent.id),[f.unmatchedEvent.id]);
+  assert.equal(indexed,1); assert.equal(f.counts.snapshot,0); assert.equal(f.counts.cachedRead,0);
+});
+
+
+test('candidate discovery includes unresolved metadata conservatively without reading any body',async()=>{
+  const {getReminderCandidateFiles}=loadReminderCandidateModule();
+  const files=[{path:'Inbox/Unknown.md'},{path:'Inbox/Eligible.md'},{path:'Inbox/Ordinary.md'}];
+  let scans=0;let reads=0;let metadata=0;
+  const app={vault:{getMarkdownFiles(){scans++;return [...files];},cachedRead:async()=>{reads++;return '';}},
+    metadataCache:{getFileCache(file){metadata++;return file.path.endsWith('Unknown.md')?null:{frontmatter:file.path.endsWith('Eligible.md')?{scheduled:'2026-10-08'}:{}};}}};
+  const result=await getReminderCandidateFiles(app,{},['scheduled'],{includeUnknownMetadata:true});
+  assert.deepEqual(result.files.map(f=>f.path),['Inbox/Eligible.md','Inbox/Unknown.md']);
+  assert.deepEqual({scans,reads,metadata},{scans:1,reads:0,metadata:3});
+});
+
+
+test('settled metadata policy avoids 4,047 no-op body reads while authoritative eligible reads retain current-source exclusions',async t=>{
+  const nativeRecords={version:7,capabilities:{indexedSnapshot:true,conflictAwareSnapshots:true},indexedSnapshot:()=>({ready:true,records:[],conflicts:[]})};
+  const policy=loadTimeCalculationModule(cache=>(cache?.frontmatter?.tags||[]).map(tag=>`#${tag}`));
+  const targets=loadReminderTargetModule();const candidates=loadReminderCandidateModule();
+  const engineHarness=loadCompiledReminderEngineHarness({gcmApi:{nativeRecords},timeCalculation:policy,
+    getReminderCandidateFiles:candidates.getReminderCandidateFiles,
+    buildReminderTargetsForFile:targets.buildReminderTargetsForFile,
+    buildEffectiveReminderContextForTarget:targets.buildEffectiveReminderContextForTarget});
+  const now=Date.parse('2026-10-08T12:00:00.000Z');const scheduled='2026-10-08T15:00:00.000Z';
+  const files=Array.from({length:4047},(_,n)=>new engineHarness.TFile(`Inbox/Closed ${n}.md`));
+  const current=new engineHarness.TFile('Inbox/Current exclusion.md');const unknown=new engineHarness.TFile('Inbox/Unknown.md');files.push(current,unknown);
+  const counts={inventories:0,metadata:0,reads:0,writes:0,authority:0};
+  const app={vault:{getMarkdownFiles(){counts.inventories++;return [...files];},getAbstractFileByPath:path=>files.find(f=>f.path===path),
+    async read(file){counts.reads++;return `---\nscheduled: ${scheduled}\nstatus: ${file===unknown?'open':'complete'}\n---\nAuthored body preserved`;},
+    async modify(){counts.writes++;}},metadataCache:{getFileCache:file=>{counts.metadata++;return file===unknown?{}:{frontmatter:{scheduled,status:file===current?'open':'complete'}};}}};
+  const settings={enableReminders:true,calendarStorageMode:'native-records',inlineTaskReminders:'none',reminders:[{
+    id:'scheduled',enabled:true,property:'scheduled',sourceTypes:['file'],offsetMinutes:0,repeatUntilComplete:false,
+    repeatIntervalMinutes:5,maxRepeats:-1,stopConditions:[],title:'Reminder',body:'',allDayFilter:'false'},
+    {id:'different-date',enabled:true,property:'completedDate',sourceTypes:['file'],offsetMinutes:0,repeatUntilComplete:false,
+    repeatIntervalMinutes:5,maxRepeats:-1,stopConditions:[],title:'Other date',body:'',allDayFilter:'false'}],alertState:{},
+    globalIgnoreStatuses:['complete'],globalIgnorePaths:[],globalIgnoreTags:[],globalIgnoreCheckboxStates:[],archiveFolder:'_archive',canceledStatusValue:'cancelled',externalCalendars:[]};
+  const schedule=await new engineHarness.ReminderEngine(app,{}).projectScheduledNotifications(settings,now);
+  t.diagnostic(JSON.stringify({counts,occurrences:schedule.length}));
+  assert.equal(counts.reads,2);assert.equal(counts.inventories,1);assert.equal(counts.writes,0);
+  assert.deepEqual(schedule.map(item=>item.sourceKey),[unknown.path]);
+});
+
+
+test('settled valid metadata with an absent rule key is known absent rather than a read obligation',async()=>{
+  const h=startupProjectionHarness({cached:{},fresh:{scheduled:2000}});
+  assert.deepEqual(await h.engine.projectScheduledNotifications(h.settings,1000),[]);assert.equal(h.counts.reads,0);
+});
+
+
+test('truthy caches with absent or malformed property maps remain conservative reminder candidates',async()=>{
+  const {getReminderCandidateFiles}=loadReminderCandidateModule();
+  const cases=[{}, {frontmatter:null}, {frontmatter:[]}, {frontmatter:'bad'}];
+  const files=cases.map((_,n)=>({path:`Inbox/Unknown ${n}.md`}));
+  const app={vault:{getMarkdownFiles:()=>files},metadataCache:{getFileCache:file=>cases[files.indexOf(file)]}};
+  const result=await getReminderCandidateFiles(app,{},['scheduled'],{includeUnknownMetadata:true});
+  assert.deepEqual(result.files,files);
 });
