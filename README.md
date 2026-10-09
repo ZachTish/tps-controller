@@ -41,7 +41,9 @@ mobile route strip apply. Physical iPhone acceptance remains user/device testing
 This is an additive minor release. The test-vault deployment and public BRAT release
 are separate from production installation. See the source-backed
 [TishOS app implementation plan](docs/tishos-app-recurring-import-plan.md) for matching
-selection, durable batch observation and existing importer-ownership constraints.
+selection, durable batch observation and independent app-owned settings. The app
+plan requires no Controller references, settings lookup or runtime dependency;
+it also identifies existing plugin-specific checks to remove from that app path.
 
 Validation on 2026-10-09: all 767 declared checks passed with zero failures/skips,
 including the exact historical notification reference, 16 new calendar selector/

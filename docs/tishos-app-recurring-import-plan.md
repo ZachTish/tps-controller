@@ -5,7 +5,19 @@ The audited app is the clean Calendar Status worktree, version 0.21.13, branch
 `fix/calendar-status-parity`, commit `465b8c1e5dc11cb92ddae48aa11999213ac62503`. References
 below are relative to that app's `App/Imports` directory unless stated otherwise.
 
-## Match the Controller contract
+## Independent app configuration
+
+The goal is equivalent recurring-event choices implemented independently in
+TishOS. The calendar import path must not reference TPS Controller, read its
+settings or service files, inspect its identifiers, call its APIs, or require it
+to be installed. The app owns its settings, EventKit observation, journal and note
+writer. There is no shared runtime contract or configuration synchronization.
+
+This plan adds recurring-event settings and removes the existing plugin-specific
+checks that conflict with standalone operation. It does not add cross-importer
+adoption, deduplication, schema migration or a new transport.
+
+## Recurring-event choices
 
 Add a per-source option: **All occurrences in import window** (legacy default) or
 **Current + next occurrence**. Current means an active interval:
@@ -32,10 +44,10 @@ the native picker beside each selected calendar, including while sync is off.
 
 `CalendarImportReader.swift` currently queries past 14 days and future 90 days
 (lines 15–23, 49–76). Make its lookahead configurable through the existing settings,
-retaining 90 as the app's default. Controller defaults to 60 and offers 1–3660 days;
-align the setting explicitly when comparing results. The journal currently rejects
+retaining 90 as the app's default. A proposed app-owned range is 1–3660 days;
+validate it independently in the app. The journal currently rejects
 windows longer than 370 days (`CalendarImportConfiguration.swift`, lines 210–214).
-Supporting the Controller range therefore also requires updating that validation
+Supporting this range therefore also requires updating that validation
 to a bounded lookahead plus the existing past window, while retaining the 5,000-
 event fail-closed limit and validating old pending batches. Do not expand the
 reader alone. Next only exists when the
@@ -70,41 +82,42 @@ An absent EventKit row is not a cancellation tombstone. Keep the default no-dele
 policy for absence, and retain configurable lifecycle labels for returned canceled
 events. Real subscribed-ICS cancellation coverage still needs verification.
 
-Keep the Controller overlap guard in `CalendarImportCoordinator.swift` (lines
-126–138) and `CalendarImportNoteWriter.swift` (lines 332–370). EventKit IDs and
-Controller's canonical ICS IDs are not proven equivalent. This feature does not
-make concurrent importers safe. Move import ownership deliberately; any future
-cross-provider adoption needs an explicit, validated identity mapping before the
-guard can change.
+The audited app currently contains plugin-specific checks. They are a mismatch
+with the intended standalone design, not a requirement to preserve:
+
+- Remove `CalendarImportCoordinator.checkControllerOverlap` (lines 126–138) and
+  its calls during enable and sync (lines 72, 93, 105). It currently reads another
+  plugin's `data.json` and rejects enabled external calendar settings.
+- Remove the other-importer identity rejection and duplicate-quarantine exception
+  from `CalendarImportNoteWriter.discover` (lines 358–370). Discover only the app's
+  own `tishos-calendar:` identities using its configured identity keys; unrelated
+  notes do not block enabling or syncing the app.
+- Remove the plugin-specific setup warning in `CalendarImportSettingsView.swift`
+  (line 100) and replace the corresponding guard tests with standalone-operation
+  tests. Keep conflicting/unknown/duplicate app-owned identity checks (writer
+  lines 371–375), destination collision checks and journal protections.
+
+These changes establish independence, not cross-provider identity equivalence.
+Do not promise that separate importers will deduplicate one another, and do not
+introduce compatibility lookups to try to achieve that in this feature.
 
 The app's own journal already lives in local, backup-excluded Application Support
 (`CalendarImportCoordinator.swift`, lines 23–35; `RecordRelayPersistence.swift`,
-lines 20–31). Keep selection there. No TPS API, vault mailbox, synced service note
-or Controller/plugin dependency is needed. Advance through the existing running-Mac
+lines 20–31). Keep selection there. No plugin API, vault mailbox, synced service
+note or plugin dependency is needed. Advance through the existing running-Mac
 60-second sync cadence (coordinator lines 113–123), manual sync and existing app
 lifecycle hooks. This is not a promise of background execution while the Mac sleeps
 or iOS suspends the app.
 
-One configuration gap must be addressed before claiming taxonomy parity: property
-keys and lifecycle labels are configurable, but `calendar-event` is still a fixed
-kind value in `CalendarImportConfiguration.swift` (lines 138–143), writer ownership
-checks (lines 93–95, 249–252, 289), journal validation (configuration line 229),
-and some `VaultSnapshotBuilder.swift` paths (lines 3614–3620, 3646–3650).
-`TPSNativeRecordProjection.swift` (lines 937–958) already recognizes reserved
-`tishos-calendar:` identities with another valid public kind; it must remain intact.
-Add a configured kind value, freeze it with pending batches, and update the fixed
-writer/journal/reader checks. Preserve previous journal-owned
-records rather than orphaning them after a setting change.
-
-The app journal currently has no provider-version comparison equivalent to
-Controller's source-revision gate. Do not pretend it does or copy an ICS revision
-check without EventKit evidence. Selection uses a complete successful EventKit
-observation frozen with the batch; source-version support would be a separate
-provider contract investigation.
+Keep the app's existing configured property keys, lifecycle labels, note schema
+and identity format. Changing kind values or taxonomy readers is separate from
+these recurring-event settings. The app journal currently has no provider-version
+comparison. Selection uses a complete successful EventKit observation frozen
+with the batch; source-version support would be a separate provider investigation.
 
 ## Tests and rollout
 
-1. Port Controller's selector fixtures: active/future/end boundaries, canceled
+1. Add app-owned selector fixtures: active/future/end boundaries, canceled
    next instances, per-source isolation, deterministic ties, zero duration,
    detached moves, DST/all-day events and sparse-series window limits.
 2. Test legacy configuration and pending-batch decode; retries retain selection
@@ -114,11 +127,13 @@ provider contract investigation.
    false missing/deleted classification and no duplicate notes on repeated sync.
    Measure source reads, selected creations and unchanged writes separately.
 4. Test disappearance/permission failure before staging, explicit cancellations,
-   preexisting extra future notes, custom keys/kind values, and the Controller guard.
+   preexisting extra future notes and configured property keys/lifecycle labels.
+   Verify app importing works without any plugin installation or settings files;
+   unrelated other-importer notes must not cause plugin-specific rejection.
 5. On a synthetic subscribed ICS calendar, move one detached occurrence and cancel
    another in the actual provider. Check EventKit's original identity and returned
    cancellation behavior on Mac before enabling real-vault importing. Confirm
    settings layout on narrow/mobile screens without relying on a background timer.
 6. Ship behind the explicit per-calendar choice. Keep current default behavior.
-   Switch import ownership only after the identity/adoption plan is reviewed;
-   adopting this bounded mode alone does not enable dual importers.
+   The app remains an independent importer. Cross-importer adoption or identity
+   matching is outside this recurring-event settings change.
