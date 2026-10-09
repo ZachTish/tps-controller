@@ -84,6 +84,7 @@ const {
   legacyCalendarConfigIdForUrl,
   mergeSettingsChangeSet,
   normalizeExternalCalendarsInPlace,
+  normalizeCalendarImportHorizonDays,
   normalizeNativeCalendarCancellationState,
 } = await import(`data:text/javascript;base64,${Buffer.from(settingsPersistenceBundle.outputFiles[0].text).toString("base64")}`);
 
@@ -172,6 +173,43 @@ test("external calendar task-note strategy normalization preserves supported ser
   assert.equal(calendars[0].autoCreateMode, "note", "old task output must never remain active after settings load");
   assert.equal(calendars[0].autoCreateTaskNoteStrategy, "series");
   assert.equal(calendars[0].autoCreateTaskNoteFolder, "External Events/Linked");
+});
+
+test("recurring import mode is per feed, keeps legacy defaults absent, and preserves editor references", () => {
+  const legacy = { id: "legacy", url: "legacy.ics" };
+  const next = { id: "next", url: "next.ics", recurringImportMode: "next" };
+  const invalid = { id: "invalid", url: "invalid.ics", recurringImportMode: "unknown" };
+  const rows = [legacy, next, invalid];
+  assert.strictEqual(normalizeExternalCalendarsInPlace(rows, p => p), rows);
+  assert.strictEqual(rows[1], next);
+  assert.equal(Object.hasOwn(legacy, "recurringImportMode"), false);
+  assert.equal(next.recurringImportMode, "next");
+  assert.equal(invalid.recurringImportMode, "all");
+  next.recurringImportMode = "all";
+  normalizeExternalCalendarsInPlace(rows, p => p);
+  assert.equal(next.recurringImportMode, "all");
+});
+
+test("calendar horizon rejects invalid ranges and retains configurable positive integer days", () => {
+  for (const value of [undefined, null, "90", 0, -1, 1.5, NaN, Infinity, 3661]) {
+    assert.equal(normalizeCalendarImportHorizonDays(value), 60);
+  }
+  for (const value of [1, 60, 90, 366, 3660]) {
+    assert.equal(normalizeCalendarImportHorizonDays(value), value);
+  }
+});
+
+test("recurrence settings reuse Calendar rules and native controls without hiding disabled feed configuration", () => {
+  const editor = settingsTabSource.slice(settingsTabSource.indexOf("private renderExternalCalendars"), settingsTabSource.indexOf("private buildCalendarDisplayName"));
+  assert.match(editor, /setName\("Recurring event notes"\)/);
+  assert.match(editor, /addOption\("all", "All occurrences in import window"\)/);
+  assert.match(editor, /addOption\("next", "Current \+ next occurrence"\)/);
+  assert.match(editor, /calendar\.recurringImportMode = value === "next" \? "next" : "all"/);
+  assert.match(settingsTabSource, /calendar\.recurringImportMode === 'next' \? ' · Current \+ next'/);
+  assert.match(settingsTabSource, /setName\('Import horizon \(days\)'\)/);
+  assert.match(settingsTabSource, /text\.inputEl\.type = 'number'/);
+  assert.match(settingsTabSource, /days < 1 \|\| days > 3660\) return/);
+  assert.doesNotMatch(editor, /if \(calendar\.autoCreateEnabled === false\) return/);
 });
 
 test("external calendar normalization preserves settings-editor reorder and delete operations", () => {

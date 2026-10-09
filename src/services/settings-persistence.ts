@@ -12,6 +12,13 @@ import { normalizeCalendarUrl } from "../utils";
 
 type SettingsRecord = Record<string, unknown>;
 
+/** Bound the existing feed query; invalid legacy values retain the 60-day default. */
+export function normalizeCalendarImportHorizonDays(value: unknown): number {
+    return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 3660
+        ? value
+        : 60;
+}
+
 const hasOwn = (record: SettingsRecord, key: string): boolean =>
     Object.prototype.hasOwnProperty.call(record, key);
 
@@ -119,6 +126,10 @@ export function normalizeExternalCalendarsInPlace(
         delete calendar.autoCreateKanbanCancelledLane;
 
         calendar.preserveNotesOnExternalReschedule = calendar.preserveNotesOnExternalReschedule === true;
+        // Keep an absent mode absent: upgrading must not request a settings write.
+        if (calendar.recurringImportMode !== undefined && calendar.recurringImportMode !== "next") {
+            calendar.recurringImportMode = "all";
+        }
         calendar.autoCreateMode = "note";
         calendar.autoCreateTaskDestination = calendar.autoCreateTaskDestination === "event-note"
             ? "event-note"

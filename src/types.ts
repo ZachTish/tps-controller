@@ -58,6 +58,8 @@ export interface ExternalCalendarConfig {
     autoCreateFolder?: string;
     autoCreateTag?: string;
     autoCreateTemplate?: string;
+    /** Missing/all preserves the import window; next creates active + one future occurrence per series. */
+    recurringImportMode?: "all" | "next";
     /** Native event notes: retain the previous note when the imported schedule changes. */
     preserveNotesOnExternalReschedule?: boolean;
     rescheduleActions?: CalendarRescheduleAction[];
@@ -192,6 +194,7 @@ export interface TPSControllerSettings {
     // Calendar Sync
     calendarStorageMode: CalendarStorageMode;
     syncIntervalMinutes: number;
+    calendarImportHorizonDays: number;
     noLossSyncMode: boolean;
     syncOnEventDelete: "delete" | "archive" | "nothing";
     archiveFolder: string;
@@ -263,6 +266,7 @@ export const DEFAULT_CONTROLLER_SETTINGS: TPSControllerSettings = {
     // Calendar Sync
     calendarStorageMode: "native-records",
     syncIntervalMinutes: 5,
+    calendarImportHorizonDays: 60,
     noLossSyncMode: true,
     syncOnEventDelete: "nothing",
     archiveFolder: "",

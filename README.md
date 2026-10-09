@@ -1,5 +1,71 @@
 # TPS Controller
 
+## 3.2.0 — Create the current and next recurring occurrence
+
+Calendar rules → configure a feed → **Recurring event notes** can now select
+**Current + next occurrence**. Existing feeds retain **All occurrences in import
+window** until changed. The new mode creates active occurrences and one upcoming
+noncanceled occurrence per source series, using the existing sync interval to
+advance after an event ends. Current means `start <= sync time < end`; overlapping
+active occurrences are retained. Future ties use the stable occurrence identity.
+One-off events are unchanged. Calendar rules → Sync and safety → **Import horizon
+(days)** controls the existing lookahead (default 60, valid integers 1–3660).
+Sparse series require a window that actually includes their next occurrence.
+
+Selection limits new recurring notes, not observation or reconciliation. Every
+source occurrence remains present for missing-event checks. Existing future notes
+still receive source updates/cancellations, and configured reschedule preservation
+can create a replacement for an already-owned occurrence. Past notes remain.
+Switching modes does not prune healthy previously imported notes. The explicit
+14-day backfill command may still create historical occurrences. Unowned canceled
+occurrences are skipped in the new mode; existing canceled records keep the
+configured cancellation/restoration behavior.
+
+Selection happens after source-authority and ownership planning, before template
+reads/rendering. No local recurrence rule, timer, watcher, repair pass, extra
+vault inventory or persisted selection cache is added. Existing field keys,
+template kinds, exclusions, identity conflicts, history and cancellation rules
+remain authoritative. `recurringImportMode` is per feed (`all`/`next`, absent means
+`all`); `calendarImportHorizonDays` is shared. Invalid horizon values use the legacy
+60-day default, and invalid UI drafts are not saved. Settings normalization keeps
+an absent per-feed mode absent and does not request a startup save.
+Proven older source revisions in a next-mode recurring series stop the sync before
+templates or mutations; the existing all-mode stale-skip policy is unchanged.
+
+The existing destination hub, default Overview route and one selected feed editor
+remain unchanged. Native dropdown/number controls extend Calendar rules; they are
+available while a feed or its creation is disabled. No new disclosure or persisted
+navigation state is introduced. Existing stacked settings CSS and horizontal
+mobile route strip apply. Physical iPhone acceptance remains user/device testing.
+
+This is an additive minor release. The test-vault deployment and public BRAT release
+are separate from production installation. See the source-backed
+[TishOS app implementation plan](docs/tishos-app-recurring-import-plan.md) for matching
+selection, durable batch observation and existing importer-ownership constraints.
+
+Validation on 2026-10-09: all 767 declared checks passed with zero failures/skips,
+including the exact historical notification reference, 16 new calendar selector/
+horizon/stale-source regressions, settings coverage and complete mobile-module
+loading. The separate production build deployed 3.2.0 only to the test vault;
+Hot Reload and an explicit manifest-ID reload both loaded it. All eight active TPS
+consumers remained enabled. Installed importer QA used the real loaded constructor
+and memory-only provider/GCM/file boundaries: identical 20-future-occurrence input
+created 20 notes in 3.1.8 and one in next-mode 3.2.0; repeated sync and repeated
+cancellation made zero writes. Ended/canceled source inputs advanced one new note
+and retained history. Both versions registered zero extra listeners/inventories;
+the first template read stayed one. These are operation counts, not cold-start
+speed or physical mobile measurements. Synthetic advance changed source dates
+rather than replacing the renderer clock.
+
+The actual native settings picker selected next on a disabled synthetic feed;
+the horizon accepted 120 and rejected an invalid 0 draft without another save.
+Only an isolated settings facade received those edits. It was removed, and real
+Controller `data.json` stayed byte-identical. A full authoritative test-vault
+snapshot found 30 pre-existing calendar identity-conflict fixtures, so this QA did
+not bypass safeguards to create real files. Real source parsing/identity conflict,
+ownership and write behavior are covered by the declared regression suite; an
+external-provider end-to-end/device acceptance run remains a rollout limitation.
+
 ## 3.1.8 — Bounded reminder work and startup ownership
 
 Controller continues to own its existing alert rules, signed schedules/catalogs,

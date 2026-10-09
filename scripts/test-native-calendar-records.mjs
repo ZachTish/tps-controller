@@ -85,6 +85,35 @@ const calendar = {
   autoCreateTaskNoteFolder: 'Calendar Events',
 };
 
+const nextCalendar = { ...calendar, recurringImportMode: 'next' };
+
+async function withCalendarClock(run) {
+  const OriginalDate = globalThis.Date;
+  let now = OriginalDate.parse('2026-10-09T12:00:00.000Z');
+  globalThis.Date = class extends OriginalDate {
+    constructor(...args) { super(...(args.length ? args : [now])); }
+    static now() { return now; }
+  };
+  try {
+    return await run({
+      now: () => now,
+      advance: (milliseconds) => { now += milliseconds; },
+      set: (value) => { now = OriginalDate.parse(value); },
+    });
+  } finally {
+    globalThis.Date = OriginalDate;
+  }
+}
+
+function nextOccurrence(identity, startMinutes, endMinutes = startMinutes + 10, uid = 'next-series') {
+  const now = Date.now();
+  return event({
+    id: identity, occurrenceIdentity: identity, uid, isRecurring: true,
+    startDate: new Date(now + startMinutes * 60_000),
+    endDate: new Date(now + endMinutes * 60_000),
+  });
+}
+
 function canonicalId(configId, occurrenceIdentity) {
   const source = createHash('sha256').update(configId).digest().subarray(0, 12).toString('base64url');
   const occurrence = createHash('sha256').update(`${configId}\0${occurrenceIdentity}`).digest().subarray(0, 20).toString('base64url');
@@ -602,9 +631,9 @@ function harness(initialEvents = [], options = {}) {
     },
   };
   const external = {
-    async fetchEventsWithStatus(url) {
+    async fetchEventsWithStatus(url, rangeStart, rangeEnd, includeCancelled, force) {
       operations.feedFetches += 1;
-      if (fetchHook) return fetchHook(url);
+      if (fetchHook) return fetchHook(url, rangeStart, rangeEnd, includeCancelled, force);
       const state = feedStates.get(url) || { ok: true, events: [] };
       return { ok: state.ok, events: state.ok ? state.events : [], normalizedUrl: url, fromCache: false };
     },
@@ -3225,3 +3254,244 @@ test('an interrupted active batch preserves its prefix and stopped Controller do
   assert.equal(entriesSeen,2);assert.equal(h.files.size,1,'already committed prefix is preserved without rollback');
   assert.equal(h.operations.snapshots,stoppedSnapshots);assert.equal(h.settingsSaveCount,0);
 });
+
+test('next recurring imports keep all ongoing intervals, one future slot, and unchanged one-off behavior', async () => withCalendarClock(async () => {
+  const ended = nextOccurrence('ended', -30, -20);
+  const ongoing = nextOccurrence('ongoing', -5, 5);
+  const overlapping = nextOccurrence('overlapping', -2, 8);
+  const first = nextOccurrence('first', 15);
+  const later = nextOccurrence('later', 30);
+  const cancelled = { ...nextOccurrence('cancelled', 10), isCancelled: true };
+  const oneOff = { ...nextOccurrence('one-off', 40), isRecurring: false };
+  const h = harness([later, cancelled, overlapping, ended, oneOff, first, ongoing]);
+  const result = await h.service.sync([nextCalendar], '', true, false);
+  assert.equal(result.created, 4);
+  assert.deepEqual([...h.frontmatters.values()].map(fm => fm.tpsId).sort(),
+    [ongoing, overlapping, first, oneOff].map(row => canonicalId(calendar.id, row.occurrenceIdentity)).sort());
+  assert.equal(h.operations.diskReads, 0);
+  assert.equal(h.operations.inventory, 0, 'Controller does not add a second vault discovery owner');
+}));
+
+test('next recurring imports advance after end and repeated syncs read no template or create another future note', async () => withCalendarClock(async clock => {
+  const rows = [nextOccurrence('first', 10, 15), nextOccurrence('second', 20, 25), nextOccurrence('third', 30, 35)];
+  const h = harness(rows, { templates: { 'Next.md': '---\nkind: [transaction/event]\n---\nTemplate body\n' } });
+  const config = { ...nextCalendar, autoCreateTemplate: 'Next.md' };
+  assert.equal((await h.service.sync([config], '', true, false)).created, 1);
+  assert.equal(h.operations.diskReads, 1);
+  const writes = h.mutationLog.length;
+  for (let index = 0; index < 5; index += 1) assert.equal((await h.service.sync([config], '', true, false)).created, 0);
+  assert.equal(h.mutationLog.length, writes);
+  assert.equal(h.operations.diskReads, 1);
+  clock.advance(16 * 60_000);
+  assert.equal((await h.service.sync([config], '', true, false)).created, 1);
+  assert.equal(h.operations.diskReads, 2);
+  assert.equal(h.files.size, 2, 'completed occurrence stays as history');
+  assert.equal([...h.bodies.values()].every(body => body === 'Template body\n'), true);
+  assert.equal(h.operations.registeredEvents, 0);
+}));
+
+test('next recurring imports choose deterministic source occurrence ties independently of feed order', async () => withCalendarClock(async () => {
+  const first = nextOccurrence('A', 10);
+  const tied = nextOccurrence('B', 10);
+  for (const rows of [[first, tied], [tied, first]]) {
+    const h = harness(rows);
+    assert.equal((await h.service.sync([nextCalendar], '', true, false)).created, 1);
+    assert.equal([...h.frontmatters.values()][0].tpsId, canonicalId(calendar.id, 'A'));
+  }
+}));
+
+test('next recurring imports allocate independent future slots per configured feed and provider UID', async () => withCalendarClock(async () => {
+  const personal = { ...nextCalendar, id: 'personal-next', url: 'https://calendar.example/personal-next.ics' };
+  const a = nextOccurrence('a', 10);
+  const b = nextOccurrence('b', 20);
+  const other = nextOccurrence('other-a', 15, 25, 'other-series');
+  const h = harness([b, other, a]);
+  h.setFeed(personal.url, [b, a]);
+  assert.equal((await h.service.sync([nextCalendar, personal], '', true, false)).created, 3);
+  assert.deepEqual([...h.frontmatters.values()].map(fm => fm.tpsId).sort(), [
+    canonicalId(calendar.id, 'a'), canonicalId(calendar.id, 'other-a'), canonicalId(personal.id, 'a'),
+  ].sort());
+  assert.equal(h.operations.feedFetches, 2);
+}));
+
+test('next recurring imports retain complete feed presence evidence before new-note selection', async () => withCalendarClock(async () => {
+  const rows = [nextOccurrence('first', 10), nextOccurrence('later', 20), { ...nextOccurrence('cancelled', 5), isCancelled: true }];
+  const h = harness(rows);
+  h.settings.syncOnEventDelete = 'archive';
+  let seen;
+  const original = h.service.preflightIdentityPlan.bind(h.service);
+  h.service.preflightIdentityPlan = (...args) => {
+    seen = new Set(args[2].seenIds);
+    return original(...args);
+  };
+  const result = await h.service.sync([nextCalendar], '', true, false);
+  assert.equal(result.created, 1);
+  for (const row of rows) assert.equal(seen.has(canonicalId(calendar.id, row.occurrenceIdentity).toLowerCase()), true);
+  assert.equal(result.archived, 0);
+  assert.equal(result.missing, 0);
+  const repeated = await h.service.sync([nextCalendar], '', true, false);
+  assert.equal(repeated.created, 0);
+  assert.equal(repeated.archived, 0);
+}));
+
+test('next recurring imports skip canceled new occurrences but still cancel and restore existing notes', async () => withCalendarClock(async () => {
+  const first = nextOccurrence('first', 10);
+  const second = nextOccurrence('second', 20);
+  const third = nextOccurrence('third', 30);
+  const h = harness([first, second, third]);
+  assert.equal((await h.service.sync([nextCalendar], '', true, false)).created, 1);
+  h.setEvents([{ ...first, isCancelled: true }, second, third]);
+  const cancelled = await h.service.sync([nextCalendar], '', true, false);
+  assert.equal(cancelled.created, 1);
+  assert.equal(cancelled.cancelled, 1);
+  const id = canonicalId(calendar.id, first.occurrenceIdentity);
+  assert.equal([...h.frontmatters.values()].find(fm => fm.tpsId === id).status, 'cancelled');
+  h.setEvents([first, second, third]);
+  const restored = await h.service.sync([nextCalendar], '', true, false);
+  assert.equal(restored.created, 0);
+  assert.equal([...h.frontmatters.values()].find(fm => fm.tpsId === id).status, undefined);
+  const unseen = harness([{ ...first, isCancelled: true }, second, third]);
+  assert.equal((await unseen.service.sync([nextCalendar], '', true, false)).created, 1);
+  assert.equal([...unseen.frontmatters.values()][0].tpsId, canonicalId(calendar.id, second.occurrenceIdentity));
+}));
+
+test('next recurring imports preserve existing far-future updates and external reschedule generations', async () => withCalendarClock(async () => {
+  const first = nextOccurrence('first', 10);
+  const later = nextOccurrence('later', 100);
+  const h = harness([first, later]);
+  await h.service.sync([preserveCalendar], '', true, false);
+  const previous = [...h.frontmatters.entries()].find(([, fm]) => fm.tpsId === canonicalId(calendar.id, 'later'));
+  h.bodies.set(previous[0], 'Keep authored history');
+  const moved = { ...later, title: 'Updated far future', startDate: new Date(later.startDate.getTime() + 60_000), endDate: new Date(later.endDate.getTime() + 60_000) };
+  h.setEvents([first, moved]);
+  const config = { ...preserveCalendar, recurringImportMode: 'next' };
+  const result = await h.service.sync([config], '', true, false);
+  assert.equal(result.created, 1, 'existing occurrence gets its required replacement generation');
+  assert.equal(h.frontmatters.get(previous[0]).tpsCalendarSync.retired, true);
+  assert.equal(h.bodies.get(previous[0]), 'Keep authored history');
+  const replacement = currentNotes(h).find(([, fm]) => fm.title === 'Updated far future');
+  assert.ok(replacement);
+  assert.equal((await h.service.sync([config], '', true, false)).created, 0);
+  h.deleteRecord(replacement[0]);
+  assert.equal((await h.service.sync([config], '', true, false)).created, 1, 'existing retired lineage keeps current-generation recovery');
+  assert.equal(h.files.size, 3);
+}));
+
+test('next recurring imports honor a moved exception without creating a second recurrence series', async () => withCalendarClock(async () => {
+  const original = { ...nextOccurrence('original', 10), sourceRevision: [1, 0, 1], sourceRevisionOrigin: 'original' };
+  const next = nextOccurrence('next', 20);
+  const h = harness([original, next]);
+  const config = { ...preserveCalendar, recurringImportMode: 'next' };
+  await h.service.sync([config], '', true, false);
+  h.setEvents([{ ...original, startDate: new Date(next.endDate.getTime() + 60_000), endDate: new Date(next.endDate.getTime() + 11 * 60_000), sourceRevision: [2, 0, 2] }, next]);
+  const moved = await h.service.sync([config], '', true, false);
+  assert.equal(moved.created, 2, 'required moved generation and the earliest unowned future slot');
+  assert.equal(currentNotes(h).length, 2);
+  assert.equal((await h.service.sync([config], '', true, false)).created, 0);
+  for (const fm of h.frontmatters.values()) for (const key of ['recurrence', 'recurrenceRule', 'rrule']) assert.equal(Object.hasOwn(fm, key), false);
+}));
+
+test('next recurring imports allow explicit historical backfill but skip ended regular creations', async () => withCalendarClock(async () => {
+  const past = nextOccurrence('past', -30, -20);
+  const cancelledPast = { ...nextOccurrence('cancelled-past', -40, -35), isCancelled: true };
+  const active = nextOccurrence('active', -5, 5);
+  const first = nextOccurrence('first', 10);
+  const later = nextOccurrence('later', 20);
+  for (const backfill of [false, true]) {
+    const h = harness([past, cancelledPast, active, first, later]);
+    const result = await h.service.sync([nextCalendar], '', true, backfill);
+    assert.equal(result.created, backfill ? 3 : 2);
+    const ids = new Set([...h.frontmatters.values()].map(fm => fm.tpsId));
+    assert.equal(ids.has(canonicalId(calendar.id, 'past')), backfill);
+    assert.equal(ids.has(canonicalId(calendar.id, 'cancelled-past')), false);
+  }
+}));
+
+test('next recurring imports with no new eligible occurrence perform zero template reads and writes', async () => withCalendarClock(async () => {
+  const rows = [nextOccurrence('ended', -10, -5), { ...nextOccurrence('cancelled', 10), isCancelled: true }, { ...nextOccurrence('filtered', 20), title: 'Excluded meeting' }];
+  const h = harness(rows);
+  const result = await h.service.sync([{ ...nextCalendar, autoCreateTemplate: 'Missing template.md' }], 'excluded', true, false);
+  assert.equal(result.created, 0);
+  assert.equal(h.operations.diskReads, 0);
+  assert.equal(h.operations.inventory, 0);
+  assert.equal(h.mutationLog.length, 0);
+  assert.equal(h.settingsSaveCount, 0);
+}));
+
+test('next recurring imports preserve absent/all mode behavior and handle all-day and zero-duration boundaries', async () => withCalendarClock(async () => {
+  const first = nextOccurrence('first', 10);
+  const later = nextOccurrence('later', 20);
+  const cancelled = { ...nextOccurrence('cancelled', 5), isCancelled: true };
+  for (const recurringImportMode of [undefined, 'all', 'unknown']) {
+    const h = harness([first, later, cancelled]);
+    assert.equal((await h.service.sync([{ ...calendar, recurringImportMode }], '', true, false)).created, 3);
+  }
+  const allDay = { ...nextOccurrence('all-day', -60, 60), isAllDay: true };
+  const zero = nextOccurrence('zero', 10, 10);
+  const endedZero = nextOccurrence('ended-zero', 0, 0);
+  const h = harness([allDay, later, zero, endedZero]);
+  assert.equal((await h.service.sync([nextCalendar], '', true, false)).created, 2);
+  const ids = new Set([...h.frontmatters.values()].map(fm => fm.tpsId));
+  assert.equal(ids.has(canonicalId(calendar.id, 'all-day')), true);
+  assert.equal(ids.has(canonicalId(calendar.id, 'zero')), true);
+  assert.equal(ids.has(canonicalId(calendar.id, 'ended-zero')), false);
+}));
+
+test('next recurring imports freeze selection mode and sync time before an asynchronous fetch', async () => withCalendarClock(async clock => {
+  const first = nextOccurrence('first', 10, 15);
+  const later = nextOccurrence('later', 20);
+  const h = harness([]);
+  const config = { ...nextCalendar };
+  h.setFetchHook(async () => {
+    config.recurringImportMode = 'all';
+    clock.advance(16 * 60_000);
+    return { ok: true, events: [first, later] };
+  });
+  assert.equal((await h.service.sync([config], '', true, false)).created, 1);
+  assert.equal([...h.frontmatters.values()][0].tpsId, canonicalId(calendar.id, 'first'));
+}));
+
+test('configured calendar import horizon reuses normalization and the one sampled sync time', async () => withCalendarClock(async clock => {
+  for (const value of [undefined, 1, 120, 3660, 0, -1, 3661, 1.5, '120', NaN, Infinity]) {
+    const h = harness([]);
+    h.settings.calendarImportHorizonDays = value;
+    const start = new Date(clock.now());
+    const expected = new Date(start);
+    expected.setDate(expected.getDate() + ([1, 120, 3660].includes(value) ? value : 60));
+    let captured;
+    h.setFetchHook(async (_url, rangeStart, rangeEnd) => {
+      captured = { start: new Date(rangeStart), end: new Date(rangeEnd) };
+      h.settings.calendarImportHorizonDays = 2;
+      return { ok: true, events: [] };
+    });
+    await h.service.sync([nextCalendar], '', true, false);
+    assert.equal(captured.end.toISOString(), expected.toISOString(), String(value));
+    const midnight = new Date(start); midnight.setHours(0, 0, 0, 0);
+    assert.equal(captured.start.toISOString(), midnight.toISOString());
+  }
+}));
+
+for (const variant of ['active', 'cancelled', 'past-timing']) {
+  test(`next recurring imports reject an older ${variant} source before selection and all mutations`, async () => withCalendarClock(async () => {
+    const first = { ...nextOccurrence('first', 10), sourceRevision: [2, 0, 2], sourceRevisionOrigin: 'first' };
+    const later = nextOccurrence('later', 30);
+    const h = harness([first, later], { templates: { 'Next.md': '---\nkind: [transaction/event]\n---\nBody\n' } });
+    const config = { ...nextCalendar, autoCreateTemplate: 'Next.md' };
+    await h.service.sync([config], '', true, false);
+    const stale = { ...first, sourceRevision: [1, 0, 1],
+      ...(variant === 'cancelled' ? { isCancelled: true } : {}),
+      ...(variant === 'past-timing' ? { startDate: new Date(Date.now() - 120000), endDate: new Date(Date.now() - 60000) } : {}),
+    };
+    h.setEvents([stale, later]);
+    const before = structuredClone([...h.frontmatters]);
+    const writes = h.mutationLog.length;
+    const reads = h.operations.diskReads;
+    const saves = h.settingsSaveCount;
+    await assert.rejects(h.service.sync([config], '', true, false), /next-occurrence import received an older source revision/u);
+    assert.deepEqual([...h.frontmatters], before);
+    assert.equal(h.mutationLog.length, writes);
+    assert.equal(h.operations.diskReads, reads);
+    assert.equal(h.settingsSaveCount, saves);
+    assert.equal(h.files.size, 1);
+  }));
+}

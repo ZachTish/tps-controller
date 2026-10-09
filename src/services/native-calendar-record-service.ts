@@ -22,6 +22,7 @@ import type { ExternalCalendarService } from "./external-calendar-service";
 import { readNativeCalendarTemplate, renderNativeCalendarTemplate } from "./native-calendar-template";
 import type { NativeCalendarTemplateInstance } from "./native-calendar-template";
 import * as logger from "../logger";
+import { normalizeCalendarImportHorizonDays } from "./settings-persistence";
 
 export const TPS_CONTROLLER_NATIVE_CALENDAR_RECORDS_VERSION = 2;
 
@@ -78,6 +79,8 @@ interface PlannedCalendarOccurrence {
     retainedRecord?: IndexedCalendarRecord;
     externallyRescheduled?: boolean;
     staleRevision?: boolean;
+    /** Existing source ownership includes a retained lineage awaiting its current generation. */
+    previouslyOwned?: boolean;
     plannedCreateProperties?: Record<string, unknown>;
     plannedEventUpdates?: Record<string, unknown>;
     plannedRecordPath?: string;
@@ -246,7 +249,8 @@ export class NativeCalendarRecordService {
             : "";
         const cancellationStatus = normalizeCancellationStatus(settings.canceledStatusValue);
         const cancellationStateSnapshot = cloneCancellationState(settings.nativeCalendarCancellationState);
-        const plannedAtIso = new Date().toISOString();
+        const syncNow = new Date();
+        const plannedAtIso = syncNow.toISOString();
         const result: NativeCalendarSyncResult = {
             appliedPaths: [],
             fetched: 0,
@@ -258,11 +262,11 @@ export class NativeCalendarRecordService {
             archived: 0,
             failedFeeds: 0,
         };
-        const rangeStart = new Date();
+        const rangeStart = new Date(syncNow.getTime());
         if (backfillPastEvents) rangeStart.setDate(rangeStart.getDate() - 14);
         else rangeStart.setHours(0, 0, 0, 0);
-        const rangeEnd = new Date();
-        rangeEnd.setDate(rangeEnd.getDate() + 60);
+        const rangeEnd = new Date(syncNow.getTime());
+        rangeEnd.setDate(rangeEnd.getDate() + normalizeCalendarImportHorizonDays(settings.calendarImportHorizonDays));
         const contexts = await this.prepareCalendarContexts(calendars, settings, fieldKeys);
         assertCurrent();
         const filterTerms = filter.split(",").map((value) => value.trim().toLocaleLowerCase()).filter(Boolean);
@@ -283,6 +287,7 @@ export class NativeCalendarRecordService {
         this.rebuildFromHandles(authoritativeSnapshot.records);
         const migrationPlan = await this.prepareLegacyMigration(contexts, authoritativeSnapshot.records, fieldKeys);
         await this.prepareRescheduledOccurrences(prepared, authoritativeSnapshot.records, migrationPlan, filterTerms.length > 0, fieldKeys);
+        this.selectNewRecurringOccurrences(prepared, syncNow.getTime(), backfillPastEvents);
         await this.prepareCreationTemplates(prepared, migrationPlan);
         assertCurrent();
         const mutationPlan = await this.preflightIdentityPlan(
@@ -575,6 +580,9 @@ export class NativeCalendarRecordService {
                 const comparison = previous.revision[0] - revision[0]
                     || previous.revision[1] - revision[1] || previous.revision[2] - revision[2];
                 if (comparison > 0) {
+                    if (occurrence.context.calendar.recurringImportMode === "next" && occurrence.event.isRecurring) {
+                        throw new Error("Calendar next-occurrence import received an older source revision; no records were changed.");
+                    }
                     occurrence.staleRevision = true;
                     logger.flow('NativeCalendarRecords', 'sync:stale-revision-skipped', { sourceScope: occurrence.context.sourceScope });
                     continue;
@@ -583,6 +591,7 @@ export class NativeCalendarRecordService {
             const rescheduled = !!shiftedMaster || !!(!occurrence.event.isCancelled && previous && parseCalendarRecordId(existing.id)
                 && previous.schedule !== calendarScheduleSignature(occurrence.event));
             const recovering = !active.length && relatedIds.has(identityKey(sourceId));
+            occurrence.previouslyOwned = !!existing || recovering;
             occurrence.externallyRescheduled = rescheduled || (recovering && !occurrence.event.isCancelled);
             const preserve = rescheduled && occurrence.context.calendar.preserveNotesOnExternalReschedule === true;
             if (preserve) {
@@ -679,6 +688,40 @@ export class NativeCalendarRecordService {
             matches.set(identityKey(occurrence.id), record);
         }
         return matches;
+    }
+
+    /** Limit only first materialization; feed presence and existing ownership stay complete. */
+    private selectNewRecurringOccurrences(prepared: PreparedCalendarSync, now: number, backfill: boolean): void {
+        const nextBySeries = new Map<string, PlannedCalendarOccurrence>();
+        const seriesKey = (occurrence: PlannedCalendarOccurrence): string => (
+            JSON.stringify([occurrence.context.configId, occurrence.event.uid])
+        );
+        for (const occurrence of prepared.occurrences) {
+            const { event, context } = occurrence;
+            if (context.calendar.recurringImportMode !== "next" || !event.isRecurring || event.isCancelled) continue;
+            const start = event.startDate.getTime();
+            const end = event.endDate.getTime();
+            if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
+                throw new Error("Calendar occurrence has invalid timing; no records were changed.");
+            }
+            if (start <= now || end <= now) continue;
+            const key = seriesKey(occurrence);
+            const previous = nextBySeries.get(key);
+            if (!previous || start < previous.event.startDate.getTime()
+                || (start === previous.event.startDate.getTime()
+                    && calendarEventOccurrenceIdentity(event).localeCompare(calendarEventOccurrenceIdentity(previous.event)) < 0)) {
+                nextBySeries.set(key, occurrence);
+            }
+        }
+        prepared.occurrences = prepared.occurrences.filter((occurrence) => {
+            const { event, context } = occurrence;
+            if (context.calendar.recurringImportMode !== "next" || !event.isRecurring || occurrence.previouslyOwned) return true;
+            if (event.isCancelled) return false;
+            const end = event.endDate.getTime();
+            if (end > now && event.startDate.getTime() <= now) return true;
+            if (backfill && end <= now) return true;
+            return nextBySeries.get(seriesKey(occurrence)) === occurrence;
+        });
     }
 
     private async prepareCreationTemplates(

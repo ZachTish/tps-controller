@@ -1,5 +1,6 @@
 import { CONNECTION_SECTIONS, ConnectionSection, connectionSection, mountConnectionSettings } from "./services/connection-settings";
 import { renderCalendarRescheduleActions } from './services/calendar-reschedule-settings';
+import { normalizeCalendarImportHorizonDays } from './services/settings-persistence';
 import { validateNoteRules } from "./services/note-rules";
 import { NoteRuleEditor, NoteRulePreviewModal } from "./services/note-rule-ui";
 import { renderFinanceRelaySettings, renderWalletSetupEntry } from "./services/finance-relay-settings";
@@ -446,6 +447,24 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                 .setDynamicTooltip()
                 .onChange(async (value) => {
                     this.plugin.settings.syncIntervalMinutes = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(calSection)
+            .setName('Import horizon (days)')
+            .setDesc('Look this many days ahead in each feed (1–3660; default 60). Current + next can only select occurrences returned in this window. Longer windows increase feed processing.')
+            .addText(text => text
+                .setValue(String(normalizeCalendarImportHorizonDays(this.plugin.settings.calendarImportHorizonDays)))
+                .then(text => {
+                    text.inputEl.type = 'number';
+                    text.inputEl.min = '1';
+                    text.inputEl.max = '3660';
+                    text.inputEl.step = '1';
+                })
+                .onChange(async value => {
+                    const days = Number(value);
+                    if (!Number.isInteger(days) || days < 1 || days > 3660) return;
+                    this.plugin.settings.calendarImportHorizonDays = days;
                     await this.plugin.saveSettings();
                 }));
 
@@ -1955,6 +1974,19 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                     }));
 
             new Setting(acContent)
+                .setName("Recurring event notes")
+                .setDesc("Current + next creates active occurrences and one upcoming occurrence per series, advancing on normal sync. Past notes and already imported future notes remain and receive updates. The 14-day backfill command can still import past occurrences.")
+                .addDropdown(drop => drop
+                    .addOption("all", "All occurrences in import window")
+                    .addOption("next", "Current + next occurrence")
+                    .setValue(calendar.recurringImportMode === "next" ? "next" : "all")
+                    .onChange(async value => {
+                        calendar.recurringImportMode = value === "next" ? "next" : "all";
+                        summary.textContent = this.buildCalendarOutputSummary(calendar);
+                        await save();
+                    }));
+
+            new Setting(acContent)
                 .setName("Keep old note when externally rescheduled")
                 .setDesc("Native event notes only. When the feed changes an event's start, end, or all-day timing, keep the previous note and create a new one. Local date edits and title-only changes do not create another note. Existing notes begin tracking on their next sync.")
                 .addToggle(toggle => {
@@ -2019,7 +2051,8 @@ export class TPSControllerSettingTab extends PluginSettingTab {
         const state = calendar.enabled === false ? 'Disabled' : 'Enabled';
         if (calendar.autoCreateEnabled === false) return `${state} · sync only`;
         const destination = calendar.autoCreateFolder || calendar.autoCreateTypeFolder || 'default note folder';
-        return `${state} · Note → ${destination}`;
+        const recurrence = calendar.recurringImportMode === 'next' ? ' · Current + next' : '';
+        return `${state} · Note → ${destination}${recurrence}`;
     }
 
     renderSnoozeOptions(container: HTMLElement): void {
