@@ -6,6 +6,7 @@ import test from 'node:test';
 import { load as parseYaml, dump as stringifyYaml } from 'js-yaml';
 import moment from 'moment';
 import ts from 'typescript';
+import './test-notification-view-refresh.mjs';
 
 const sourceRoot = fileURLToPath(new URL('../src/', import.meta.url));
 
@@ -361,4 +362,109 @@ test('authoritative projection rejects a file that is replaced during its curren
     return f.content.get(target);
   };
   await assert.rejects(f.engine.projectScheduledNotifications(f.settings, f.now, 30 * 60 * 1000));
+});
+
+function attachReminderBase(f) {
+  const base = new SyntheticFile('Inbox/Reminder.base');
+  base.extension = 'base';
+  f.files.set(base.path, base);
+  const members = new Map([['Selected', new Set([f.file.path])], ['Other', new Set()]]);
+  const counts = { baseReads: 0, queries: 0 };
+  const cachedRead = f.app.vault.cachedRead;
+  f.app.vault.cachedRead = async file => {
+    if (file === base) {
+      counts.baseReads++;
+      return stringifyYaml({ views: [{ name: 'Selected', type: 'table' }, { name: 'Other', type: 'table' }] });
+    }
+    return cachedRead(file);
+  };
+  const getMarkdownFiles = f.app.vault.getMarkdownFiles;
+  f.app.vault.getMarkdownFiles = () => getMarkdownFiles().filter(file => file.extension === 'md');
+  f.app.cli = { handlers: new Map([['base:query', { handler(parameters) {
+    counts.queries++;
+    assert.equal(parameters.path, base.path);
+    assert.equal(parameters.format, 'paths');
+    return [...members.get(parameters.view)].join('\n');
+  } }]]) };
+  return { base, members, counts };
+}
+
+test('Base overdue selection shares one query and reads only matching note bodies, replacing rule filters', async () => {
+  const f = fixture();
+  const b = attachReminderBase(f);
+  const reminder = Object.assign(f.settings.reminders[0], {
+    selectionMode: 'base-view', basePath: b.base.path, baseView: 'Selected',
+    sourceTypes: ['external-event'], includeUnmatchedExternalEvents: true,
+    requiredStatuses: ['never'], requiredPaths: ['Elsewhere'],
+    ignorePaths: ['Inbox'], ignoreTags: ['blocked'], ignoreStatuses: ['working'],
+  });
+  f.settings.reminders.push({ ...reminder, id: 'same-view-rule' });
+  for (let index = 0; index < 1000; index++) {
+    const file = new SyntheticFile(`Inbox/Excluded ${index}.md`);
+    f.files.set(file.path, file);
+    f.metadata.set(file, { ...f.properties });
+    f.content.set(file, `---\n${stringifyYaml(f.properties)}---\nUnchanged excluded body.\n`);
+  }
+  const oldNow = Date.now; Date.now = () => f.now;
+  try {
+    const items = await f.service.getOverdueItems();
+    assert.equal(items.length, 1);
+    assert.equal(items[0].file, f.file);
+    assert.equal(items[0].nextRuleLabel, reminder.id, 'the same selected repeating reminder supplies its next trigger');
+    assert.equal(items[0].isRepeating, true);
+    assert.deepEqual(b.counts, { baseReads: 1, queries: 1 });
+    assert.deepEqual({ raw: f.counters.read, bodyReads: f.counters.cachedRead, scans: f.counters.scans }, { raw: 0, bodyReads: 1, scans: 0 },
+      'the native query owns discovery; Controller uses its matching paths without another vault inventory');
+    assert.equal(reminder.requiredStatuses[0], 'never', 'saved custom filters are retained when selection mode changes');
+  } finally { Date.now = oldNow; }
+});
+
+test('overdue next-rule labels exclude a different Base view until the note matches it', async () => {
+  const f = fixture();
+  const b = attachReminderBase(f);
+  f.properties.scheduled = new Date(f.now - 30_000).toISOString();
+  f.properties.due = new Date(f.now + 10 * 60_000).toISOString();
+  f.save(f.properties);
+  const current = f.settings.reminders[0];
+  Object.assign(current, { repeatUntilComplete: false, mode: 'task', allDayFilter: 'any' });
+  const next = { ...current, id: 'future-base-reminder', label: 'Future Base reminder', property: 'due',
+    selectionMode: 'base-view', basePath: b.base.path, baseView: 'Other',
+    sourceTypes: ['external-event'], includeUnmatchedExternalEvents: true };
+  f.settings.reminders.push(next);
+  const oldNow = Date.now; Date.now = () => f.now;
+  try {
+    let items = await f.service.getOverdueItems();
+    assert.equal(items.length, 1);
+    assert.equal(items[0].nextRuleLabel, undefined, 'a nonmatching view cannot annotate a legacy reminder');
+    b.members.get('Other').add(f.file.path);
+    items = await f.service.getOverdueItems();
+    assert.equal(items.length, 1);
+    assert.equal(items[0].nextRuleLabel, next.label);
+    assert.equal(items[0].nextTriggerTime, f.now + 10 * 60_000);
+    assert.deepEqual(b.counts, { baseReads: 2, queries: 2 }, 'each list pass queries the latest saved view once');
+  } finally { Date.now = oldNow; }
+});
+
+test('Base overdue reminders retain global exclusions, cancellation and stop conditions', async () => {
+  const f = fixture();
+  const b = attachReminderBase(f);
+  const reminder = Object.assign(f.settings.reminders[0], {
+    selectionMode: 'base-view', basePath: b.base.path, baseView: 'Selected',
+  });
+  const oldNow = Date.now; Date.now = () => f.now;
+  try {
+    f.settings.globalIgnorePaths = ['Inbox'];
+    assert.deepEqual(await f.service.getOverdueItems(), []);
+    f.settings.globalIgnorePaths = [];
+    f.settings.globalIgnoreStatuses = [];
+    f.settings.canceledStatusValue = 'void';
+    f.save({ ...f.properties, status: 'void' });
+    assert.deepEqual(await f.service.getOverdueItems(), []);
+    f.save(f.properties);
+    reminder.stopConditions = ['status:working'];
+    assert.deepEqual(await f.service.getOverdueItems(), []);
+    reminder.stopConditions = [];
+    assert.equal((await f.service.getOverdueItems()).length, 1);
+    assert.equal(f.counters.read, 0);
+  } finally { Date.now = oldNow; }
 });

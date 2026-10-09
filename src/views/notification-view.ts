@@ -5,6 +5,7 @@ import * as logger from '../logger';
 import { TPS_EVENTS, TPS_LEGACY_EVENTS } from '../tps-contracts';
 import { emitFilesUpdated } from '../tps-gcm-api';
 import { buildNotificationItemsSignature } from './notification-view-signature';
+import { getReminderMatchingPolicy } from '../services/reminder-base-view-service';
 
 export const NOTIFICATION_VIEW_TYPE = 'tps-notification-view';
 
@@ -30,6 +31,7 @@ export class NotificationView extends ItemView {
     private refreshDebounced: () => void;
     private isRefreshing = false;
     private refreshPending = false;
+    private viewClosed = false;
     private lastRenderedSignature = '\u0000';
 
     constructor(leaf: WorkspaceLeaf, plugin: TPSControllerRemindersAPI) {
@@ -102,7 +104,7 @@ export class NotificationView extends ItemView {
         const normalized = String(status || '').trim().toLowerCase();
         if (!normalized) return false;
         if (doneStatuses.has(normalized)) return true;
-        const ignored = (item.reminder.ignoreStatuses || []).map((s) => String(s || '').trim().toLowerCase());
+        const ignored = (getReminderMatchingPolicy(item.reminder).ignoreStatuses || []).map((s) => String(s || '').trim().toLowerCase());
         if (ignored.includes(normalized)) return true;
         return (item.reminder.stopConditions || []).some((condition) => {
             const parts = String(condition || '').split(':');
@@ -113,6 +115,7 @@ export class NotificationView extends ItemView {
     }
 
     async onOpen() {
+        this.viewClosed = false;
         this.addAction('refresh-cw', 'Refresh Notifications', async () => {
             await this.refresh();
         });
@@ -163,10 +166,16 @@ export class NotificationView extends ItemView {
         );
 
         await this.refresh();
-        this.registerInterval(window.setInterval(() => this.refreshDebounced(), 30000));
+        if (!this.viewClosed) this.registerInterval(window.setInterval(() => this.refreshDebounced(), 30000));
+    }
+
+    async onClose(): Promise<void> {
+        this.viewClosed = true;
+        this.refreshPending = false;
     }
 
     async refresh() {
+        if (this.viewClosed) return;
         if (this.isRefreshing) {
             this.refreshPending = true;
             return;
@@ -176,6 +185,10 @@ export class NotificationView extends ItemView {
         const started = performance.now();
         try {
             const nextItems = await this.plugin.getOverdueItems();
+            // A newer request must decide which results or error are shown.
+            // Reuse the existing serial refresh drain rather than racing it.
+            if (this.viewClosed || this.refreshPending) return;
+            this.contentEl.querySelector('.tps-notification-error')?.remove();
             const nextSignature = buildNotificationItemsSignature(nextItems);
             if (nextSignature !== this.lastRenderedSignature) {
                 this.items = nextItems;
@@ -191,9 +204,27 @@ export class NotificationView extends ItemView {
                     itemCount: nextItems.length,
                 });
             }
+        } catch (error) {
+            if (this.viewClosed || this.refreshPending) return;
+            const message = error instanceof Error && error.message
+                ? error.message
+                : 'Check your reminder configuration and refresh again.';
+            const text = `Notifications could not refresh. ${message}`;
+            let errorEl = this.contentEl.querySelector<HTMLElement>('.tps-notification-error');
+            if (!errorEl) {
+                errorEl = this.contentEl.createDiv({ cls: 'tps-notification-error' });
+                errorEl.setAttr('role', 'alert');
+                errorEl.style.padding = '12px';
+                errorEl.style.color = 'var(--text-error)';
+                this.contentEl.prepend(errorEl);
+            }
+            if (errorEl.textContent !== text) {
+                errorEl.setText(text);
+                logger.flowError('NotificationView', 'refresh:failed', error, { retainedItems: this.items.length });
+            }
         } finally {
             this.isRefreshing = false;
-            if (this.refreshPending) {
+            if (this.refreshPending && !this.viewClosed) {
                 this.refreshPending = false;
                 this.refreshDebounced();
             }

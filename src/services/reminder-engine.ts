@@ -30,6 +30,9 @@ import {
     deriveCalendarRecordId,
 } from "./calendar-record-identity";
 import { getGcmApi, type GcmNativeRecordsApi } from "../tps-gcm-api";
+import { isBaseViewReminder, resolveReminderBaseViews, reminderMatchesBaseView, getReminderMatchingPolicy, getReminderBaseCandidateFiles } from "./reminder-base-view-service";
+
+type ReminderBaseViews = ReadonlyMap<string, ReadonlySet<string>>;
 
 type IndexedReminderSnapshot = ReturnType<NonNullable<GcmNativeRecordsApi["indexedSnapshot"]>>;
 
@@ -109,7 +112,8 @@ export class ReminderEngine {
         let stateChanged = false;
         const pendingNotifications: PendingNotification[] = [];
 
-        const files = await this.getReminderCandidateFiles(settings);
+        const baseViews = await resolveReminderBaseViews(this.app, settings.reminders);
+        const files = await this.getReminderCandidateFiles(settings, false, baseViews);
         const activeFiles = files.filter((file) => !this.isArchivedFile(file, settings.archiveFolder));
         const activeRules = settings.reminders.filter((r) => r.enabled).length;
         const needsExternalEvents = settings.reminders.some(
@@ -147,6 +151,8 @@ export class ReminderEngine {
         }
 
         for (const file of activeFiles) {
+            if (!settings.reminders.some(reminder => reminder.enabled && this.reminderIncludesSource(reminder, "file")
+                && reminderMatchesBaseView(reminder, "file", file.path, baseViews))) continue;
             try {
                 stats.filesProcessed++;
                 const cache = this.app.metadataCache.getFileCache(file);
@@ -165,6 +171,7 @@ export class ReminderEngine {
                         now,
                         alertState,
                         stats,
+                        baseViews,
                     });
                     fileNotifications.push(...result.notifications);
                     stateChanged = stateChanged || result.stateChanged;
@@ -196,6 +203,7 @@ export class ReminderEngine {
                     alertState,
                     reminderFilter: (reminder) => this.reminderIncludesSource(reminder, "external-event"),
                     stats,
+                    baseViews,
                 });
                 pendingNotifications.push(...result.notifications);
                 stateChanged = stateChanged || result.stateChanged;
@@ -216,8 +224,9 @@ export class ReminderEngine {
 
     /**
      * Builds a read-only future schedule from the same Controller reminder
-     * rules used by evaluateReminders(). It never mutates alert state and does
-     * not depend on a Base view. The signed TishOS publisher applies the final
+     * rules used by evaluateReminders(). It never mutates alert state and uses
+     * saved Base membership only for reminders configured for it. The signed
+     * TishOS publisher applies the final
      * wire bounds and stable identifiers.
      */
     async projectScheduledNotifications(
@@ -234,18 +243,21 @@ export class ReminderEngine {
             ? nativeRecords.indexedSnapshot(undefined, { includeConflicts: true })
             : undefined;
         if (indexed && !indexed.ready) throw new Error("Reminder metadata index is not ready.");
+        const baseViews = await resolveReminderBaseViews(this.app, settings.reminders);
         const horizonEnd = now + horizonMs;
         const projected: ScheduledNativeNotification[] = [];
         let metadataSkipped = 0;
         let sourceReads = 0;
-        const files = await this.getReminderCandidateFiles(settings, indexed !== undefined);
+        const files = await this.getReminderCandidateFiles(settings, indexed !== undefined, baseViews);
         const activeFiles = files.filter((file) => !this.isArchivedFile(file, settings.archiveFolder));
 
         for (const file of activeFiles) {
+            if (!settings.reminders.some(reminder => reminder.enabled && this.reminderIncludesSource(reminder, "file")
+                && reminderMatchesBaseView(reminder, "file", file.path, baseViews))) continue;
             try {
                 const cache = this.app.metadataCache.getFileCache(file);
                 const frontmatter = (cache?.frontmatter || {}) as Record<string, unknown>;
-                if (indexed && !this.metadataMayProjectReminder(file, cache, frontmatter, settings, now, horizonEnd)) {
+                if (indexed && !this.metadataMayProjectReminder(file, cache, frontmatter, settings, now, horizonEnd, baseViews)) {
                     metadataSkipped += 1;
                     continue;
                 }
@@ -260,6 +272,7 @@ export class ReminderEngine {
                         settings,
                         now,
                         horizonEnd,
+                        baseViews,
                     }));
                 }
             } catch (error) {
@@ -288,6 +301,7 @@ export class ReminderEngine {
                         now,
                         horizonEnd,
                         reminderFilter: (reminder) => this.reminderIncludesSource(reminder, "external-event"),
+                        baseViews,
                     }));
                 }
             } catch (error) {
@@ -328,7 +342,7 @@ export class ReminderEngine {
 
     private metadataMayProjectReminder(
         file: TFile, cache: unknown, frontmatter: Record<string, unknown>,
-        settings: TPSControllerSettings, now: number, horizonEnd: number,
+        settings: TPSControllerSettings, now: number, horizonEnd: number, baseViews?: ReminderBaseViews,
     ): boolean {
         const rules = settings.reminders.filter(reminder => reminder.enabled && this.reminderIncludesSource(reminder, "file"));
         if (!rules.length) return false;
@@ -340,7 +354,7 @@ export class ReminderEngine {
         let unknownProperty = false;
         const eligible = this.projectTarget({
             target: { sourceKey: file.path, sourceType: "file", targetKind: "note" },
-            fileRef: file, cache, baseFrontmatter: frontmatter, settings, now, horizonEnd, firstOnly: true,
+            fileRef: file, cache, baseFrontmatter: frontmatter, settings, now, horizonEnd, baseViews, firstOnly: true,
             onUnknownProperty: () => { unknownProperty = true; },
         }).length > 0;
         return eligible || unknownProperty;
@@ -354,6 +368,7 @@ export class ReminderEngine {
         settings: TPSControllerSettings;
         now: number;
         horizonEnd: number;
+        baseViews?: ReminderBaseViews;
         reminderFilter?: (reminder: PropertyReminder) => boolean;
         firstOnly?: boolean;
         onUnknownProperty?: () => void;
@@ -366,6 +381,8 @@ export class ReminderEngine {
             if (!reminder.enabled) continue;
             if (reminderFilter && !reminderFilter(reminder)) continue;
             if (!this.reminderIncludesSource(reminder, target.sourceType)) continue;
+            if (!reminderMatchesBaseView(reminder, target.sourceType, fileRef.path, params.baseViews)) continue;
+            const matchingReminder = getReminderMatchingPolicy(reminder);
             const ctx = buildEffectiveReminderContextForTarget(target, baseFrontmatter, reminder.property, settings);
             if (!ctx) continue;
             const effectiveFm = ctx.frontmatter;
@@ -374,7 +391,7 @@ export class ReminderEngine {
                 fileRef,
                 cache,
                 effectiveFm,
-                reminder,
+                matchingReminder,
                 settings.globalIgnorePaths,
                 settings.globalIgnoreTags,
                 settings.globalIgnoreStatuses,
@@ -386,7 +403,7 @@ export class ReminderEngine {
                     settings.nativeCalendarCancellationState,
                 ),
             )) continue;
-            if (!hasRequiredStatus(effectiveFm, reminder) || !hasRequiredCheckboxState(effectiveFm, reminder)) continue;
+            if (!hasRequiredStatus(effectiveFm, matchingReminder) || !hasRequiredCheckboxState(effectiveFm, reminder)) continue;
             if (reminder.stopConditions.some((condition) => checkStopCondition(effectiveFm, condition))) continue;
             const { start: propTime, end: rangeEndTime } = parseTimeRange(propValue);
             if (!propTime) {
@@ -432,7 +449,7 @@ export class ReminderEngine {
             if (reminder.allDayFilter === "false" && isAllDaySafe) continue;
             if (effectiveEndTime) {
                 const isWorking = getStatuses(effectiveFm).includes("working");
-                const requiresWorking = reminder.requiredStatuses?.some((status) => normalizeStatus(status) === "working");
+                const requiresWorking = isBaseViewReminder(reminder) || matchingReminder.requiredStatuses?.some((status) => normalizeStatus(status) === "working");
                 if (isWorking && now < effectiveEndTime && !requiresWorking) continue;
             }
             let fireAt = triggerTime;
@@ -578,11 +595,12 @@ export class ReminderEngine {
         return { notifications: visibleNotifications, stateChanged };
     }
 
-    private async getReminderCandidateFiles(settings: TPSControllerSettings, includeUnknownMetadata = false): Promise<TFile[]> {
+    private async getReminderCandidateFiles(settings: TPSControllerSettings, includeUnknownMetadata = false, baseViews?: ReminderBaseViews): Promise<TFile[]> {
         const properties = (settings.reminders || [])
             .filter((reminder) => reminder.enabled)
             .map((reminder) => reminder.property);
-        const result = await discoverReminderCandidateFiles(this.app, settings, properties, { includeUnknownMetadata });
+        const files = baseViews ? getReminderBaseCandidateFiles(this.app, settings.reminders, baseViews) : undefined;
+        const result = await discoverReminderCandidateFiles(this.app, settings, properties, { includeUnknownMetadata, files });
         return result.files;
     }
 
@@ -594,6 +612,7 @@ export class ReminderEngine {
         settings: TPSControllerSettings;
         now: number;
         alertState: TPSControllerSettings["alertState"];
+        baseViews?: ReminderBaseViews;
         reminderFilter?: (reminder: PropertyReminder) => boolean;
         stats?: ReminderEvaluationStats;
     }): ReminderRunResult {
@@ -616,6 +635,8 @@ export class ReminderEngine {
             if (!reminder.enabled) continue;
             if (reminderFilter && !reminderFilter(reminder)) continue;
             if (!this.reminderIncludesSource(reminder, target.sourceType)) continue;
+            if (!reminderMatchesBaseView(reminder, target.sourceType, fileRef.path, params.baseViews)) continue;
+            const matchingReminder = getReminderMatchingPolicy(reminder);
 
             if (params.stats) params.stats.targetsEvaluated++;
             const ctx = buildEffectiveReminderContextForTarget(target, baseFrontmatter, reminder.property, settings);
@@ -630,7 +651,7 @@ export class ReminderEngine {
                 fileRef,
                 cache,
                 effectiveFm,
-                reminder,
+                matchingReminder,
                 settings.globalIgnorePaths,
                 settings.globalIgnoreTags,
                 settings.globalIgnoreStatuses,
@@ -651,7 +672,7 @@ export class ReminderEngine {
                 this.countSkip(params.stats, "invalid-time");
                 continue;
             }
-            if (!hasRequiredStatus(effectiveFm, reminder)) {
+            if (!hasRequiredStatus(effectiveFm, matchingReminder)) {
                 this.countSkip(params.stats, "status-filter");
                 continue;
             }
@@ -745,7 +766,7 @@ export class ReminderEngine {
             if (effectiveEndTime) {
                 const isWorking = getStatuses(effectiveFm).includes("working");
                 if (isWorking && now < effectiveEndTime) {
-                    const requiresWorking = reminder.requiredStatuses?.some((s) => normalizeStatus(s) === "working");
+                    const requiresWorking = isBaseViewReminder(reminder) || matchingReminder.requiredStatuses?.some((s) => normalizeStatus(s) === "working");
                     if (!requiresWorking) {
                         this.countSkip(params.stats, "working-until-end");
                         continue;
@@ -848,7 +869,7 @@ export class ReminderEngine {
                     this.countSkip(params.stats, "repeat-ended-at-base");
                     continue;
                 }
-                if (!hasRequiredStatus(effectiveFm, reminder)) {
+                if (!hasRequiredStatus(effectiveFm, matchingReminder)) {
                     this.countSkip(params.stats, "status-filter");
                     continue;
                 }
@@ -914,6 +935,7 @@ export class ReminderEngine {
     }
 
     private reminderIncludesSource(reminder: PropertyReminder, sourceType: ReminderEvaluationTarget["sourceType"]): boolean {
+        if (isBaseViewReminder(reminder)) return sourceType === "file";
         const configured = Array.isArray(reminder.sourceTypes) ? reminder.sourceTypes.filter(Boolean) : [];
         if (configured.length > 0) return configured.includes(sourceType);
         if (sourceType === "external-event") return !!reminder.includeUnmatchedExternalEvents;

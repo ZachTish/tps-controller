@@ -782,3 +782,13 @@ body.tps-controller-mode {
   .tps-controller-connections-content input { max-width: 100%; }
   .tps-controller-connections-content button { height: auto; min-height: 36px; white-space: normal; }
 }
+
+/* Saved Base reminder selection: keep long vault paths usable on phones. */
+.tps-controller-reminder-base-selection .setting-item-control { min-width: 0; }
+.tps-controller-reminder-base-selection select { max-width: 100%; min-width: 0; }
+@media (max-width: 600px) {
+  .tps-controller-reminder-base-selection .setting-item { flex-direction: column; align-items: stretch; }
+  .tps-controller-reminder-base-selection .setting-item-control { width: 100%; justify-content: flex-start; }
+  .tps-controller-reminder-base-selection select { width: 100%; height: auto; min-height: 36px; }
+  .tps-controller-reminder-base-selection button { height: auto; min-height: 36px; }
+}

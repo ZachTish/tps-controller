@@ -1,5 +1,82 @@
 # TPS Controller
 
+## 3.3.0 — Choose reminder notes with a saved Base view
+
+**Reminder rules → choose a reminder → Choose notes → Choose notes using** now
+offers **Reminder filters** (the unchanged default) or **Base view**. Choose an
+existing `.base` file and an exact saved view name, then use **Check view** to
+inspect the matching-note count without sending notifications. The Base replaces
+that reminder's required statuses/folders and ignored paths/tags/statuses. Those
+manual settings remain saved when switching back. Global exclusions, archive and
+calendar cancellation protections, date type, stop conditions, snooze and delivery
+ownership still apply. Base reminders always target whole notes; unmatched
+external events require an ordinary reminder.
+
+Membership selects eligible notes; it does not notify merely because a note
+enters the view. **When & How → Property** chooses the date/time field, with the
+existing offsets, end-time, repeat and all-day settings. A missing/unparseable date
+does not create an alert. Notes leaving the selected view stop participating on
+the next existing evaluation/refresh. No note properties are written by matching.
+The implicit legacy working-status selection exception does not override a Base
+that selects working notes; explicit timing and stop settings still apply.
+
+The existing Obsidian native `base:query` handler evaluates saved global/view
+filters and formulas, saved limit and group visibility. Temporary search text is
+not part of the selection. No Base is mounted. Each reminder pass validates each
+Base once and runs one query per distinct Base/view, sharing duplicate selections.
+When every enabled reminder uses a Base, Controller reuses those query results
+rather than making an additional full-vault candidate inventory. Mixed rules
+retain the ordinary metadata inventory. Membership discovery reads Base files,
+not note bodies; current-source publication reads only eligible/uncertain notes
+under the existing readiness and mutation guards. Core queries still enumerate
+vault metadata and evaluate displayed columns, so costly Base formulas can cost
+CPU. No persistent membership cache, watcher, poller, repair or delivery route is
+added. Existing configured-Base file changes reuse the reminder debounce and
+refresh mounted lists without rebuilding commands or delaying calendar sync.
+
+Compatibility: minimum Obsidian remains 1.12.3 for existing reminders. Base
+selection requires the Bases core plugin and its native query capability,
+feature-detected through an internal interface and verified on Obsidian 1.14.4.
+An unavailable capability, missing Base/view, invalid YAML/filter structure or
+context-dependent `this` yields a configuration error; it never falls back to all
+notes. Native schedule publication keeps its existing last-valid-schedule policy.
+The notification list retains prior items and displays an inline error until a
+successful refresh. Native Base expression/formula errors can silently omit rows;
+**Check view** is a membership count, not an expression validator. Check the Base
+itself if results are unexpected. `this` in any formula is conservatively rejected,
+including unused formulas, because background evaluation has no display context.
+
+The settings destination map and default Overview route are unchanged. Only the
+selected matching mode's controls are shown, with no nested disclosure. Base/view
+pickers have accessible labels; Check view reports through a status region.
+Controls stack and fit narrow screens. Only the additive per-reminder
+`selectionMode`, `basePath` and `baseView` fields are persisted; absent mode keeps
+existing behavior. A minor version reflects this backward-compatible option.
+
+Validation on 2026-10-09 uses the installed 3.3.0 Controller, the actual Obsidian
+1.14.4 native Base query and all eight active TPS consumers in the test vault.
+Two Base reminders share one query and its one core metadata inventory, with one
+eligible note source read and no projection writes. Five passes take 79.7–84.4 ms;
+these are desktop computation samples, not startup/navigation or mobile timings.
+After a synthetic note leaves the view, both the schedule and notification list
+are empty and projection performs zero note reads. Missing views reject the
+projection. Note bodies and real Controller settings remain unchanged.
+
+Native settings QA checks mode/file/view selection, a three-note Check view
+result, and preserved manual filters when switching back. A 390px isolated layout
+check reuses the installed styles and control markup: visible controls fit, labels
+wrap and targets are at least 36px high. This is desktop layout emulation, not
+physical iPhone notification delivery or a mobile native-query acceptance test.
+The disabled draft saves only in memory; synthetic fixtures are archived directly
+from Inbox. No outbound provider or pairing is enabled. Focused regressions cover
+query sharing, a 4,049-note candidate fixture, manual-mode compatibility,
+metadata/rename/delete bursts, Overdue consistency, collapsed-rule read counts,
+errors, stale refreshes and closed views. Final validation requires the full
+declared suite, TypeScript and a separate production build reporting `target=test`,
+followed by a targeted manifest-ID reload. Exact test totals and final artifact
+hashes are recorded in the public release notes. Production installation is a
+BRAT pull and remains separate from test-vault deployment.
+
 ## 3.2.0 — Create the current and next recurring occurrence
 
 Calendar rules → configure a feed → **Recurring event notes** can now select

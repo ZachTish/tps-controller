@@ -46,7 +46,7 @@ export async function getReminderCandidateFiles(
     app: App,
     settings: TPSControllerSettings,
     reminderProperties: string[],
-    options: { includeUnknownMetadata?: boolean } = {},
+    options: { includeUnknownMetadata?: boolean; files?: readonly TFile[] } = {},
 ): Promise<{ files: TFile[] }> {
     const properties = reminderProperties.map((property) => String(property || "").trim()).filter(Boolean);
     if (!properties.length) return { files: [] };
@@ -54,8 +54,7 @@ export async function getReminderCandidateFiles(
     const propertySet = new Set(properties.map((property) => property.toLowerCase()));
     const includeInlineTasks = resolveInlineTaskReminderMode(app, settings) !== "none";
     const files: TFile[] = [];
-    const markdownFiles = app.vault
-        .getMarkdownFiles()
+    const markdownFiles = [...(options.files ?? app.vault.getMarkdownFiles())]
         .sort((a, b) => a.path.localeCompare(b.path));
 
     for (const file of markdownFiles) {

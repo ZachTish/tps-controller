@@ -27,6 +27,7 @@ import { TwoStageArchiveService } from "./services/two-stage-archive-service";
 import { TPS_EVENTS } from "./tps-events";
 import { shouldDeferCalendarSyncSettlementForPath } from "./services/calendar-sync-settlement-filter";
 import { normalizeReminderSettingsInPlace } from "./services/reminder-settings-service";
+import { isBaseViewReminder } from "./services/reminder-base-view-service";
 import {
     migrateLegacyS3Credentials,
     takeRetainedLegacyS3Credentials,
@@ -162,6 +163,7 @@ export default class TPSControllerPlugin extends Plugin {
     private automationGeneration = 0;
     private twoStageArchiveIntervalId: number | null = null;
     private tishOSNotificationRefreshTimeoutId: number | null = null;
+    private pendingReminderViewRefresh = false;
     private metadataIndexResolved = false;
     private pendingNoteMetadataResolution = true;
     private calendarSyncSettledAt = Date.now() + 20_000;
@@ -463,21 +465,25 @@ export default class TPSControllerPlugin extends Plugin {
         }
 
         this.registerEvent(this.app.vault.on("create", (file) => {
+            if (this.handleReminderBaseChange(file, "base-create")) return;
             if (!this.isNoteSourceFile(file)) return;
             this.deferCalendarSyncSettlementForFile(file, "file create");
             this.scheduleTishOSNativeNotificationRefresh("file-create");
         }));
         this.registerEvent(this.app.vault.on("modify", (file) => {
+            if (this.handleReminderBaseChange(file, "base-modify")) return;
             if (!this.isNoteSourceFile(file)) return;
             this.deferCalendarSyncSettlementForFile(file, "file modify");
             this.scheduleTishOSNativeNotificationRefresh("file-modify");
         }));
         this.registerEvent(this.app.vault.on("delete", (file) => {
+            if (this.handleReminderBaseChange(file, "base-delete")) return;
             if (!this.isNoteSourceFile(file)) return;
             this.deferCalendarSyncSettlementForFile(file, "file delete");
             this.scheduleTishOSNativeNotificationRefresh("file-delete");
         }));
-        this.registerEvent(this.app.vault.on("rename", (file) => {
+        this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
+            if (this.handleReminderBaseChange(file, "base-rename", oldPath)) return;
             if (!this.isNoteSourceFile(file)) return;
             this.deferCalendarSyncSettlementForFile(file, "file rename");
             this.scheduleTishOSNativeNotificationRefresh("file-rename");
@@ -580,6 +586,7 @@ export default class TPSControllerPlugin extends Plugin {
             window.clearTimeout(this.tishOSNotificationRefreshTimeoutId);
             this.tishOSNotificationRefreshTimeoutId = null;
         }
+        this.pendingReminderViewRefresh = false;
         const commandBridgeStop = this.tishOSCommandBridgeService?.stop();
         this.stopS3agleAttachmentAutomation();
         this.stopAllAutomation();
@@ -767,21 +774,43 @@ export default class TPSControllerPlugin extends Plugin {
         await this.settingsSaveQueue.requestSave();
     }
 
-    private scheduleTishOSNativeNotificationRefresh(reason: string): void {
+    private scheduleTishOSNativeNotificationRefresh(reason: string, refreshViews = false): void {
         if (this.unloading) return;
         // Layout publication covers the initial file burst. Disabled/unused
         // reminder routes have no note-driven schedule work, while a real
         // settings change must still clear a previously published schedule.
-        if (reason !== "settings-save" && (this.settings.notificationDeliveryProvider !== "tishos"
-            || !this.settings.enableReminders || !this.settings.reminders.some(reminder => reminder.enabled))) return;
-        if (!this.tishOSCommandBridgeService?.canRefreshNativeNotifications()) return;
+        const refreshNative = (reason === "settings-save" || (this.settings.notificationDeliveryProvider === "tishos"
+            && this.settings.enableReminders && this.settings.reminders.some(reminder => reminder.enabled)))
+            && this.tishOSCommandBridgeService?.canRefreshNativeNotifications() === true;
+        if (refreshViews && this.app.workspace.getLeavesOfType(NOTIFICATION_VIEW_TYPE).length > 0) {
+            this.pendingReminderViewRefresh = true;
+        }
+        if (!refreshNative && !this.pendingReminderViewRefresh) return;
         if (this.tishOSNotificationRefreshTimeoutId !== null) {
             window.clearTimeout(this.tishOSNotificationRefreshTimeoutId);
         }
         this.tishOSNotificationRefreshTimeoutId = window.setTimeout(() => {
             this.tishOSNotificationRefreshTimeoutId = null;
-            void this.tishOSCommandBridgeService.refreshNativeNotifications(`native-notifications:${reason}`);
+            if (this.pendingReminderViewRefresh) {
+                this.pendingReminderViewRefresh = false;
+                this.refreshNotificationViews();
+            }
+            if (refreshNative) void this.tishOSCommandBridgeService.refreshNativeNotifications(`native-notifications:${reason}`);
         }, 1_000);
+    }
+
+    private handleReminderBaseChange(file: unknown, reason: string, oldPath?: string): boolean {
+        if (this.unloading || this.settings.enableReminders === false || !(file instanceof TFile)) return false;
+        const paths = [file.path, oldPath]
+            .filter((path): path is string => typeof path === "string" && path.toLowerCase().endsWith(".base"))
+            .map((path) => normalizePath(path));
+        if (!paths.length || !this.settings.reminders.some((reminder) => reminder.enabled
+            && isBaseViewReminder(reminder)
+            && paths.includes(normalizePath(String(reminder.basePath || "").trim())))) return false;
+        // Reuse the reminder publication debounce for mounted lists too. Base
+        // filters do not represent note writes or calendar settlement work.
+        this.scheduleTishOSNativeNotificationRefresh(reason, true);
+        return true;
     }
 
     private handleMetadataIndexResolved(): void {

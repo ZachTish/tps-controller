@@ -130,3 +130,72 @@ test('4049 startup note invalidations make zero timers; disabled and unpaired ro
     h.settings.reminders=[];h.scheduleTishOSNativeNotificationRefresh('settings-save');assert.equal(starts,2,'disabling rules can publish an empty replacement');
   }finally{globalThis.window=oldWindow;}
 });
+
+function actualVaultListeners() {
+  const ast=ts.createSourceFile('main.ts',main,ts.ScriptTarget.Latest,true);
+  const listeners=new Map();
+  function visit(node) {
+    if(ts.isCallExpression(node)&&node.expression.getText(ast)==='this.app.vault.on'
+      &&ts.isStringLiteral(node.arguments[0])&&['create','modify','delete','rename'].includes(node.arguments[0].text)) {
+      const code=`function listenerOwner(file: unknown, oldPath?: string) { const listener = ${node.arguments[1].getText(ast)}; return listener(file, oldPath); }`;
+      const compiled=ts.transpileModule(code,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;
+      listeners.set(node.arguments[0].text,new Function(`${compiled}; return listenerOwner;`)());
+    }
+    ts.forEachChild(node,visit);
+  }
+  visit(ast);
+  assert.deepEqual([...listeners.keys()].sort(),['create','delete','modify','rename']);
+  return listeners;
+}
+
+test('configured Base lifecycle bursts refresh reminders once without catalog or calendar work',()=>{
+  const Owner=owner(['handleReminderBaseChange','scheduleTishOSNativeNotificationRefresh','isNoteSourceFile'],{
+    normalizePath:path=>path.replace(/\\/g,'/'),isBaseViewReminder:reminder=>reminder.selectionMode==='base-view',NOTIFICATION_VIEW_TYPE:'notifications',
+  });
+  const counts={native:0,catalog:0,views:0,calendar:0,timers:0};
+  const timers=new Map();const oldWindow=globalThis.window;
+  globalThis.window={setTimeout(callback){const id=++counts.timers;timers.set(id,callback);return id;},clearTimeout:id=>timers.delete(id)};
+  const h=Object.assign(new Owner(),{unloading:false,tishOSNotificationRefreshTimeoutId:null,pendingReminderViewRefresh:false,
+    settings:{enableReminders:true,notificationDeliveryProvider:'tishos',reminders:[
+      {enabled:true,selectionMode:'base-view',basePath:'Inbox/Reminder.base'},
+      {enabled:false,selectionMode:'base-view',basePath:'Disabled.base'},
+      {enabled:true,selectionMode:'rules',basePath:'Legacy.base'},
+    ]},app:{workspace:{getLeavesOfType:()=>[{}]}},
+    tishOSCommandBridgeService:{canRefreshNativeNotifications:()=>true,refreshNativeNotifications(){counts.native++;return Promise.resolve();},refreshCatalogs(){counts.catalog++;}},
+    refreshNotificationViews(){counts.views++;},deferCalendarSyncSettlementForFile(){counts.calendar++;},
+  });
+  const listeners=actualVaultListeners();
+  try {
+    for(const event of ['create','modify','delete'])for(let n=0;n<25;n++)listeners.get(event).call(h,new TFile('Inbox/Reminder.base'));
+    listeners.get('rename').call(h,new TFile('Inbox/Renamed.base'),'Inbox/Reminder.base');
+    listeners.get('rename').call(h,new TFile('Inbox/Reminder.base'),'Inbox/Unrelated.base');
+    assert.equal(timers.size,1,'all event routes share the existing debounce');
+    assert.equal(counts.calendar,0);assert.equal(counts.catalog,0);assert.equal(counts.native,0);assert.equal(counts.views,0);
+    const callback=[...timers.values()][0];timers.clear();callback();
+    assert.deepEqual({native:counts.native,catalog:counts.catalog,views:counts.views,calendar:counts.calendar},{native:1,catalog:0,views:1,calendar:0});
+    const timersBefore=counts.timers;
+    for(const path of ['Unrelated.base','Disabled.base','Legacy.base','.tishos/service.json'])for(const listener of listeners.values())listener.call(h,new TFile(path),'Another.base');
+    assert.equal(counts.timers,timersBefore,'unrelated and disabled Bases do no work');
+    h.unloading=true;listeners.get('modify').call(h,new TFile('Inbox/Reminder.base'));assert.equal(counts.timers,timersBefore);
+  }finally{globalThis.window=oldWindow;}
+});
+
+test('Base reminders refresh mounted lists for local delivery without native pairing or a second timer',()=>{
+  const Owner=owner(['handleReminderBaseChange','scheduleTishOSNativeNotificationRefresh'],{
+    normalizePath:path=>path,isBaseViewReminder:reminder=>reminder.selectionMode==='base-view',NOTIFICATION_VIEW_TYPE:'notifications',
+  });
+  const counts={native:0,views:0,timers:0};const timers=new Map();let mounted=true;
+  const oldWindow=globalThis.window;globalThis.window={setTimeout(callback){const id=++counts.timers;timers.set(id,callback);return id;},clearTimeout:id=>timers.delete(id)};
+  const h=Object.assign(new Owner(),{unloading:false,tishOSNotificationRefreshTimeoutId:null,pendingReminderViewRefresh:false,
+    settings:{enableReminders:true,notificationDeliveryProvider:'local',reminders:[{enabled:true,selectionMode:'base-view',basePath:'Reminder.base'}]},
+    app:{workspace:{getLeavesOfType:()=>mounted?[{}]:[]}},
+    tishOSCommandBridgeService:{canRefreshNativeNotifications:()=>false,refreshNativeNotifications(){counts.native++;}},refreshNotificationViews(){counts.views++;},
+  });
+  try {
+    for(let n=0;n<100;n++)assert.equal(h.handleReminderBaseChange(new TFile('Reminder.base'),'base-modify'),true);
+    assert.equal(timers.size,1);const callback=[...timers.values()][0];timers.clear();callback();
+    assert.deepEqual({native:counts.native,views:counts.views},{native:0,views:1});
+    const before=counts.timers;mounted=false;h.handleReminderBaseChange(new TFile('Reminder.base'),'base-modify');assert.equal(counts.timers,before,'no mounted consumer means no timer');
+    mounted=true;h.settings.enableReminders=false;h.handleReminderBaseChange(new TFile('Reminder.base'),'base-modify');assert.equal(counts.timers,before,'disabled reminders stay idle');
+  }finally{globalThis.window=oldWindow;}
+});

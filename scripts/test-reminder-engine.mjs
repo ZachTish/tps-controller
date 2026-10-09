@@ -83,6 +83,19 @@ function loadReminderSettingsModule() {
   return module.exports;
 }
 
+function loadReminderBaseViewModule(TFile) {
+  const source = readFileSync(new URL('../src/services/reminder-base-view-service.ts', import.meta.url), 'utf8');
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2018 },
+  });
+  const module = { exports: {} };
+  new Function('module', 'exports', 'require', compiled.outputText)(module, module.exports, id => {
+    if (id === 'obsidian') return { TFile, parseYaml, normalizePath: value => String(value || '').replace(/^\/+|\/+$/gu, '') };
+    throw new Error(`Unexpected Base selector require: ${id}`);
+  });
+  return module.exports;
+}
+
 function loadReminderDeliveryWindowModule() {
   const compiled = ts.transpileModule(reminderDeliveryWindowSource, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2018 },
@@ -256,6 +269,7 @@ function loadCompiledOverdueServiceHarness(options = {}) {
         getReminderTagsForTarget: (target) => target?.reminderTags,
       };
     }
+    if (id === './reminder-base-view-service') return loadReminderBaseViewModule(TestTFile);
     if (id === './reminder-candidate-service') {
       return { getReminderCandidateFiles: async () => ({ files: options.candidateFiles || [], stats: {} }) };
     }
@@ -370,6 +384,7 @@ function loadCompiledReminderEngineHarness(options = {}) {
       };
     }
     if (id === './external-calendar-service') return { ExternalCalendarService: class {} };
+    if (id === './reminder-base-view-service') return loadReminderBaseViewModule(TestTFile);
     if (id === './reminder-candidate-service') {
       return { getReminderCandidateFiles: options.getReminderCandidateFiles || (async () => ({ files: options.candidateFiles || [] })) };
     }
@@ -1909,7 +1924,7 @@ test('ignore-path edits invalidate every reminder run and refresh open notificat
   assert.match(mainSource, /runGeneration: number = this\.reminderRunGeneration/);
   assert.match(mainSource, /if \(runGeneration !== this\.reminderRunGeneration\) \{/);
   assert.doesNotMatch(mainSource, /runGeneration !== undefined && runGeneration !== this\.reminderRunGeneration/);
-  assert.equal((settingsTabSource.match(/this\.plugin\.refreshReminderPolicy\(\);/g) || []).length, 6);
+  assert.equal((settingsTabSource.match(/this\.plugin\.refreshReminderPolicy\(\);/g) || []).length, 7);
 });
 
 test('direct reminder delivery preserves ntfy ownership and adds role-agnostic local fallback', () => {
@@ -2118,7 +2133,7 @@ test('reminder candidate discovery includes task-line reminder entities without 
   assert.match(reminderCandidateSource, /await app\.vault\.cachedRead\(file\)/);
   assert.match(reminderCandidateSource, /if \(!TASK_LINE_PATTERN\.test\(line\)\) continue;/);
   assert.match(reminderCandidateSource, /if \(key && reminderProperties\.has\(key\)\) return true;/);
-  assert.match(source, /discoverReminderCandidateFiles\(this\.app, settings, properties, \{ includeUnknownMetadata \}\)/);
+  assert.match(source, /discoverReminderCandidateFiles\(this\.app, settings, properties, \{ includeUnknownMetadata, files \}\)/);
   assert.match(overdueSource, /getReminderCandidateFiles\(\s*this\.app,/);
 });
 
@@ -2710,4 +2725,86 @@ test('truthy caches with absent or malformed property maps remain conservative r
   const app={vault:{getMarkdownFiles:()=>files},metadataCache:{getFileCache:file=>cases[files.indexOf(file)]}};
   const result=await getReminderCandidateFiles(app,{},['scheduled'],{includeUnknownMetadata:true});
   assert.deepEqual(result.files,files);
+});
+
+function baseReminderFixture({ working = false } = {}) {
+  const policy = loadTimeCalculationModule();
+  const targets = loadReminderTargetModule();
+  const candidates = loadReminderCandidateModule();
+  const nativeRecords = { capabilities: { indexedSnapshot: true }, indexedSnapshot: () => ({ ready: true, records: [], conflicts: [] }) };
+  const h = loadCompiledReminderEngineHarness({ gcmApi: { nativeRecords }, timeCalculation: policy,
+    getReminderCandidateFiles: candidates.getReminderCandidateFiles,
+    buildReminderTargetsForFile: targets.buildReminderTargetsForFile,
+    buildEffectiveReminderContextForTarget: targets.buildEffectiveReminderContextForTarget });
+  const now = Date.now();
+  const scheduled = new Date(now - 1_000).toISOString();
+  const files = Array.from({ length: 4_046 }, (_, i) => new h.TFile(`Inbox/Outside ${i}.md`));
+  const selected = new h.TFile('Inbox/Selected.md');
+  const ignored = new h.TFile('Inbox/Globally ignored.md');
+  const canceled = new h.TFile('Inbox/Canceled.md');
+  files.push(selected, ignored, canceled);
+  const base = new h.TFile('Inbox/Reminder candidates.base');
+  let members = [selected, ignored, canceled];
+  const counts = { inventories: 0, queries: 0, baseReads: 0, rawReads: [], cachedReads: [], writes: 0 };
+  const fm = file => ({ scheduled, status: file === ignored ? 'complete' : file === canceled ? 'cancelled' : working ? 'working' : 'open', timeEstimate: 60 });
+  const content = file => `---\nscheduled: ${scheduled}\nstatus: ${fm(file).status}\ntimeEstimate: 60\n---\nAuthored body`;
+  const app = { cli: { handlers: new Map([['base:query', { handler: async request => {
+    counts.queries++; assert.deepEqual(request, { path: base.path, view: 'Notify', format: 'paths' });
+    return members.map(file => file.path).join('\n');
+  } }]]) }, vault: { getMarkdownFiles() { counts.inventories++; return files; },
+    getAbstractFileByPath: path => [base, ...files].find(file => file.path === path),
+    async cachedRead(file) { if (file === base) { counts.baseReads++; return 'views:\n  - type: table\n    name: Notify\n'; }
+      counts.cachedReads.push(file.path); return content(file); },
+    async read(file) { counts.rawReads.push(file.path); return content(file); },
+    async modify() { counts.writes++; } }, metadataCache: { getFileCache: file => ({ frontmatter: fm(file) }) } };
+  const rule = { id: 'view', enabled: true, property: 'scheduled', selectionMode: 'base-view', basePath: base.path, baseView: 'Notify',
+    sourceTypes: ['external-event'], includeUnmatchedExternalEvents: true, offsetMinutes: 0, repeatUntilComplete: false,
+    repeatIntervalMinutes: 5, maxRepeats: -1, stopConditions: [], title: 'Reminder', body: '', allDayFilter: 'false',
+    requiredStatuses: ['other'], requiredPaths: ['Elsewhere'], ignoreStatuses: ['open'], ignorePaths: ['Inbox/'], ignoreTags: ['anything'] };
+  const settings = { enableReminders: true, calendarStorageMode: 'native-records', inlineTaskReminders: 'none', reminders: [rule], alertState: {},
+    globalIgnoreStatuses: ['complete'], globalIgnorePaths: [], globalIgnoreTags: [], globalIgnoreCheckboxStates: [],
+    archiveFolder: '_archive', canceledStatusValue: 'cancelled', externalCalendars: [] };
+  return { h, app, settings, rule, counts, now, selected, base, setMembers(value) { members = value; },
+    engine: new h.ReminderEngine(app, { getEvents() { throw new Error('Base reminders must not fetch external events'); } }) };
+}
+
+test('Base projection queries once and reads only eligible view members in a 4,049-note vault', async t => {
+  const f = baseReminderFixture();
+  f.settings.reminders.push({ ...f.rule, id: 'same-view' });
+  const schedule = await f.engine.projectScheduledNotifications(f.settings, f.now);
+  assert.deepEqual(schedule.map(item => item.sourceKey), [f.selected.path, f.selected.path]);
+  assert.deepEqual(f.counts.rawReads, [f.selected.path]);
+  assert.equal(f.counts.baseReads, 1); assert.equal(f.counts.queries, 1);
+  assert.equal(f.counts.inventories, 0); assert.equal(f.counts.writes, 0);
+  assert.deepEqual(f.rule.requiredStatuses, ['other'], 'Base mode preserves manual settings for switching back');
+  t.diagnostic(JSON.stringify(f.counts));
+});
+
+test('Base evaluation and projection re-query membership each run and do not mutate a note that left the view', async () => {
+  const f = baseReminderFixture();
+  const evaluated = await f.engine.evaluateReminders(f.settings);
+  assert.deepEqual(evaluated.notifications.map(item => item.file.path), [f.selected.path]);
+  f.setMembers([]);
+  assert.deepEqual((await f.engine.evaluateReminders(f.settings)).notifications, []);
+  assert.deepEqual(await f.engine.projectScheduledNotifications(f.settings, f.now), []);
+  assert.equal(f.counts.queries, 3); assert.equal(f.counts.writes, 0);
+});
+
+test('invalid Base configuration fails publication instead of matching every note', async () => {
+  const f = baseReminderFixture(); f.rule.baseView = 'Deleted view';
+  await assert.rejects(f.engine.projectScheduledNotifications(f.settings, f.now), /view/i);
+  assert.deepEqual(f.counts.rawReads, []); assert.equal(f.counts.writes, 0);
+});
+
+test('switching to reminder filters keeps legacy matching and performs no Base query', async () => {
+  const f = baseReminderFixture(); f.rule.selectionMode = 'rules'; f.rule.sourceTypes = ['file'];
+  assert.deepEqual(await f.engine.projectScheduledNotifications(f.settings, f.now), []);
+  assert.equal(f.counts.queries, 0); assert.equal(f.counts.baseReads, 0);
+});
+
+
+test('a Base selecting working notes governs status eligibility before the block ends', async () => {
+  const f = baseReminderFixture({ working: true });
+  assert.deepEqual((await f.engine.evaluateReminders(f.settings)).notifications.map(item => item.file.path), [f.selected.path]);
+  assert.deepEqual((await f.engine.projectScheduledNotifications(f.settings, f.now)).map(item => item.sourcePath), [f.selected.path]);
 });

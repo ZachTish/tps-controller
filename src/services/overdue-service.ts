@@ -16,6 +16,13 @@ import {
 } from "./reminder-target-service";
 import { getReminderCandidateFiles } from "./reminder-candidate-service";
 import {
+    getReminderBaseCandidateFiles,
+    getReminderMatchingPolicy,
+    isBaseViewReminder,
+    reminderMatchesBaseView,
+    resolveReminderBaseViews,
+} from "./reminder-base-view-service";
+import {
     getFileReminderLiveWindowMs,
     shouldSkipStaleOneShotReminder,
 } from "./reminder-delivery-window";
@@ -67,6 +74,8 @@ export class OverdueService {
             logger.flow("OverdueItems", "scan:no-rules");
             return overdueItems;
         }
+        const baseViews = await resolveReminderBaseViews(this.app, reminders);
+        const matchingPolicies = new Map(reminders.map((reminder) => [reminder, getReminderMatchingPolicy(reminder)]));
 
         const ignorePaths = settings.globalIgnorePaths || [];
         const ignoreTags = settings.globalIgnoreTags || [];
@@ -78,6 +87,7 @@ export class OverdueService {
             this.app,
             settings,
             reminders.filter((reminder) => reminder.enabled).map((reminder) => reminder.property),
+            { files: getReminderBaseCandidateFiles(this.app, reminders, baseViews) },
         );
         const files = candidateResult.files;
         let targetCount = 0;
@@ -85,6 +95,9 @@ export class OverdueService {
         let staleOneShotHidden = 0;
 
         for (const file of files) {
+            if (!reminders.some((reminder) => reminder.enabled
+                && this.reminderIncludesSource(reminder, "file")
+                && reminderMatchesBaseView(reminder, "file", file.path, baseViews))) continue;
             const cache = this.app.metadataCache.getFileCache(file);
             const fm = (cache?.frontmatter || {}) as Record<string, unknown>;
             const targets = await buildReminderTargetsForFile(this.app, file, fm, settings);
@@ -94,15 +107,17 @@ export class OverdueService {
                 for (const reminder of reminders) {
                     if (!reminder.enabled) continue;
                     if (!this.reminderIncludesSource(reminder, target.sourceType)) continue;
+                    if (!reminderMatchesBaseView(reminder, target.sourceType, file.path, baseViews)) continue;
+                    const matchingPolicy = matchingPolicies.get(reminder)!;
 
                     const ctx = buildEffectiveReminderContextForTarget(target, fm, reminder.property, settings);
                     if (!ctx) continue;
                     const effectiveFm = ctx.frontmatter;
                     const propertyValue = ctx.propertyValue;
 
-                    if (shouldIgnoreForReminder(file, cache, effectiveFm, reminder, ignorePaths, ignoreTags, ignoreStatuses, ignoreCheckboxStates, getReminderTagsForTarget(target), getReminderCancellationStatuses(effectiveFm, settings.canceledStatusValue, settings.nativeCalendarCancellationState))) continue;
-                    if (!hasRequiredStatus(effectiveFm, reminder)) continue;
-                    if (!hasRequiredCheckboxState(effectiveFm, reminder)) continue;
+                    if (shouldIgnoreForReminder(file, cache, effectiveFm, matchingPolicy, ignorePaths, ignoreTags, ignoreStatuses, ignoreCheckboxStates, getReminderTagsForTarget(target), getReminderCancellationStatuses(effectiveFm, settings.canceledStatusValue, settings.nativeCalendarCancellationState))) continue;
+                    if (!hasRequiredStatus(effectiveFm, matchingPolicy)) continue;
+                    if (!hasRequiredCheckboxState(effectiveFm, matchingPolicy)) continue;
 
                     let snoozedUntil: number | undefined;
                     const snoozeVal = effectiveFm[snoozeKey];
@@ -262,13 +277,16 @@ export class OverdueService {
 
             // PHASE 1: Check if the CURRENT reminder will fire again
             const currentReminder = reminders.find(r => r.id === currentReminderId);
-            if (currentReminder?.enabled) {
+            if (currentReminder?.enabled
+                && this.reminderIncludesSource(currentReminder, target.sourceType)
+                && reminderMatchesBaseView(currentReminder, target.sourceType, item.file.path, baseViews)) {
                 const reminder = currentReminder;
+                const matchingPolicy = matchingPolicies.get(reminder)!;
                 const ctx = buildEffectiveReminderContextForTarget(target, fm, reminder.property, settings);
                 if (ctx && 
-                    !shouldIgnoreForReminder(item.file, cache, ctx.frontmatter, reminder, ignorePaths, ignoreTags, ignoreStatuses, ignoreCheckboxStates, getReminderTagsForTarget(target), getReminderCancellationStatuses(ctx.frontmatter, settings.canceledStatusValue, settings.nativeCalendarCancellationState)) &&
-                    hasRequiredStatus(ctx.frontmatter, reminder) &&
-                    hasRequiredCheckboxState(ctx.frontmatter, reminder) &&
+                    !shouldIgnoreForReminder(item.file, cache, ctx.frontmatter, matchingPolicy, ignorePaths, ignoreTags, ignoreStatuses, ignoreCheckboxStates, getReminderTagsForTarget(target), getReminderCancellationStatuses(ctx.frontmatter, settings.canceledStatusValue, settings.nativeCalendarCancellationState)) &&
+                    hasRequiredStatus(ctx.frontmatter, matchingPolicy) &&
+                    hasRequiredCheckboxState(ctx.frontmatter, matchingPolicy) &&
                     !reminder.stopConditions.some((cond) => checkStopCondition(ctx.frontmatter, cond))) {
                     
                     const { start: pt, end: ret } = parseTimeRange(ctx.propertyValue);
@@ -372,13 +390,16 @@ export class OverdueService {
             if (nextTime === undefined) {
                 for (const reminder of reminders) {
                     if (!reminder.enabled) continue;
+                    if (!this.reminderIncludesSource(reminder, target.sourceType)) continue;
+                    if (!reminderMatchesBaseView(reminder, target.sourceType, item.file.path, baseViews)) continue;
                     // Skip the current reminder - we want to see what's NEXT
                     if (reminder.id === currentReminderId) continue;
+                    const matchingPolicy = matchingPolicies.get(reminder)!;
                     const ctx = buildEffectiveReminderContextForTarget(target, fm, reminder.property, settings);
                     if (!ctx) continue;
-                    if (shouldIgnoreForReminder(item.file, cache, ctx.frontmatter, reminder, ignorePaths, ignoreTags, ignoreStatuses, ignoreCheckboxStates, getReminderTagsForTarget(target), getReminderCancellationStatuses(ctx.frontmatter, settings.canceledStatusValue, settings.nativeCalendarCancellationState))) continue;
-                    if (!hasRequiredStatus(ctx.frontmatter, reminder)) continue;
-                    if (!hasRequiredCheckboxState(ctx.frontmatter, reminder)) continue;
+                    if (shouldIgnoreForReminder(item.file, cache, ctx.frontmatter, matchingPolicy, ignorePaths, ignoreTags, ignoreStatuses, ignoreCheckboxStates, getReminderTagsForTarget(target), getReminderCancellationStatuses(ctx.frontmatter, settings.canceledStatusValue, settings.nativeCalendarCancellationState))) continue;
+                    if (!hasRequiredStatus(ctx.frontmatter, matchingPolicy)) continue;
+                    if (!hasRequiredCheckboxState(ctx.frontmatter, matchingPolicy)) continue;
                     if (reminder.stopConditions.some((cond) => checkStopCondition(ctx.frontmatter, cond))) continue;
                     const { start: pt, end: ret } = parseTimeRange(ctx.propertyValue);
                     if (!pt) continue;
@@ -449,6 +470,7 @@ export class OverdueService {
         reminder: TPSControllerSettings["reminders"][number],
         sourceType: "file" | "external-event",
     ): boolean {
+        if (isBaseViewReminder(reminder)) return sourceType === "file";
         const configured = Array.isArray(reminder.sourceTypes) ? reminder.sourceTypes.filter(Boolean) : [];
         if (configured.length > 0) return configured.includes(sourceType);
         if (sourceType === "external-event") return !!reminder.includeUnmatchedExternalEvents;

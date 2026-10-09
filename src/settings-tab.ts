@@ -6,6 +6,7 @@ import { NoteRuleEditor, NoteRulePreviewModal } from "./services/note-rule-ui";
 import { renderFinanceRelaySettings, renderWalletSetupEntry } from "./services/finance-relay-settings";
 import { renderPlaidConnectionSettings } from "./services/plaid-connection";
 import { buildReminderDeliveryStatusText } from "./services/reminder-delivery-status";
+import { isBaseViewReminder, readReminderBaseViews, resolveReminderBaseViews } from './services/reminder-base-view-service';
 import { renderAttachmentSyncSettings } from "./services/attachment-sync/settings-ui";
 import { App, Notice, PluginSettingTab, SecretComponent, Setting, normalizePath } from 'obsidian';
 import type TPSControllerPlugin from './main';
@@ -1382,6 +1383,8 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                 const searchBlob = [
                     rem.label,
                     rem.property,
+                    rem.basePath,
+                    rem.baseView,
                     (rem.requiredStatuses || []).join(' '),
                     (rem.requiredPaths || []).join(' '),
                     (rem.ignoreStatuses || []).join(' '),
@@ -1410,6 +1413,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             }
             ruleEl.addEventListener('toggle', () => {
                 this.reminderRuleViewState.set(ruleId, ruleEl.open);
+                if (ruleEl.open) renderSelectionControls();
             });
 
             const ruleHeader = ruleEl.createEl('summary', { cls: 'tps-rule-summary-row' });
@@ -1504,6 +1508,89 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                         this.plugin.restartReminderLoop();
                         labelSpan.textContent = `${value ? '🟢' : '⚫'} ${rem.label || `Rule ${index + 1}`}`;
                     }));
+
+            const matchingGroup = createRuleGroup('Choose notes');
+            new Setting(matchingGroup)
+                .setName('Choose notes using')
+                .addDropdown(drop => drop
+                    .addOption('rules', 'Reminder filters')
+                    .addOption('base-view', 'Base view')
+                    .setValue(isBaseViewReminder(rem) ? 'base-view' : 'rules')
+                    .onChange(async value => {
+                        rem.selectionMode = value as 'rules' | 'base-view';
+                        await this.plugin.saveSettings();
+                        this.plugin.refreshReminderPolicy();
+                        renderSelectionControls();
+                        filteringSection.style.display = isBaseViewReminder(rem) ? 'none' : '';
+                        sourceHelp.style.display = isBaseViewReminder(rem) ? 'none' : '';
+                        sourceControls.style.display = isBaseViewReminder(rem) ? 'none' : '';
+                        descSpan.textContent = this.buildRuleDesc(rem);
+                    }));
+            const selectionControls = matchingGroup.createDiv({ cls: 'tps-controller-reminder-base-selection' });
+            let matchingGeneration = 0;
+            const renderSelectionControls = () => {
+                const generation = ++matchingGeneration;
+                selectionControls.empty();
+                if (!isBaseViewReminder(rem) || !ruleEl.open) return;
+                selectionControls.createDiv({ cls: 'setting-item-description', text:
+                    'The saved view chooses notes instead of this reminder’s manual filters. Global exclusions, cancellation, timing and stop conditions still apply. The view does not need to be open.' });
+                const paths = (this.app?.vault?.getFiles?.() || [])
+                    .filter(file => file.extension === 'base').map(file => file.path).sort();
+                if (rem.basePath && !paths.includes(rem.basePath)) paths.push(rem.basePath);
+                new Setting(selectionControls)
+                    .setName('Base file')
+                    .addDropdown(drop => {
+                        drop.addOption('', 'Choose a Base');
+                        for (const path of paths) drop.addOption(path, path);
+                        drop.setValue(rem.basePath || '').onChange(async value => {
+                            rem.basePath = value;
+                            rem.baseView = '';
+                            await this.plugin.saveSettings();
+                            renderSelectionControls();
+                            descSpan.textContent = this.buildRuleDesc(rem);
+                        });
+                        drop.selectEl.setAttr('aria-label', 'Reminder Base file');
+                    });
+                const viewsContainer = selectionControls.createDiv();
+                if (rem.basePath) {
+                    viewsContainer.createDiv({ cls: 'setting-item-description', text: 'Loading saved views…' });
+                    void readReminderBaseViews(this.app, rem.basePath).then(names => {
+                        if (generation !== matchingGeneration || !isBaseViewReminder(rem)) return;
+                        viewsContainer.empty();
+                        new Setting(viewsContainer).setName('Base view').addDropdown(drop => {
+                            drop.addOption('', 'Choose a view');
+                            for (const name of names) drop.addOption(name, name);
+                            if (rem.baseView && !names.includes(rem.baseView)) drop.addOption(rem.baseView, `${rem.baseView} (missing)`);
+                            drop.setValue(rem.baseView || '').onChange(async value => {
+                                rem.baseView = value;
+                                await this.plugin.saveSettings();
+                                descSpan.textContent = this.buildRuleDesc(rem);
+                            });
+                            drop.selectEl.setAttr('aria-label', 'Reminder Base view');
+                        });
+                    }).catch(error => {
+                        if (generation !== matchingGeneration) return;
+                        viewsContainer.empty();
+                        viewsContainer.createDiv({ cls: 'setting-item-description', text: String(error.message || error) });
+                    });
+                }
+                const checkResult = selectionControls.createDiv({ cls: 'setting-item-description' });
+                checkResult.setAttr('role', 'status');
+                new Setting(selectionControls)
+                    .setName('Check view')
+                    .setDesc('Uses the saved filters, limit and visible groups. Temporary search text is ignored. Views using this cannot be used here. Check the Base for formula errors if the count is unexpected.')
+                    .addButton(button => button.setButtonText('Check view').onClick(async () => {
+                        button.setDisabled(true);
+                        try {
+                            const matches = await resolveReminderBaseViews(this.app, [{ ...rem, enabled: true }]);
+                            if (generation !== matchingGeneration) return;
+                            checkResult.textContent = `${matches.get(rem.id)?.size || 0} matching notes. Notifications use the date/time property below.`;
+                        } catch (error) {
+                            if (generation === matchingGeneration) checkResult.textContent = String(error.message || error);
+                        } finally { button.setDisabled(false); }
+                    }));
+            };
+            renderSelectionControls();
 
             // ── When & How ───────────────────────────────────────────────────
             const triggerGroup = createRuleGroup('When & How', true);
@@ -1680,8 +1767,11 @@ export class TPSControllerSettingTab extends PluginSettingTab {
             // ── Which Notes & Events ────────────────────────────────────────
             const allDayGroup = createRuleGroup('Which Notes & Events', true);
             const sourceHelp = allDayGroup.createDiv({ cls: 'setting-item-description' });
-            sourceHelp.textContent = 'Choose which scheduled things this rule can see. One rule can cover whole notes, checklist lines, and external calendar events.';
-            this.renderSourceTypeControls(allDayGroup, rem, async () => {
+            sourceHelp.textContent = 'Choose whether this reminder covers whole notes, external calendar events, or both.';
+            sourceHelp.style.display = isBaseViewReminder(rem) ? 'none' : '';
+            const sourceControls = allDayGroup.createDiv();
+            sourceControls.style.display = isBaseViewReminder(rem) ? 'none' : '';
+            this.renderSourceTypeControls(sourceControls, rem, async () => {
                 await this.plugin.saveSettings();
                 descSpan.textContent = this.buildRuleDesc(rem);
             });
@@ -1735,6 +1825,8 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
             // ── Filtering ────────────────────────────────────────────────────
             const filteringGroup = createRuleGroup('More Filters');
+            const filteringSection = filteringGroup.parentElement || filteringGroup;
+            filteringSection.style.display = isBaseViewReminder(rem) ? 'none' : '';
 
             new Setting(filteringGroup)
                 .setName('Required Statuses')
@@ -1812,13 +1904,14 @@ export class TPSControllerSettingTab extends PluginSettingTab {
         } else {
             parts.push(`${rem.offsetMinutes >= 0 ? '+' : ''}${rem.offsetMinutes}min`);
         }
-        if (rem.requiredStatuses?.length) parts.push(rem.requiredStatuses.join('/'));
+        if (isBaseViewReminder(rem)) parts.push(`${rem.basePath || 'Choose Base'} / ${rem.baseView || 'Choose view'}`);
+        else if (rem.requiredStatuses?.length) parts.push(rem.requiredStatuses.join('/'));
         if (rem.triggerAtEnd) parts.push('at end');
         if (rem.mode && rem.mode !== 'task') parts.push(rem.mode);
         if (rem.allDayFilter === 'true') parts.push('all-day only');
         if (rem.allDayFilter === 'false') parts.push('timed only');
         const sources = this.getReminderSourceTypes(rem);
-        if (sources.has('external-event')) parts.push('external');
+        if (!isBaseViewReminder(rem) && sources.has('external-event')) parts.push('external');
         if (rem.repeatUntilComplete) {
             parts.push(rem.repeatEndAt === 'trigger-base'
                 ? `repeat ${rem.repeatIntervalMinutes}min until scheduled`

@@ -116,6 +116,10 @@ export interface PropertyReminder {
     id: string;
     label?: string;
     property: string;
+    /** Saved Base view replaces this reminder's manual note-matching filters. */
+    selectionMode?: "rules" | "base-view";
+    basePath?: string;
+    baseView?: string;
     enabled: boolean;
     offsetMinutes: number;
     mode?: "task" | "timeblock";
