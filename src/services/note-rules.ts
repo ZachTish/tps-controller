@@ -22,7 +22,7 @@ export const NOTE_RULE_ACTIONS: Record<NoteRuleAction['kind'], string> = {
     title: 'Set title and filename', 'replace-title': 'Replace text in title and filename',
     'set-property': 'Set property', 'remove-property': 'Remove property', 'add-tag': 'Add tag', 'remove-tag': 'Remove tag',
 };
-const reserved = new Set(['__proto__', 'prototype', 'constructor', 'tpsid', 'id', 'externalid', 'financeid', 'financeaccountid', 'providerid', 'sourceid', 'tpsschemaversion', 'financesecurityid', 'financeholdingid', 'providertransactionid', 'provideraccountid', 'providersecurityid', 'providerholdingid']);
+const reserved = new Set(['__proto__', 'prototype', 'constructor', 'id', 'externalid', 'financeid', 'financeaccountid', 'providerid', 'sourceid', 'tpsschemaversion', 'financesecurityid', 'financeholdingid', 'providertransactionid', 'provideraccountid', 'providersecurityid', 'providerholdingid']);
 function fail(message: string): never { throw new Error(`Note rules: ${message}`); }
 export function validRuleKey(key: string): boolean {
     return /^[\p{L}_][\p{L}\p{N}_ /-]{0,79}$/u.test(key) && !reserved.has(key.toLowerCase());

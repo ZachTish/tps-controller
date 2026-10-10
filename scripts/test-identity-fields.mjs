@@ -54,7 +54,7 @@ test('external reminder synthetic frontmatter uses externalId instead of legacy 
   assert.doesNotMatch(source, /tpsCalendarSourceUrl: event\.sourceUrl/);
 });
 
-test('Controller external event note creation writes tpsId and externalId instead of legacy identity triplet', () => {
+test('Controller external event note creation writes id and externalId instead of legacy identity triplet', () => {
   assert.match(createSource, /ensureInternalIdInFrontmatter\(app, frontmatter\)/);
   assert.match(createSource, /const externalId = buildCalendarExternalId\(app, event\)/);
   assert.match(createSource, /setIntegrationNoteField\(app, frontmatter, 'externalId', externalId\)/);
@@ -712,4 +712,48 @@ test('integration field reads and writes use the GCM configured-name contract', 
 test('new external notes and quarantine updates avoid redundant hardcoded writes', () => {
  assert.doesNotMatch(createSource,/frontmatter\[statusKey\] = "complete"/);
  assert.doesNotMatch(autoCreateSource,/fm\[this\.config\.orphanMissCountKey\] =|fm\[this\.config\.orphanReasonKey\] =/);
+});
+
+
+test('standalone identities use id without changing an existing value or field casing', () => {
+  const existing = { ID: 'kept-value', externalId: 'calendar:keep', title: 'Keep' };
+  assert.equal(gcmApi.ensureInternalIdInFrontmatter(null, existing), 'kept-value');
+  assert.deepEqual(existing, { ID: 'kept-value', externalId: 'calendar:keep', title: 'Keep' });
+  const created = { title: 'Fresh', externalId: 'calendar:source' };
+  const value = gcmApi.ensureInternalIdInFrontmatter(null, created);
+  assert.match(value, /^item_/u);
+  assert.equal(created.id, value);
+  assert.equal(created.title, 'Fresh');
+  assert.equal(created.externalId, 'calendar:source');
+  assert.equal(Object.hasOwn(created, 'tpsId'), false);
+});
+
+test('identity fallback respects the configured physical key and the profile takes precedence', () => {
+  const plugin = { settings: { nativeRecordIdentityPropertyKey: 'savedIdentity' }, api: {
+    nativeRecords: { getStorageProfile: () => ({ identityPropertyKey: 'recordIdentity' }) },
+  } };
+  const app = { plugins: { plugins: { 'tps-global-context-menu': plugin } } };
+  const existing = { RecordIdentity: 'same-id', externalId: 'calendar:keep' };
+  assert.equal(gcmApi.ensureInternalIdInFrontmatter(app, existing), 'same-id');
+  assert.deepEqual(existing, { RecordIdentity: 'same-id', externalId: 'calendar:keep' });
+  const created = {};
+  const value = gcmApi.ensureInternalIdInFrontmatter(app, created);
+  assert.deepEqual(created, { recordIdentity: value });
+  plugin.api.nativeRecords.getStorageProfile = () => ({ identityPropertyKey: 'tpsId' });
+  const configuredLegacy = { tpsId: 'unchanged-legacy-value' };
+  assert.equal(gcmApi.ensureInternalIdInFrontmatter(app, configuredLegacy), 'unchanged-legacy-value');
+  assert.deepEqual(configuredLegacy, { tpsId: 'unchanged-legacy-value' });
+  plugin.api = {};
+  const saved = { SavedIdentity: 'saved-id' };
+  assert.equal(gcmApi.ensureInternalIdInFrontmatter(app, saved), 'saved-id');
+  assert.deepEqual(saved, { SavedIdentity: 'saved-id' });
+});
+
+test('an available identity owner remains authoritative and its failure cannot create a competing id', () => {
+  const frontmatter = { title: 'Keep' };
+  const app = { plugins: { plugins: { 'tps-global-context-menu': { api: { identity: {
+    ensureInternalIdInFrontmatter: () => { throw new Error('owner rejected'); },
+  } } } } } };
+  assert.throws(() => gcmApi.ensureInternalIdInFrontmatter(app, frontmatter), /owner rejected/u);
+  assert.deepEqual(frontmatter, { title: 'Keep' });
 });

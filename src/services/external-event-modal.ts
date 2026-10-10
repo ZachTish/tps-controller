@@ -248,7 +248,7 @@ export async function createMeetingNoteFromExternalEvent(
   }
 
   // Build frontmatter object for fields we need to set. Calendar identity is
-  // intentionally collapsed to tpsId + externalId; legacy keys are read only
+  // intentionally collapsed to id + externalId; legacy keys are read only
   // for compatibility and removed when this path touches a note.
   const titleKey = frontmatterKeys?.titleKey || "title";
 

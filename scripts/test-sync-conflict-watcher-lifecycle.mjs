@@ -135,6 +135,7 @@ function loadWatcherClass(canAutomaticallyMutate = async () => true) {
     if (id === "../tps-gcm-api") {
       return {
         canAutomaticallyMutateViaGcm: canAutomaticallyMutate,
+        getInternalIdPropertyKey: app => app.plugins?.plugins?.["tps-global-context-menu"]?.settings?.nativeRecordIdentityPropertyKey || "id",
         getGcmApi: () => ({
           nativeRecords: {
             inspect: (frontmatter) => frontmatter?.gcmCalendarId
@@ -260,13 +261,13 @@ function conflictFixture() {
     new FakeTFile("Inbox/Protected.md"),
     new FakeTFile("Inbox/Protected duplicate.md", { externalEventId: "calendar:test" }),
     new FakeTFile("Inbox/Canonical.md"),
-    new FakeTFile("Inbox/Canonical duplicate.md", { tpsId: "calendar:v1:AAAAAAAAAAAAAAAA:BBBBBBBBBBBBBBBBBBBBBBBBBBB" }),
+    new FakeTFile("Inbox/Canonical duplicate.md", { id: "calendar:v1:AAAAAAAAAAAAAAAA:BBBBBBBBBBBBBBBBBBBBBBBBBBB" }),
     new FakeTFile("Inbox/Tagged.md"),
     new FakeTFile("Inbox/Tagged duplicate.md", { gcmCalendarId: "calendar-tagged" }),
     new FakeTFile("Inbox/Legacy.md"),
-    new FakeTFile("Inbox/Legacy duplicate.md", { tpsId: "item-random", externalId: "calendar:https://example.invalid#event" }),
+    new FakeTFile("Inbox/Legacy duplicate.md", { id: "item-random", externalId: "calendar:https://example.invalid#event" }),
     new FakeTFile("Inbox/Ordinary task.md"),
-    new FakeTFile("Inbox/Ordinary task duplicate.md", { tpsId: "task-ordinary" }),
+    new FakeTFile("Inbox/Ordinary task duplicate.md", { id: "task-ordinary" }),
     new FakeTFile("Inbox/Orphan duplicate.md"),
   ];
 }
@@ -326,7 +327,7 @@ test("SyncConflictWatcher lifecycle binds listeners and its startup fallback", a
       const canonical = new FakeTFile("Inbox/Standup.md");
       const conflictCanonical = new FakeTFile("Inbox/Meeting.md");
       const delayedCalendar = new FakeTFile("Inbox/Standup (2).md", {
-        tpsId: "calendar:v1:AAAAAAAAAAAAAAAA:BBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        id: "calendar:v1:AAAAAAAAAAAAAAAA:BBBBBBBBBBBBBBBBBBBBBBBBBBB",
       });
       const delayedConflict = new FakeTFile("Inbox/Meeting duplicate.md");
       const unavailable = new Set([delayedCalendar.path, delayedConflict.path]);

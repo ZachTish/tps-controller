@@ -61,7 +61,7 @@ export class NoteRuleRunner {
     private identityKeys(): string[] {
         const gcm = (this.app as any).plugins?.plugins?.['tps-global-context-menu']?.settings;
         const aliases = Array.isArray(gcm?.nativeRecordStorageAliases) ? gcm.nativeRecordStorageAliases : [];
-        return [gcm?.nativeRecordIdentityPropertyKey || 'tpsId', gcm?.nativeRecordSchemaPropertyKey, ...aliases.flatMap((profile: any) => [profile.identityPropertyKey, profile.schemaPropertyKey]), gcm?.integrationNotePropertyKeys?.externalId || 'externalId', this.settings().eventIdKey, this.settings().uidKey, 'subitemId'].filter(Boolean);
+        return [gcm?.nativeRecordIdentityPropertyKey || 'id', gcm?.nativeRecordSchemaPropertyKey, ...aliases.flatMap((profile: any) => [profile.identityPropertyKey, profile.schemaPropertyKey]), gcm?.integrationNotePropertyKeys?.externalId || 'externalId', this.settings().eventIdKey, this.settings().uidKey, 'subitemId'].filter(Boolean);
     }
     private identityTags(): string[] {
         const gcm = (this.app as any).plugins?.plugins?.['tps-global-context-menu']?.settings;

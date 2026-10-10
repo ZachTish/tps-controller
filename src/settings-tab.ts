@@ -566,7 +566,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
         const fmContent = createSettingsSection(
             containerEl,
             'Calendar field names',
-            'Controller-owned calendar sync fields. External identity, imported location/URL, and detection/cancellation date keys are configured in GCM → Advanced → Integration property names. tpsId remains fixed.'
+            'Controller-owned calendar sync fields. External identity, imported location/URL, and detection/cancellation date keys are configured in GCM → Advanced → Integration property names. The shared record ID property is configured in GCM.'
         );
 
         new Setting(fmContent).setName('Shared integration property names').addButton(button => button

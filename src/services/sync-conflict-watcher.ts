@@ -1,6 +1,6 @@
 import { App, TFile, Notice, normalizePath } from "obsidian";
 import * as logger from "../logger";
-import { canAutomaticallyMutateViaGcm, getGcmApi } from "../tps-gcm-api";
+import { canAutomaticallyMutateViaGcm, getGcmApi, getInternalIdPropertyKey } from "../tps-gcm-api";
 import { parseCalendarRecordId } from "./calendar-record-identity";
 
 export class SyncConflictWatcher {
@@ -167,7 +167,7 @@ export class SyncConflictWatcher {
         }
 
         // Skip files that have a TPS identity in frontmatter. Calendar records
-        // now use only tpsId; the configured event-id key remains a read-only
+        // now use only id; the configured event-id key remains a read-only
         // compatibility fallback for older meeting notes.
         // These are auto-created meeting notes — let AutoCreateService manage them.
         // Archiving them here would cause delete+recreate loops.
@@ -230,7 +230,7 @@ export class SyncConflictWatcher {
             const actual = Object.keys(fm).find((candidate) => candidate.trim().toLowerCase() === normalized);
             return actual ? String(fm[actual] ?? "").trim() : "";
         };
-        if (parseCalendarRecordId(read("tpsId"))) return true;
+        if (parseCalendarRecordId(read(getInternalIdPropertyKey(this.app)))) return true;
         if (read(this.eventIdKey)) return true;
         return read("externalId").startsWith("calendar:");
     }

@@ -12,7 +12,7 @@ export interface NativeCalendarTemplateInstance {
 // A template is a new note's content/defaults, never its identity. Keep source
 // IDs out of the public record and let the canonical occurrence ID own sync.
 const COPIED_IDENTITY_KEYS = new Set([
-    "tpsid", "tpsschemaversion", "createddate", "modifieddate", "externalid",
+    "id", "tpsschemaversion", "createddate", "modifieddate", "externalid",
     "externaleventid", "tpscalendaruid", "tpscalendarsourceurl", "calendarid",
     "calendarsourceid", "calendaruid", "calendaroccurrenceid", "calendaroccurrenceidentity",
     "recurrencerule", "recurrence", "rrule", // Feed expansion owns recurrence; imported instances cannot spawn local series.

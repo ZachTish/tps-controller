@@ -88,7 +88,7 @@ const {
   normalizeNativeCalendarCancellationState,
 } = await import(`data:text/javascript;base64,${Buffer.from(settingsPersistenceBundle.outputFiles[0].text).toString("base64")}`);
 
-test("private native calendar cancellation state keeps only valid tpsId-keyed entries", () => {
+test("private native calendar cancellation state keeps only valid id-keyed entries", () => {
   const canonicalId = `calendar:v1:${'A'.repeat(16)}:${'B'.repeat(27)}`;
   assert.deepEqual(normalizeNativeCalendarCancellationState(null), {});
   assert.deepEqual(normalizeNativeCalendarCancellationState({

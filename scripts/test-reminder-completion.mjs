@@ -51,6 +51,7 @@ function loadServices(events) {
       if (id === '../tps-gcm-api') return {
         emitFilesUpdated: (_app, paths) => events.push([...paths]),
         getGcmApi: () => null,
+        getInternalIdPropertyKey: () => "id",
         buildCalendarExternalId: () => 'synthetic-calendar',
         getDailyNoteTaskSchedulePolicyViaGcm: () => ({ available: false }),
       };

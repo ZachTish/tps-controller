@@ -1,5 +1,36 @@
 # TPS Controller
 
+## 4.0.0 — Shared record identity named id
+
+Controller now uses `id` for the canonical record envelope and for standalone
+note creation. With GCM installed, physical note identities follow its published
+storage profile; existing configured keys, including `tpsId`, retain their values
+until an explicit GCM property migration changes that key. Calendar indexing,
+local-counterpart suppression, cancellation-ledger matching and note-rule
+protection use that configured physical key instead of assuming a spelling.
+Calendar templates cannot copy a canonical `id` from their source note. External
+and provider IDs, deterministic occurrence ID values, cancellation history,
+filenames, note bodies and settings routes are preserved.
+
+Native calendar import/mutation requires GCM nativeRecords API **7** (GCM 9.0.0).
+An earlier generation is rejected before writes with an explicit upgrade error.
+Read-only reminder projections continue using their existing handle `id` contract.
+Standalone notes authored under the former `tpsId` default need an explicit key
+conversion before using the new standalone default; this is the reason for the
+major version. This release adds no navigation scan, background migration, repair,
+retry, watcher, timer or persisted consumer setting. Minimum Obsidian remains
+**1.12.3**; Controller's settings destination map and mobile layout are unchanged.
+
+Focused regressions exercise canonical/uppercase IDs, configured and profile-
+selected physical keys, authoritative owner failures, ledger cancellation,
+calendar import identity preservation and rejection of API 6/unknown generations.
+Final versioned validation passes 809 checks with three existing optional skips
+(812 total) and zero failures. The separate final ordinary stable build deployed only to the Test vault and
+was reloaded by manifest ID. Actual installed creation/update integration checks
+passed with preserved IDs and bodies; their precise synthetic boundaries and
+SHA-256 hashes are recorded in [4.0.0 release notes](release-notes/4.0.0.md).
+Production installation remains the user's BRAT pull.
+
 ## 3.3.1 — Bound failed startup calendar work
 
 A failed startup calendar attempt now consumes that startup obligation. Previously

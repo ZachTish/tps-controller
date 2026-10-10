@@ -29,7 +29,7 @@ import {
     calendarEventOccurrenceIdentity,
     deriveCalendarRecordId,
 } from "./calendar-record-identity";
-import { getGcmApi, type GcmNativeRecordsApi } from "../tps-gcm-api";
+import { getGcmApi, getInternalIdPropertyKey, type GcmNativeRecordsApi } from "../tps-gcm-api";
 import { isBaseViewReminder, resolveReminderBaseViews, reminderMatchesBaseView, getReminderMatchingPolicy, getReminderBaseCandidateFiles } from "./reminder-base-view-service";
 
 type ReminderBaseViews = ReadonlyMap<string, ReadonlySet<string>>;
@@ -401,6 +401,7 @@ export class ReminderEngine {
                     effectiveFm,
                     settings.canceledStatusValue,
                     settings.nativeCalendarCancellationState,
+                    getInternalIdPropertyKey(this.app),
                 ),
             )) continue;
             if (!hasRequiredStatus(effectiveFm, matchingReminder) || !hasRequiredCheckboxState(effectiveFm, reminder)) continue;
@@ -661,6 +662,7 @@ export class ReminderEngine {
                     effectiveFm,
                     settings.canceledStatusValue,
                     settings.nativeCalendarCancellationState,
+                    getInternalIdPropertyKey(this.app),
                 ),
             )) {
                 this.countSkip(params.stats, "ignored");
@@ -1120,7 +1122,7 @@ export class ReminderEngine {
             const inspectedId = conflictingPaths === null || conflictingPaths.has(file.path)
                 ? this.normalizeRecordIdentity(nativeRecords?.inspect?.(fm)?.id)
                 : null;
-            const propertyId = this.normalizeRecordIdentity(this.findKeyInsensitive(fm, "tpsId"));
+            const propertyId = this.normalizeRecordIdentity(this.findKeyInsensitive(fm, getInternalIdPropertyKey(this.app)));
             if (inspectedId) recordIds.add(inspectedId);
             if (propertyId) recordIds.add(propertyId);
             const fileEventIds = this.findIdentityValues(fm, [
@@ -1280,7 +1282,7 @@ export class ReminderEngine {
         })) return true;
 
         // Legacy identity fields remain read-only fallbacks while older notes
-        // are migrating. New native records persist only their canonical tpsId.
+        // are migrating. New native records persist only their canonical id.
         const externalIdentities = [event.id, event.occurrenceIdentity]
             .map((value) => this.normalizeIdentityValue(value))
             .filter((value): value is string => !!value);

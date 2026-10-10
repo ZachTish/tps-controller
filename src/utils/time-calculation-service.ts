@@ -435,12 +435,13 @@ export function getReminderCancellationStatuses(
     frontmatter: Record<string, unknown> | null | undefined,
     configuredStatus: unknown,
     cancellationState: unknown,
+    identityPropertyKey = "id",
 ): unknown[] {
     const statuses: unknown[] = [String(configuredStatus ?? "").trim() || "cancelled"];
     if (!frontmatter || !cancellationState || typeof cancellationState !== "object" || Array.isArray(cancellationState)) {
         return statuses;
     }
-    const idKey = Object.keys(frontmatter).find((key) => key.trim().toLocaleLowerCase() === "tpsid");
+    const idKey = Object.keys(frontmatter).find((key) => key.trim().toLocaleLowerCase() === identityPropertyKey.toLocaleLowerCase());
     const id = idKey ? String(frontmatter[idKey] || "").trim() : "";
     if (!id) return statuses;
     const stateKey = Object.keys(cancellationState as Record<string, unknown>)

@@ -19,7 +19,7 @@ const condition=(field='property:type',operator='equals',value='event')=>({field
 const action=(kind='title',value='123',key='')=>({kind,value,key});
 const rule=(overrides={})=>({id:'one',name:'Rename event',enabled:true,match:'all',conditions:[condition(),condition('name','contains','xyz')],actions:[action()],stop:false,...overrides});
 const config=(list=[rule()])=>({version:1,rules:list});
-const input=(overrides={})=>({name:'XYZ event',path:'Inbox/XYZ event.md',title:'XYZ event',calendar:'work',properties:{type:'event',tpsId:'stable',tags:['keep']},protectedKeys:['customIdentity'],...overrides});
+const input=(overrides={})=>({name:'XYZ event',path:'Inbox/XYZ event.md',title:'XYZ event',calendar:'work',properties:{type:'event',id:'stable',tags:['keep']},protectedKeys:['customIdentity'],...overrides});
 function evaluate(r=rule(),i=input()){return rules.createNoteRuleSession(config([r])).evaluate(i);}
 
 test('example requires both type and name and never alters input or identity',()=>{
@@ -47,14 +47,14 @@ test('replace text, tag deduplication, removals and typed custom values',()=>{
   const result=evaluate(rule({actions:[action('replace-title','ABC','XYZ'),action('add-tag','#Keep'),action('add-tag','food/healthy'),action('remove-tag','keep'),action('set-property','3','Score'),action('remove-property','','score'),action('set-property','["a","b"]','SCORE')]}));
   assert.equal(result.title,'ABC event');assert.deepEqual(result.updates.tags,['food/healthy']);
   assert.deepEqual(result.updates.Score,['a','b']);assert.deepEqual(result.removals,[]);
-  const after=rules.applyNoteRuleResult(input().properties,result,'Title');assert.equal(after.Title,'ABC event');assert.equal(after.tpsId,'stable');
+  const after=rules.applyNoteRuleResult(input().properties,result,'Title');assert.equal(after.Title,'ABC event');assert.equal(after.id,'stable');
 });
 test('disabled drafts, unsupported schema and invalid values fail safely',()=>{
   assert.doesNotThrow(()=>rules.validateNoteRules(config([rule({enabled:false,actions:[]})])));
   for(const c of [{version:2,rules:[]},config([rule({conditions:[]})]),config([rule({actions:[]})]),config([rule({actions:[action('set-property','{}','custom')]})]),config([rule({conditions:[condition('amount','greater','no')]})])]) assert.throws(()=>rules.validateNoteRules(c));
 });
 test('IDs and configured identity keys cannot be changed',()=>{
-  for(const key of ['tpsId','financeId','ExternalId','__proto__','constructor']) assert.throws(()=>evaluate(rule({actions:[action('set-property','bad',key)]})));
+  for(const key of ['id','ID','financeId','ExternalId','__proto__','constructor']) assert.throws(()=>evaluate(rule({actions:[action('set-property','bad',key)]})));
   assert.throws(()=>evaluate(rule({actions:[action('set-property','bad','customIdentity')]})));
 });
 test('unsafe or empty generated filenames are rejected',()=>{
@@ -79,7 +79,7 @@ test('internal/development/archive paths excluded',()=>{
   for(const path of ['.obsidian/data.md','Plugin Development/src.md','_archive/note.md','folder/node_modules/x.md','../out.md']) assert.equal(isRuleNotePath(path),false);
   assert.equal(isRuleNotePath('Inbox/note.md'),true);
 });
-function harness(initial={'Inbox/XYZ event.md':'---\ntype: event\ntpsId: stable\ntags: [keep]\n---\nKeep body\n'},settings=config()) {
+function harness(initial={'Inbox/XYZ event.md':'---\ntype: event\nid: stable\ntags: [keep]\n---\nKeep body\n'},settings=config()) {
   const files=new Map(),contents=new Map(),writes=[],renames=[];
   const seed=(path,content)=>{files.set(path,{path,basename:path.split('/').pop().replace(/\.md$/,''),extension:'md',stat:{size:content.length}});contents.set(path,content);};
   for(const [path,content] of Object.entries(initial))seed(path,content);
@@ -98,7 +98,7 @@ const apply=(h,plan)=>h.runner.apply(plan,new Set(plan.changes.map(change=>chang
 test('preview is read-only; apply renames and preserves body and identity',async()=>{
   const h=harness(),plan=await preview(h);assert.equal(plan.changes.length,1);assert.equal(h.writes.length,0);
   const result=await apply(h,plan);assert.deepEqual(result.applied,['Inbox/123.md']);assert.equal(result.failed.length,0);
-  assert.equal(parseRuleNote(h.contents.get('Inbox/123.md')).properties.tpsId,'stable');assert.equal(parseRuleNote(h.contents.get('Inbox/123.md')).body,'Keep body\n');
+  assert.equal(parseRuleNote(h.contents.get('Inbox/123.md')).properties.id,'stable');assert.equal(parseRuleNote(h.contents.get('Inbox/123.md')).body,'Keep body\n');
   assert.equal((await preview(h)).changes.length,0);await assert.rejects(()=>apply(h,plan),/expired/);
 });
 test('selection and folder boundaries; nonmatching/manual content untouched',async()=>{
@@ -145,7 +145,7 @@ test('single active run and unload guard',async()=>{
 });
 test('calendar source migration resolves canonical ID and preserves unrelated notes',async()=>{
   const identity=await load('src/services/calendar-record-identity.ts');const id=await identity.deriveCalendarRecordId('work','event');
-  const h=harness({'Calendar.md':`---\ntpsId: ${id}\n---\n`},rules.migrateCalendarTagRules(undefined,[{id:'work',autoCreateTag:'team'}]));h.state.externalCalendars=[{id:'work',url:'https://example.test/feed'}];
+  const h=harness({'Calendar.md':`---\nid: ${id}\n---\n`},rules.migrateCalendarTagRules(undefined,[{id:'work',autoCreateTag:'team'}]));h.state.externalCalendars=[{id:'work',url:'https://example.test/feed'}];
   const plan=await preview(h);assert.equal(plan.changes.length,1);assert.deepEqual(plan.changes[0].after.tags,['team']);
 });
 test('settings/actions inventory and command-only wiring',()=>{
@@ -195,7 +195,7 @@ test('reload between read and mutation rejects the write', async () => {
 
 
 test('already present tags do not cause formatting-only writes', async () => {
-  const h=harness({'Inbox/XYZ event.md':'---\ntype: event\ntags: [keep]\ntpsId: stable\n---\nBody'},config([rule({actions:[action('add-tag','keep')]})]));
+  const h=harness({'Inbox/XYZ event.md':'---\ntype: event\ntags: [keep]\nid: stable\n---\nBody'},config([rule({actions:[action('add-tag','keep')]})]));
   assert.equal((await preview(h)).changes.length,0);assert.equal(h.writes.length,0);
 });
 test('numeric zero title is respected instead of falling back to filename', async () => {

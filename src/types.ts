@@ -205,7 +205,7 @@ export interface TPSControllerSettings {
     canceledStatusValue: string;
     /** Optional status for an inferred missing event when No-Loss is disabled. */
     missingEventStatusValue: string;
-    /** Controller-owned reconciliation state. Keys are canonical calendar-record tpsIds. */
+    /** Controller-owned reconciliation state. Keys are canonical calendar-record IDs. */
     nativeCalendarCancellationState: Record<string, NativeCalendarCancellationState>;
     externalCalendarFilter: string;
     externalCalendars: ExternalCalendarConfig[];

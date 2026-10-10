@@ -288,6 +288,7 @@ function loadCompiledOverdueServiceHarness(options = {}) {
     if (id === '../tps-gcm-api') {
       return {
         emitFilesUpdated: () => {},
+        getInternalIdPropertyKey: loadTpsGcmApiModule().getInternalIdPropertyKey,
         async moveTaskViaGcm(...args) {
           moveCalls.push(args);
           return moveImplementation(...args);
@@ -401,7 +402,7 @@ function loadCompiledReminderEngineHarness(options = {}) {
       };
     }
     if (id === '../tps-gcm-api') {
-      return { getGcmApi: () => options.gcmApi || null };
+      return { getGcmApi: () => options.gcmApi || null, getInternalIdPropertyKey: loadTpsGcmApiModule().getInternalIdPropertyKey };
     }
     throw new Error(`Unexpected require: ${id}`);
   };
@@ -436,7 +437,7 @@ function beginCompiledReminderMove(harness) {
     file: sourceFile,
     targetKind: 'task',
     taskLine: 12.8,
-    taskRawLine: '- [ ] Move me [scheduled:: 2026-08-10 09:00] [tpsId:: task_move]',
+    taskRawLine: '- [ ] Move me [scheduled:: 2026-08-10 09:00] [id:: task_move]',
     taskTitle: 'Move me',
     noteTitle: sourceFile.basename,
     reminderProperty: 'scheduled',
@@ -714,7 +715,7 @@ function createExternalEventMatchOperationFixture(mode, unrelatedCount = 4000) {
   const renamedFile = new harness.TFile('Different folder/User renamed this event.md');
   files.push(renamedFile);
   records.push({ file: renamedFile, path: renamedFile.path, id: canonicalID, kind: 'calendar-event', frontmatter: {
-    tpsId: canonicalID, title: 'User renamed title', scheduled: '2026-10-16T16:00:00.000Z',
+    id: canonicalID, title: 'User renamed title', scheduled: '2026-10-16T16:00:00.000Z',
   } });
   const app = {
     metadataCache: { getFileCache: () => { counts.metadata++; return null; } },
@@ -878,7 +879,7 @@ test('native calendar records suppress matched pathless external alerts while re
   };
   const canonicalRecordId = buildCanonicalCalendarRecordId(calendarId, matchingEvent.occurrenceIdentity);
   const nativeRecord = {
-    tpsId: canonicalRecordId,
+    id: canonicalRecordId,
     kind: 'calendar-event',
     title: matchingEvent.title,
     status: 'scheduled',
@@ -983,10 +984,10 @@ test('native calendar records suppress matched pathless external alerts while re
   assert.equal(schedule[1].fireAt, unmatchedEvent.startDate.getTime() - 15 * 60_000);
 
   const identityVariants = [{
-    label: 'canonical tpsId property',
+    label: 'canonical id property',
     frontmatter: {
       scheduled: nativeRecord.scheduled,
-      tpsId: canonicalRecordId,
+      id: canonicalRecordId,
     },
   }, {
     label: 'canonical GCM-inspected tag identity',
@@ -1044,7 +1045,7 @@ test('configured cancellation status globally suppresses native calendar records
   const { parseTimeRange, shouldIgnoreForReminder, getReminderCancellationStatuses } = loadTimeCalculationModule();
   const nativeId = `calendar:v1:${'A'.repeat(16)}:${'B'.repeat(27)}`;
   const cancelledRecord = {
-    tpsId: nativeId,
+    id: nativeId,
     tags: [
       'calendar-event',
       'tps/record/v1/calendar-event/calendar-cancelled-poc-shape',
@@ -1147,7 +1148,17 @@ test('configured cancellation status globally suppresses native calendar records
     'the matching ledger-owned prior cancellation label remains terminal after a setting change',
   );
 
-  const unrelatedRecord = { ...cancelledRecord, tpsId: 'unrelated-native-record' };
+  const configuredRecord = { ...cancelledRecord, RecordIdentity: nativeId };
+  delete configuredRecord.id;
+  app.plugins = { plugins: { 'tps-global-context-menu': { settings: {
+    nativeRecordIdentityPropertyKey: 'recordIdentity',
+  } } } };
+  app.metadataCache.getFileCache = () => ({ frontmatter: configuredRecord });
+  assert.deepEqual(await engine.projectScheduledNotifications(settings, now), [],
+    'the configured physical key preserves ledger-owned cancellation suppression');
+  delete app.plugins;
+
+  const unrelatedRecord = { ...cancelledRecord, id: 'unrelated-native-record' };
   app.metadataCache.getFileCache = () => ({ frontmatter: unrelatedRecord });
   assert.equal(
     (await engine.projectScheduledNotifications(settings, now)).length,

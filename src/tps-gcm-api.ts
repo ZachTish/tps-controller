@@ -82,6 +82,7 @@ export interface GcmNativeRecordsApi {
   version?: number;
   capabilities?: { calendarTemplateRecords?: boolean; conflictAwareSnapshots?: boolean; indexedSnapshot?: boolean; identityApplyCancellation?: boolean };
   isEnabled?: () => boolean;
+  getStorageProfile?: () => { identityPropertyKey?: string } | null;
   create?: (
     kind: 'calendar-event',
     properties: Record<string, unknown>,
@@ -108,12 +109,12 @@ export interface GcmNativeRecordsApi {
     records: GcmNativeRecordHandle[];
     conflicts?: GcmNativeRecordSnapshot['conflicts'];
   };
-  /** API v6: authoritative on-disk enumeration; virtual compatibility fields may be projected in handles. */
+  /** API v7: authoritative on-disk enumeration; virtual compatibility fields may be projected in handles. */
   list?: (kind?: string) => Promise<GcmNativeRecordHandle[]>;
-  /** API v6: authoritative records plus identity and mutation revisions for plan validation. */
+  /** API v7: authoritative records plus identity and mutation revisions for plan validation. */
   snapshot?: (kind?: string, options?: { includeConflicts?: boolean }) => Promise<GcmNativeRecordSnapshot>;
   resolve?: (reference: TFile | string) => Promise<GcmNativeRecordHandle | null>;
-  /** API v6: preflight exact ordered payloads against one authoritative index. */
+  /** API v7: preflight exact ordered payloads against one authoritative index. */
   canApplyIdentityPlan?: (entries: Array<{
     operation: 'create';
     nextId: string;
@@ -128,7 +129,7 @@ export interface GcmNativeRecordsApi {
     updates: Array<Record<string, unknown>>;
     fileName?: string;
   }>, snapshotToken?: number) => Promise<boolean>;
-  /** API v6: exact payload plus ordered virtual path allocation, bound by the returned token. */
+  /** API v7: exact payload plus ordered virtual path allocation, bound by the returned token. */
   planIdentityChanges?: (entries: Array<{
     operation: 'create';
     nextId: string;
@@ -147,7 +148,7 @@ export interface GcmNativeRecordsApi {
     revision: number;
     entries: Array<{ operation: 'create' | 'reidentify'; nextId: string; expectedPath: string | null }>;
   } | null>;
-  /** API v6: applies one previously planned exact identity/property/path batch. */
+  /** API v7: applies one previously planned exact identity/property/path batch. */
   applyIdentityChanges?: (
     plannedBatch: {
       token: number;
@@ -176,9 +177,9 @@ export interface GcmNativeRecordsApi {
     failedIndex: number | null;
     error?: string;
   }>;
-  /** API v6: non-mutating authoritative ownership/reservation preflight. */
+  /** API v7: non-mutating authoritative ownership/reservation preflight. */
   canReidentify?: (reference: TFile | string, newId: string) => Promise<boolean>;
-  /** API v6: compare-and-swap the canonical identity without changing path/body/business fields. */
+  /** API v7: compare-and-swap the canonical identity without changing path/body/business fields. */
   reidentify?: (
     reference: TFile | string,
     newId: string,
@@ -374,12 +375,24 @@ export function buildCalendarExternalId(app: App | null | undefined, event: Exte
   return String(event.url || '').trim();
 }
 
+/** Physical note storage follows GCM's configured profile; the public envelope uses id. */
+export function getInternalIdPropertyKey(app: App | null | undefined): string {
+  const key = app ? getGcmApi(app)?.nativeRecords?.getStorageProfile?.()?.identityPropertyKey : undefined;
+  if (typeof key === "string" && key.trim()) return key.trim();
+  const plugins = (app as any)?.plugins;
+  const plugin = plugins?.getPlugin?.('tps-global-context-menu')
+    || plugins?.plugins?.['tps-global-context-menu'];
+  const configured = plugin?.settings?.nativeRecordIdentityPropertyKey;
+  return typeof configured === "string" && configured.trim() ? configured.trim() : "id";
+}
+
 export function ensureInternalIdInFrontmatter(app: App | null | undefined, frontmatter: Record<string, unknown>): string {
   const api = app ? getGcmApi(app) : null;
   if (typeof api?.identity?.ensureInternalIdInFrontmatter === 'function') {
     return api.identity.ensureInternalIdInFrontmatter(frontmatter);
   }
-  const existingKey = Object.keys(frontmatter || {}).find((key) => key.trim().toLowerCase() === 'tpsid' || key.trim().toLowerCase() === 'subitemid');
+  const identityKey = getInternalIdPropertyKey(app);
+  const existingKey = Object.keys(frontmatter || {}).find((key) => key.trim().toLowerCase() === identityKey.toLowerCase() || key.trim().toLowerCase() === 'subitemid');
   const existing = existingKey ? String(frontmatter[existingKey] ?? '').trim() : '';
   if (existing) return existing;
   const cryptoApi = (globalThis as any).crypto;
@@ -387,7 +400,7 @@ export function ensureInternalIdInFrontmatter(app: App | null | undefined, front
     ? cryptoApi.randomUUID()
     : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   const id = `item_${raw.replace(/[^a-zA-Z0-9_-]/g, '')}`;
-  frontmatter.tpsId = id;
+  frontmatter[identityKey] = id;
   return id;
 }
 

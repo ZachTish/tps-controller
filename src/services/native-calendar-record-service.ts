@@ -8,7 +8,7 @@ import type {
     NativeCalendarCancellationState,
     TPSControllerSettings,
 } from "../types";
-import { canAutomaticallyMutateViaGcm, getGcmApi } from "../tps-gcm-api";
+import { canAutomaticallyMutateViaGcm, getGcmApi, getInternalIdPropertyKey } from "../tps-gcm-api";
 import type { GcmNativeRecordHandle, GcmNativeRecordSnapshot, GcmNativeRecordsApi } from "../tps-gcm-api";
 import { normalizeCalendarUrl } from "../utils";
 import {
@@ -1396,14 +1396,14 @@ export class NativeCalendarRecordService {
     private requireApi(): GcmNativeRecordsApi {
         const api = getGcmApi(this.app)?.nativeRecords;
         if (!api
-            || Number(api.version) !== 6
+            || Number(api.version) !== 7
             || api.capabilities?.calendarTemplateRecords !== true
             || api.isEnabled?.() !== true
             || typeof api.inspect !== "function"
             || typeof api.snapshot !== "function"
             || typeof api.planIdentityChanges !== "function"
             || typeof api.applyIdentityChanges !== "function") {
-            throw new Error("Canonical calendar records require TPS GCM native-record mode, nativeRecords API v6, and calendarTemplateRecords support. Update TPS Global Context Menu first.");
+            throw new Error("Canonical calendar records require TPS GCM native-record mode, nativeRecords API v7, and calendarTemplateRecords support. Update TPS Global Context Menu first.");
         }
         return api;
     }
@@ -1465,7 +1465,9 @@ export class NativeCalendarRecordService {
             ? api.inspect(resolved)
             : null;
         const canonical = inspected?.frontmatter || resolved;
-        const id = String(inspected?.id || resolved?.tpsId || "").trim();
+        const physicalIdentityKey = getInternalIdPropertyKey(this.app).toLowerCase();
+        const actualIdentityKey = Object.keys(resolved || {}).find(key => key.toLowerCase() === physicalIdentityKey);
+        const id = String(inspected?.id || (actualIdentityKey ? resolved?.[actualIdentityKey] : "") || "").trim();
         if (!id) return;
         if (!parseCalendarRecordId(id)
             && (String(inspected?.kind || resolved?.kind || "") !== "calendar-event"
