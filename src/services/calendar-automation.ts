@@ -96,8 +96,17 @@ export class CalendarAutomationService {
     async fulfillStartupSync(): Promise<void> {
         if (this.stopped || !this.initialSyncPending) return;
         const lifecycle = this.lifecycleGeneration;
-        const outcome = await this.runSync();
-        if (lifecycle === this.lifecycleGeneration && outcome !== "not-ready") this.initialSyncPending = false;
+        let outcome: CalendarSyncOutcome | undefined;
+        try {
+            outcome = await this.runSync();
+        } finally {
+            // A real attempt consumes startup even on failure; the configured
+            // interval and manual commands own later attempts. Readiness skips
+            // and an old lifecycle's joined flight have not attempted this start.
+            if (lifecycle === this.lifecycleGeneration && outcome !== "not-ready" && outcome !== "stopped") {
+                this.initialSyncPending = false;
+            }
+        }
     }
 
     runSync(force = false, options: { backfillPastEvents?: boolean } = {}): Promise<CalendarSyncOutcome> {

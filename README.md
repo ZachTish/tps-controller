@@ -1,5 +1,42 @@
 # TPS Controller
 
+## 3.3.1 — Bound failed startup calendar work
+
+A failed startup calendar attempt now consumes that startup obligation. Previously
+a rejection left it pending, so the existing four-second sync-request poll ran the
+same reconciliation again even when there was no request. The configured calendar
+interval and explicit sync commands still run normally, and failed explicit
+requests retain their existing acknowledgement and retry contract. Metadata or
+Sync readiness skips remain pending. If a restart joins an old stopped flight,
+the new startup remains pending until that flight drains; stale callbacks cannot
+consume a newer startup. Errors remain errors and do not emit false completion.
+
+This patch changes only the existing startup flag's settlement. It adds no timer,
+cache, retry policy, repair, note mutation or setting. Controller's settings hub,
+defaults, mobile behavior and minimum Obsidian version (1.12.3) are unchanged.
+
+The production diagnosis found core indexing complete, no missing Markdown
+metadata, no mounted Finance consumer and no Finance reads/model builds during a
+20-second settled observation. Controller did repeatedly reject calendar sync for
+a record conflict. Those errors occur after the metadata readiness gate; this fix
+is not evidence that they caused the original indexing delay. The installed
+test-vault reproduction uses the real automation class with an isolated synthetic
+calendar source and workspace, all eight active TPS plugins enabled, and no
+external feed or note writes. Across five calls through the actual installed
+request-fulfillment owner, physical attempts fall from five to one; the other four
+calls reach the request store normally. A subsequent manual sync completes and
+100 further polls perform no extra startup attempts or recurrence work. These are
+operation counts, not cold-start speed measurements; DevTools is foreground and
+the underlying document is visible but unfocused. Focused regressions additionally
+cover the configured interval, readiness, overlap and unload/restart. The full
+suite passes 806 checks with three existing optional skips; TypeScript and the
+separate production build pass. The final 3.3.1 runtime is reloaded and core
+metadata remains clean. `data.json` is byte-identical; the existing desktop replica
+startup route updates its calendar request during reload. No production reload or
+deployment was performed. Artifact hashes are in the public release notes. Test
+deployment is separate from the user's production BRAT pull. Physical mobile and
+the original production cold-indexing delay remain unmeasured.
+
 ## 3.3.0 — Choose reminder notes with a saved Base view
 
 **Reminder rules → choose a reminder → Choose notes → Choose notes using** now

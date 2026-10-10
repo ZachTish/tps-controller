@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import test from "node:test";
 import ts from "typescript";
 
@@ -8,10 +9,12 @@ const COMPLETED = "tps:calendar-sync-completed";
 
 function deferred() {
   let resolve;
-  const promise = new Promise((next) => {
+  let reject;
+  const promise = new Promise((next, fail) => {
     resolve = next;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 async function flushMicrotasks(rounds = 12) {
@@ -19,7 +22,9 @@ async function flushMicrotasks(rounds = 12) {
 }
 
 function loadCalendarAutomation(logs, notices) {
-  const source = readFileSync(new URL("../src/services/calendar-automation.ts", import.meta.url), "utf8");
+  const source = process.env.TPS_CALENDAR_AUTOMATION_BASELINE_REF
+    ? execFileSync("git", ["show", `${process.env.TPS_CALENDAR_AUTOMATION_BASELINE_REF}:src/services/calendar-automation.ts`], { encoding: "utf8" })
+    : readFileSync(new URL("../src/services/calendar-automation.ts", import.meta.url), "utf8");
   const compiled = ts.transpileModule(source, {
     compilerOptions: {
       module: ts.ModuleKind.CommonJS,
@@ -33,6 +38,9 @@ function loadCalendarAutomation(logs, notices) {
     },
     flowWarn(scope, event, data = {}) {
       logs.push({ level: "warn", scope, event, data });
+    },
+    flowError(scope, event, error, data = {}) {
+      logs.push({ level: "error", scope, event, error, data });
     },
     async timeAsync(scope, event, data, action) {
       logs.push({ level: "time", scope, event, data });
@@ -430,4 +438,103 @@ test('existing startup obligation survives readiness skips and stale layout call
     await h.service.stop(); h.fireLayout(); await flushMicrotasks();
     assert.equal(h.nativeSyncCalls.length,1);
   } finally {globalThis.window=priorWindow;}
+});
+
+async function withCalendarIntervals(run) {
+  const priorWindow = globalThis.window;
+  const callbacks = new Map();
+  let nextId = 0;
+  globalThis.window = {
+    setInterval(callback) { const id = ++nextId; callbacks.set(id, callback); return id; },
+    clearInterval(id) { callbacks.delete(id); },
+  };
+  try { await run(callbacks); }
+  finally { globalThis.window = priorWindow; }
+}
+
+test('a real startup failure is attempted once across 100 request polls without disabling manual or configured sync', async () => {
+  await withCalendarIntervals(async (intervals) => {
+    const failure = new Error('duplicate native calendar identity');
+    let shouldFail = true;
+    let recurrenceCalls = 0;
+    const h = createHarness({
+      async runNativeSync() { if (shouldFail) throw failure; },
+      async runCompletion() { recurrenceCalls += 1; },
+    });
+    h.service.start();
+    try {
+      await assert.rejects(h.service.fulfillStartupSync(), error => error === failure);
+      for (let poll = 0; poll < 100; poll += 1) await h.service.fulfillStartupSync().catch(() => undefined);
+      assert.equal(h.nativeSyncCalls.length, 1, 'request polling must not replay a failed startup run');
+      assert.equal(recurrenceCalls, 0);
+      assert.equal(eventCount(h.events, COMPLETED), 0, 'failure must not be reported as successful');
+      assert.equal(intervals.size, 1, 'no new retry timer is created');
+
+      shouldFail = false;
+      assert.equal(await h.service.runSync(true), 'completed');
+      assert.equal(h.nativeSyncCalls.length, 2, 'explicit sync still runs after the startup failure');
+      const scheduledTick = [...intervals.values()][0];
+      scheduledTick();
+      await flushMicrotasks(30);
+      assert.equal(h.nativeSyncCalls.length, 3, 'the existing configured interval still performs sync');
+      assert.equal(recurrenceCalls, 2);
+      assert.equal(eventCount(h.events, COMPLETED), 2);
+      for (let poll = 0; poll < 100; poll += 1) await h.service.fulfillStartupSync();
+      assert.equal(h.nativeSyncCalls.length, 3, 'startup polling remains idle after later normal syncs');
+    } finally { await h.service.stop(); }
+  });
+});
+
+test('restart preserves its startup obligation when it joins an older stopped flight', async () => {
+  await withCalendarIntervals(async () => {
+    const oldFlight = deferred();
+    let physicalRuns = 0;
+    const h = createHarness({
+      async runNativeSync() { physicalRuns += 1; if (physicalRuns === 1) await oldFlight.promise; },
+    });
+    h.service.start();
+    const oldStartup = h.service.fulfillStartupSync();
+    await flushMicrotasks();
+    assert.equal(physicalRuns, 1);
+    void h.service.stop();
+    h.service.start();
+    const joinedNewStartup = h.service.fulfillStartupSync();
+    await flushMicrotasks();
+    assert.equal(physicalRuns, 1, 'restart joins the draining old flight rather than overlapping it');
+    oldFlight.resolve();
+    await Promise.all([oldStartup, joinedNewStartup]);
+    assert.equal(eventCount(h.events, COMPLETED), 0, 'the stopped flight cannot complete the new startup');
+    try {
+      await h.service.fulfillStartupSync();
+      assert.equal(physicalRuns, 2, 'the current generation runs after the old flight drains');
+      assert.equal(eventCount(h.events, COMPLETED), 1);
+      for (let poll = 0; poll < 100; poll += 1) await h.service.fulfillStartupSync();
+      assert.equal(physicalRuns, 2);
+    } finally { await h.service.stop(); }
+  });
+});
+
+test('a stale native sync rejection cannot consume a newer startup generation', async () => {
+  await withCalendarIntervals(async () => {
+    const oldFlight = deferred();
+    let physicalRuns = 0;
+    const h = createHarness({
+      async runNativeSync() { physicalRuns += 1; if (physicalRuns === 1) await oldFlight.promise; },
+    });
+    h.service.start();
+    const staleStartup = h.service.fulfillStartupSync();
+    await flushMicrotasks();
+    void h.service.stop();
+    h.service.start();
+    oldFlight.reject(new Error('old lifecycle failed while draining'));
+    // executeSync suppresses a stale owner's failure into the stopped outcome.
+    await staleStartup;
+    try {
+      await h.service.fulfillStartupSync();
+      assert.equal(physicalRuns, 2, 'the stale failure leaves the new startup obligation pending');
+      assert.equal(eventCount(h.events, COMPLETED), 1);
+      for (let poll = 0; poll < 100; poll += 1) await h.service.fulfillStartupSync();
+      assert.equal(physicalRuns, 2);
+    } finally { await h.service.stop(); }
+  });
 });
