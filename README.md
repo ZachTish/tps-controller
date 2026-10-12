@@ -1,5 +1,26 @@
 # TPS Controller
 
+## 4.0.1 — Avoid calendar timestamp-only writes
+
+Calendar refreshes no longer rewrite an otherwise unchanged event solely because
+the feed regenerated DTSTAMP. Sequence, LAST-MODIFIED, schedule, status and other
+authored event changes still persist; the last meaningful revision remains the
+stale-content guard. This reduces note uploads and downstream recurrence work
+without adding a cache, timer or writer. Keys and source settings remain configurable.
+No settings or notes are migrated automatically. Minimum Obsidian remains 1.12.3.
+
+Regression coverage repeats twenty timestamp-only refreshes with zero mutation
+entries or recurrence paths, then verifies a real title change and rejection of
+an older payload. Separate checks preserve sequence and LAST-MODIFIED changes.
+Validation: 158 focused assertions and 812 full-suite tests pass (three existing
+optional skips). The separate production build deploys to the test vault;
+explicit plugin unload, manifest refresh and reload verified 4.0.1. Three refreshes
+through the installed Controller with a synthetic feed and scoped record snapshot/
+path planner produced zero writes and preserved the fixture body. The complete
+installed GCM snapshot was blocked by a pre-existing malformed archived QA note,
+so that installed check isolates snapshot admission and does not establish full
+vault integration or multi-device acceptance. Outbound test automation stayed off.
+
 ## 4.0.0 — Shared record identity named id
 
 Controller now uses `id` for the canonical record envelope and for standalone

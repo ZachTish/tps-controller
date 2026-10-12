@@ -3499,3 +3499,30 @@ for (const variant of ['active', 'cancelled', 'past-timing']) {
     assert.equal(h.files.size, 1);
   }));
 }
+
+test('regenerated feed timestamps alone never enqueue note writes or recurrence work', async () => {
+  const original = event({ sourceRevision: [4, 0, 100], sourceRevisionOrigin: 'master' });
+  const h = harness([original]);
+  await h.service.sync([calendar], '', true, false);
+  const writes = h.mutationLog.length;
+  for (let timestamp = 101; timestamp < 121; timestamp++) {
+    h.setEvents([{ ...original, sourceRevision: [4, 0, timestamp] }]);
+    const result = await h.service.sync([calendar], '', true, false);
+    assert.equal(result.updated, 0);
+    assert.deepEqual(result.appliedPaths, []);
+  }
+  assert.equal(h.mutationLog.length, writes);
+  h.setEvents([{ ...original, title: 'Changed meeting', sourceRevision: [4, 0, 121] }]);
+  assert.equal((await h.service.sync([calendar], '', true, false)).updated, 1);
+  const afterChange = h.mutationLog.length;
+  h.setEvents([{ ...original, sourceRevision: [4, 0, 120] }]);
+  await h.service.sync([calendar], '', true, false);
+  assert.equal(h.mutationLog.length, afterChange, 'older content cannot undo the meaningful change');
+});
+for (const revision of [[5, 0, 101], [4, 50, 101]]) test('persist meaningful sequence or modification revision '+revision, async () => {
+  const original = event({ sourceRevision: [4, 0, 100], sourceRevisionOrigin: 'master' });
+  const h = harness([original]);
+  await h.service.sync([calendar], '', true, false);
+  h.setEvents([{ ...original, sourceRevision: revision }]);
+  assert.equal((await h.service.sync([calendar], '', true, false)).updated, 1);
+});

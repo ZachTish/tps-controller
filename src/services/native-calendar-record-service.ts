@@ -969,7 +969,7 @@ export class NativeCalendarRecordService {
                     if (projection.postApplyCancellationStateUpdate !== undefined) {
                         postApplyCancellationStateUpdatesById.set(occurrence.id, projection.postApplyCancellationStateUpdate);
                     }
-                    const eventUpdates = clonePropertyPayload(changedProperties(projected.frontmatter, properties));
+                    const eventUpdates = clonePropertyPayload(calendarEventChanges(projected.frontmatter, properties));
                     occurrence.plannedCreateProperties = undefined;
                     occurrence.plannedEventUpdates = eventUpdates;
                     occurrence.plannedSourcePath = source.file.path;
@@ -1850,6 +1850,21 @@ function wikiLinkTarget(value: string): string | null {
         if (precedingSlashes % 2 === 0) return body.slice(0, index);
     }
     return body;
+}
+
+/** A regenerated feed DTSTAMP is not an authored event change. Keep the last
+ * meaningful stamp so stale content predating that change is still rejected. */
+function calendarEventChanges(before: Record<string, unknown>, after: Record<string, unknown>): Record<string, unknown> {
+    const changed = changedProperties(before, after);
+    if (Object.keys(changed).length !== 1 || !changed[CALENDAR_SYNC_PROPERTY]) return changed;
+    const previous = readCalendarSyncStamp(before);
+    const next = readCalendarSyncStamp(after);
+    if (!previous?.revision || !next?.revision) return changed;
+    const withoutStampTime = (stamp: CalendarSyncStamp) => ({ ...stamp, revision: stamp.revision?.slice(0, 2) });
+    if (JSON.stringify(withoutStampTime(previous)) === JSON.stringify(withoutStampTime(next))) {
+        delete changed[CALENDAR_SYNC_PROPERTY];
+    }
+    return changed;
 }
 
 function changedProperties(before: Record<string, unknown>, after: Record<string, unknown>): Record<string, unknown> {
