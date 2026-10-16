@@ -223,11 +223,6 @@ export interface GcmDailyNoteTaskSchedulePolicy {
   inheritUnscheduled: boolean;
 }
 
-export interface GcmDailyNoteEnsureAttempt {
-  available: boolean;
-  file: TFile | null;
-}
-
 export interface GcmTaskMoveAttempt {
   available: boolean;
   result: GcmTaskMutationResult | null;
@@ -288,24 +283,6 @@ export function prepareInstanceSourceViaGcm(app: App, source: string): string | 
 function getCompatibleGcmTemplatesApi(app: App): GcmTemplatesApi | null {
   const templates = getGcmApi(app)?.templates;
   return Number(templates?.version) >= 1 ? templates ?? null : null;
-}
-
-/**
- * Ask GCM's canonical daily-note service to resolve or create a date.
- * `available: false` means Controller may use its standalone fallback.
- * Errors and available-but-null results remain distinct so callers can fail
- * closed instead of creating a competing, incomplete daily note.
- */
-export async function ensureDailyNoteForIsoDateViaGcm(
-  app: App,
-  isoDate: string,
-): Promise<GcmDailyNoteEnsureAttempt> {
-  const ensureForIsoDate = getGcmApi(app)?.dailyNotes?.ensureForIsoDate;
-  if (typeof ensureForIsoDate !== 'function') {
-    return { available: false, file: null };
-  }
-  const file = await ensureForIsoDate(String(isoDate || '').trim());
-  return { available: true, file: file ?? null };
 }
 
 export function getDailyNoteTaskSchedulePolicyViaGcm(

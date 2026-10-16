@@ -2,7 +2,6 @@ import { App, ItemView, WorkspaceLeaf, TFile, IconName, MarkdownRenderer, Menu, 
 import type { OverdueItem } from '../types';
 import { SnoozeModal } from '../modals/snooze-modal';
 import * as logger from '../logger';
-import { TPS_EVENTS, TPS_LEGACY_EVENTS } from '../tps-contracts';
 import { emitFilesUpdated } from '../tps-gcm-api';
 import { buildNotificationItemsSignature } from './notification-view-signature';
 import { getReminderMatchingPolicy } from '../services/reminder-base-view-service';
@@ -120,53 +119,7 @@ export class NotificationView extends ItemView {
             await this.refresh();
         });
 
-        this.registerEvent(
-            this.app.metadataCache.on('changed', (file) => {
-                if (!(file instanceof TFile)) return;
-                if (this.items.some((item) => item.file.path === file.path)) {
-                    this.refreshDebounced();
-                }
-            })
-        );
-
-        this.registerEvent(
-            this.app.vault.on('delete', (file) => {
-                if (!(file instanceof TFile)) return;
-                if (this.items.some((item) => item.file.path === file.path)) {
-                    this.refreshDebounced();
-                }
-            })
-        );
-
-        this.registerEvent(
-            this.app.vault.on('rename', (file) => {
-                if (!(file instanceof TFile)) return;
-                this.refreshDebounced();
-            })
-        );
-
-        this.registerEvent(
-            (this.app.workspace as any).on(TPS_LEGACY_EVENTS.GCM_FILES_UPDATED, (paths: string[] | undefined) => {
-                if (!Array.isArray(paths) || paths.length === 0) return;
-                const pathSet = new Set(paths);
-                if (this.items.some((item) => pathSet.has(item.file.path))) {
-                    this.refreshDebounced();
-                }
-            })
-        );
-        this.registerEvent(
-            (this.app.workspace as any).on(TPS_EVENTS.FILES_UPDATED, (payload: { paths?: string[] } | string[] | undefined) => {
-                const paths = Array.isArray(payload) ? payload : payload?.paths;
-                if (!Array.isArray(paths) || paths.length === 0) return;
-                const pathSet = new Set(paths);
-                if (this.items.some((item) => pathSet.has(item.file.path))) {
-                    this.refreshDebounced();
-                }
-            })
-        );
-
         await this.refresh();
-        if (!this.viewClosed) this.registerInterval(window.setInterval(() => this.refreshDebounced(), 30000));
     }
 
     async onClose(): Promise<void> {

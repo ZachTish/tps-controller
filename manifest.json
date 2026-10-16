@@ -1,10 +1,10 @@
 {
-    "id": "tps-controller",
-    "name": "TPS Controller",
-    "version": "4.0.1",
-    "minAppVersion": "1.12.3",
-    "description": "Centralized controller management for TPS plugins. Defines device roles (Controller/Replica).",
-    "author": "Zach Tisherman",
-    "authorUrl": "https://github.com/StartAutomating",
-    "isDesktopOnly": false
+  "id": "tps-controller",
+  "name": "TPS Controller",
+  "version": "5.0.0",
+  "minAppVersion": "1.12.3",
+  "description": "Explicit note rules, notification review, and manual archive tools for TPS.",
+  "author": "Zach Tisherman",
+  "authorUrl": "https://github.com/StartAutomating",
+  "isDesktopOnly": false
 }

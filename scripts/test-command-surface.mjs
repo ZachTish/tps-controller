@@ -13,14 +13,6 @@ const loggerSource = await readFile(
   fileURLToPath(new URL("../src/logger.ts", import.meta.url)),
   "utf8",
 );
-const calendarAutomationSource = await readFile(
-  fileURLToPath(new URL("../src/services/calendar-automation.ts", import.meta.url)),
-  "utf8",
-);
-const autoCreateSource = await readFile(
-  fileURLToPath(new URL("../src/services/auto-create-service.ts", import.meta.url)),
-  "utf8",
-);
 const twoStageArchiveSource = await readFile(
   fileURLToPath(new URL("../src/services/two-stage-archive-service.ts", import.meta.url)),
   "utf8",
@@ -29,44 +21,12 @@ const overdueServiceSource = await readFile(
   fileURLToPath(new URL("../src/services/overdue-service.ts", import.meta.url)),
   "utf8",
 );
-const externalEventModalSource = await readFile(
-  fileURLToPath(new URL("../src/services/external-event-modal.ts", import.meta.url)),
-  "utf8",
-);
-const reminderEngineSource = await readFile(
-  fileURLToPath(new URL("../src/services/reminder-engine.ts", import.meta.url)),
-  "utf8",
-);
-const syncConflictWatcherSource = await readFile(
-  fileURLToPath(new URL("../src/services/sync-conflict-watcher.ts", import.meta.url)),
-  "utf8",
-);
-const syncRequestServiceSource = await readFile(
-  fileURLToPath(new URL("../src/services/sync-request-service.ts", import.meta.url)),
-  "utf8",
-);
-const externalCalendarServiceSource = await readFile(
-  fileURLToPath(new URL("../src/services/external-calendar-service.ts", import.meta.url)),
-  "utf8",
-);
-const iCalParserServiceSource = await readFile(
-  fileURLToPath(new URL("../src/services/ical-parser-service.ts", import.meta.url)),
-  "utf8",
-);
 const settingsTabSource = await readFile(
   fileURLToPath(new URL("../src/settings-tab.ts", import.meta.url)),
   "utf8",
 );
 const settingsStylesSource = await readFile(
   fileURLToPath(new URL("../styles-ui.css", import.meta.url)),
-  "utf8",
-);
-const coreTypeGuardsSource = await readFile(
-  fileURLToPath(new URL("../src/core/type-guards.ts", import.meta.url)),
-  "utf8",
-);
-const controllerPeriodicReloadSource = await readFile(
-  fileURLToPath(new URL("../src/services/controller-periodic-reload-service.ts", import.meta.url)),
   "utf8",
 );
 const settingsPersistenceBundle = await build({
@@ -79,196 +39,8 @@ const settingsPersistenceBundle = await build({
 });
 const {
   CoalescedSettingsSaveQueue,
-  countExternalCalendarsMissingId,
-  fillMissingLegacyPluginSettings,
-  legacyCalendarConfigIdForUrl,
   mergeSettingsChangeSet,
-  normalizeExternalCalendarsInPlace,
-  normalizeCalendarImportHorizonDays,
-  normalizeNativeCalendarCancellationState,
 } = await import(`data:text/javascript;base64,${Buffer.from(settingsPersistenceBundle.outputFiles[0].text).toString("base64")}`);
-
-test("private native calendar cancellation state keeps only valid id-keyed entries", () => {
-  const canonicalId = `calendar:v1:${'A'.repeat(16)}:${'B'.repeat(27)}`;
-  assert.deepEqual(normalizeNativeCalendarCancellationState(null), {});
-  assert.deepEqual(normalizeNativeCalendarCancellationState({
-    [` ${canonicalId} `]: {
-      appliedStatus: "called-off",
-      previousStatusPresent: true,
-      previousStatus: "complete",
-      canRestore: true,
-      pendingApplication: true,
-      ignored: "value",
-    },
-    malformed: { appliedStatus: 42 },
-    blank: { appliedStatus: "" },
-  }), {
-    [canonicalId]: {
-      appliedStatus: "called-off",
-      previousStatusPresent: true,
-      previousStatus: "complete",
-      canRestore: true,
-      pendingApplication: true,
-    },
-  });
-});
-
-test("private cancellation label replacement survives settings normalization without copying malformed intent", () => {
-  const id = `calendar:v1:${'A'.repeat(16)}:${'B'.repeat(27)}`;
-  const state = {
-    appliedStatus: 'cancelled', previousStatusPresent: true,
-    previousStatus: 'complete', canRestore: true, pendingApplication: false,
-    pendingReplacementStatus: 'canceled',
-  };
-  assert.deepEqual(normalizeNativeCalendarCancellationState({ [id]: state }), { [id]: state });
-  assert.deepEqual(normalizeNativeCalendarCancellationState({ [id]: {
-    ...state, canRestore: false,
-  } }), { [id]: {
-    appliedStatus: 'cancelled', previousStatusPresent: true,
-    previousStatus: 'complete', canRestore: false, pendingApplication: false,
-  } });
-});
-
-test("external calendar normalization backfills one stable unique ID without replacing editor objects", () => {
-  const missing = { url: "https://calendar.example/legacy.ics", enabled: true };
-  const duplicateUrl = { url: "https://calendar.example/legacy.ics", enabled: false };
-  const calendars = [missing, duplicateUrl];
-  assert.equal(countExternalCalendarsMissingId(calendars), 2);
-  const normalized = normalizeExternalCalendarsInPlace(calendars, (path) => path);
-  assert.strictEqual(normalized[0], missing);
-  assert.strictEqual(normalized[1], duplicateUrl);
-  assert.equal(missing.id, legacyCalendarConfigIdForUrl(missing.url));
-  assert.equal(duplicateUrl.id, `${legacyCalendarConfigIdForUrl(duplicateUrl.url)}-2`);
-  assert.notEqual(missing.id, duplicateUrl.id);
-  assert.equal(countExternalCalendarsMissingId(calendars), 0);
-  const firstIds = calendars.map((calendar) => calendar.id);
-  normalizeExternalCalendarsInPlace(calendars, (path) => path);
-  assert.deepEqual(calendars.map((calendar) => calendar.id), firstIds);
-});
-
-test("external calendar normalization preserves live settings-editor references across every keystroke", () => {
-  const capturedCalendar = { id: "calendar-a", url: "", enabled: true };
-  const capturedCalendars = [capturedCalendar];
-
-  for (const value of ["h", "ht", "htt", "http", "https://calendar.example/feed.ics"]) {
-    capturedCalendar.url = value;
-    const normalized = normalizeExternalCalendarsInPlace(capturedCalendars, (path) => path.trim());
-    assert.strictEqual(normalized, capturedCalendars);
-    assert.strictEqual(normalized[0], capturedCalendar);
-    assert.equal(normalized[0].url, value);
-  }
-  assert.equal(capturedCalendar.autoCreateTaskNoteStrategy, "occurrence-day");
-  assert.equal(capturedCalendar.autoCreateTaskNoteFolder, "Calendar Events");
-});
-
-test("external calendar task-note strategy normalization preserves supported series choices", () => {
-  const calendars = [{
-    id: "calendar-series",
-    url: "feed.ics",
-    autoCreateMode: "task",
-    autoCreateTaskNoteStrategy: "series",
-    autoCreateTaskNoteFolder: "External Events/Linked",
-  }];
-  normalizeExternalCalendarsInPlace(calendars, (path) => path);
-  assert.equal(calendars[0].autoCreateMode, "note", "old task output must never remain active after settings load");
-  assert.equal(calendars[0].autoCreateTaskNoteStrategy, "series");
-  assert.equal(calendars[0].autoCreateTaskNoteFolder, "External Events/Linked");
-});
-
-test("recurring import mode is per feed, keeps legacy defaults absent, and preserves editor references", () => {
-  const legacy = { id: "legacy", url: "legacy.ics" };
-  const next = { id: "next", url: "next.ics", recurringImportMode: "next" };
-  const invalid = { id: "invalid", url: "invalid.ics", recurringImportMode: "unknown" };
-  const rows = [legacy, next, invalid];
-  assert.strictEqual(normalizeExternalCalendarsInPlace(rows, p => p), rows);
-  assert.strictEqual(rows[1], next);
-  assert.equal(Object.hasOwn(legacy, "recurringImportMode"), false);
-  assert.equal(next.recurringImportMode, "next");
-  assert.equal(invalid.recurringImportMode, "all");
-  next.recurringImportMode = "all";
-  normalizeExternalCalendarsInPlace(rows, p => p);
-  assert.equal(next.recurringImportMode, "all");
-});
-
-test("calendar horizon rejects invalid ranges and retains configurable positive integer days", () => {
-  for (const value of [undefined, null, "90", 0, -1, 1.5, NaN, Infinity, 3661]) {
-    assert.equal(normalizeCalendarImportHorizonDays(value), 60);
-  }
-  for (const value of [1, 60, 90, 366, 3660]) {
-    assert.equal(normalizeCalendarImportHorizonDays(value), value);
-  }
-});
-
-test("recurrence settings reuse Calendar rules and native controls without hiding disabled feed configuration", () => {
-  const editor = settingsTabSource.slice(settingsTabSource.indexOf("private renderExternalCalendars"), settingsTabSource.indexOf("private buildCalendarDisplayName"));
-  assert.match(editor, /setName\("Recurring event notes"\)/);
-  assert.match(editor, /addOption\("all", "All occurrences in import window"\)/);
-  assert.match(editor, /addOption\("next", "Current \+ next occurrence"\)/);
-  assert.match(editor, /calendar\.recurringImportMode = value === "next" \? "next" : "all"/);
-  assert.match(settingsTabSource, /calendar\.recurringImportMode === 'next' \? ' · Current \+ next'/);
-  assert.match(settingsTabSource, /setName\('Import horizon \(days\)'\)/);
-  assert.match(settingsTabSource, /text\.inputEl\.type = 'number'/);
-  assert.match(settingsTabSource, /days < 1 \|\| days > 3660\) return/);
-  assert.doesNotMatch(editor, /if \(calendar\.autoCreateEnabled === false\) return/);
-});
-
-test("external calendar normalization preserves settings-editor reorder and delete operations", () => {
-  const first = { id: "first", url: "first.ics" };
-  const second = { id: "second", url: "second.ics" };
-  const third = { id: "third", url: "third.ics" };
-  const capturedCalendars = [first, second, third];
-
-  [capturedCalendars[0], capturedCalendars[2]] = [capturedCalendars[2], capturedCalendars[0]];
-  normalizeExternalCalendarsInPlace(capturedCalendars, (path) => path);
-  assert.deepEqual(capturedCalendars.map((calendar) => calendar.id), ["third", "second", "first"]);
-  assert.strictEqual(capturedCalendars[0], third);
-
-  capturedCalendars.splice(1, 1);
-  normalizeExternalCalendarsInPlace(capturedCalendars, (path) => path);
-  assert.deepEqual(capturedCalendars.map((calendar) => calendar.id), ["third", "first"]);
-  assert.strictEqual(capturedCalendars[1], first);
-});
-
-test("legacy plugin migration fills only keys absent from the raw Controller payload", () => {
-  const settings = {
-    pollMinutes: 0,
-    enableLogging: false,
-    globalIgnoreTags: [],
-    archiveFolder: "",
-    externalCalendars: [],
-  };
-  const rawControllerSettings = {
-    pollMinutes: 0,
-    enableLogging: false,
-    globalIgnoreTags: [],
-    archiveFolder: "",
-    externalCalendars: [],
-  };
-  const migratedFields = fillMissingLegacyPluginSettings(
-    settings,
-    rawControllerSettings,
-    {
-      pollMinutes: 15,
-      enableLogging: true,
-      ignoreTags: ["legacy-tag"],
-      snoozeProperty: "legacySnooze",
-    },
-    {
-      archiveFolder: "Legacy Archive",
-      externalCalendars: [{ id: "legacy" }],
-      uidKey: "legacyUid",
-    },
-  );
-
-  assert.equal(migratedFields, 2);
-  assert.equal(settings.pollMinutes, 0);
-  assert.equal(settings.enableLogging, false);
-  assert.deepEqual(settings.globalIgnoreTags, []);
-  assert.equal(settings.archiveFolder, "");
-  assert.deepEqual(settings.externalCalendars, []);
-  assert.equal(settings.snoozeProperty, "legacySnooze");
-  assert.equal(settings.uidKey, "legacyUid");
-});
 
 test("Controller settings persistence changes only local keys in the newest payload", () => {
   const merged = mergeSettingsChangeSet(
@@ -415,158 +187,23 @@ test("a Controller request queued at drain completion starts a new durable drain
 test("Controller settings integration awaits saves and unload only drains requested writes", () => {
   const unloadSource = mainSource.slice(
     mainSource.indexOf("async onunload()"),
-    mainSource.indexOf("// Settings"),
+    mainSource.indexOf("async loadSettings()"),
   );
-  assert.match(mainSource, /normalizeExternalCalendarsInPlace\(/);
-  assert.match(mainSource, /migrateSettingsFromPlugins\(this\.app, this\.settings, data,/);
+  assert.doesNotMatch(mainSource, /normalizeExternalCalendarsInPlace\(/);
+  assert.doesNotMatch(mainSource, /migrateSettingsFromPlugins/);
   assert.match(unloadSource, /settingsSaveQueue\.waitForIdle\(\)/);
   assert.doesNotMatch(unloadSource, /this\.saveSettings\(\)/);
   assert.doesNotMatch(settingsTabSource, /\bdebouncedSave\b/);
   assert.doesNotMatch(settingsTabSource, /import\s*\{[^}]*\bdebounce\b/);
 });
-
-test("Controller settings use one routed page with an explicit six-destination hub", () => {
-  const displaySource = settingsTabSource.slice(
-    settingsTabSource.indexOf("display(): void"),
-    settingsTabSource.indexOf("// Helpers"),
-  );
-  const reminderPageSource = settingsTabSource.slice(
-    settingsTabSource.indexOf("private renderReminderSettingsPage"),
-    settingsTabSource.indexOf("private createDefaultReminder"),
-  );
-  const calendarEditorStart = settingsTabSource.indexOf("private renderExternalCalendars");
-  const calendarEditorSource = settingsTabSource.slice(
-    calendarEditorStart,
-    settingsTabSource.indexOf("renderSnoozeOptions(container", calendarEditorStart),
-  );
-
-  assert.match(settingsTabSource, /private activePage: ControllerSettingsPage = 'overview'/);
-  assert.match(settingsTabSource, /private activeAutomation: ControllerAutomationPage = 'archive'/);
-  assert.match(settingsTabSource, /Choose what to configure/);
-  assert.match(settingsTabSource, /setAttr\('aria-pressed', String\(this\.activePage === destination\.id\)\)/);
-  for (const destination of ["Overview", "Connections", "Calendar rules", "Note rules", "Reminder rules", "Automations", "Advanced"]) {
-    assert.match(settingsTabSource, new RegExp(`label: '${destination}'`));
-  }
-  assert.equal((settingsTabSource.match(/\{ id: '(?:overview|connections|calendar|note-rules|reminders|automations|advanced)'/g) || []).length, 7);
-  assert.equal((displaySource.match(/createEl\(['"]details['"]/g) || []).length, 1);
-  assert.match(settingsTabSource, /createEl\('details', \{ cls: 'tps-controller-reminder-rule' \}\)/);
-  assert.match(settingsTabSource, /private navigateToPage[\s\S]*heading\?\.focus\(\{ preventScroll: false \}\)/);
-  assert.match(settingsTabSource, /private redisplayPreservingScroll\(focusSelector\?: string\)[\s\S]*this\.containerEl\.scrollTop = scrollTop[\s\S]*focus\(\{ preventScroll: true \}\)/);
-
-  for (const shortcut of ["Open calendar rules", "Open reminder rules", "Open automations"]) {
-    assert.match(settingsTabSource, new RegExp(`'${shortcut}'`));
-  }
-
-  assert.ok(
-    displaySource.indexOf(".setName('Calendar actions')") < displaySource.indexOf("this.renderExternalCalendars(calendarsContainer)"),
-    "calendar actions should render before feed cards",
-  );
-  assert.match(calendarEditorSource, /this\.selectedCalendarId !== calendar\.id\) return/);
-  assert.match(calendarEditorSource, /toggle\.setAttr\('aria-label', `Enable \$\{this\.buildCalendarDisplayName/);
-  assert.match(calendarEditorSource, /configureBtn\.setAttr\('aria-expanded'/);
-  assert.match(calendarEditorSource, /configureBtn\.setAttr\('aria-controls', editorId\)/);
-  assert.match(calendarEditorSource, /configureBtn\.dataset\.calendarAction = 'configure'/);
-  assert.match(calendarEditorSource, /editor\.id = editorId/);
-  assert.doesNotMatch(calendarEditorSource, /dataset\.calendarAction = 'create-mode'/);
-  assert.match(calendarEditorSource, /focusCalendarControl\(container, calendarId, 'configure'\)/);
-  assert.doesNotMatch(calendarEditorSource, /\.setName\("Create as"\)/);
-  assert.doesNotMatch(displaySource, /\.setName\('Calendar storage'\)/);
-  assert.doesNotMatch(settingsTabSource, /\.setName\('Inline task reminders'\)/);
-  assert.doesNotMatch(settingsTabSource, /\.setName\('Ignore Checkbox States'\)/);
-  assert.doesNotMatch(settingsTabSource, /\.setName\('Required Checkbox States'\)/);
-  assert.match(calendarEditorSource, /nextCalendarId[\s\S]*focusCalendarControl\(container, nextCalendarId, 'configure'\)/);
-  assert.doesNotMatch(calendarEditorSource, /\.setName\("Task destination"\)/);
-  assert.match(calendarEditorSource, /new Setting\(acContent\)\s*\.setName\("Type Folder"\)/);
-  assert.match(calendarEditorSource, /new Setting\(acContent\)\s*\.setName\("Template"\)/);
-
-  assert.ok(
-    reminderPageSource.indexOf(".setName('Rule actions')") < reminderPageSource.indexOf("this.renderReminderRules(rulesContainer)"),
-    "reminder actions should render before the rule list",
-  );
-  assert.ok(
-    reminderPageSource.indexOf("this.renderReminderRules(rulesContainer)") < reminderPageSource.indexOf("'Reminder defaults'"),
-    "the rule list should render before shared defaults",
-  );
-  const disabledCallout = reminderPageSource.indexOf('Reminder evaluation is off');
-  const ruleActions = reminderPageSource.indexOf(".setName('Rule actions')");
-  const ruleList = reminderPageSource.indexOf('this.renderReminderRules(rulesContainer)');
-  const reminderDefaults = reminderPageSource.indexOf("'Reminder defaults'");
-  assert.ok(disabledCallout >= 0);
-  assert.ok(ruleActions > disabledCallout, 'rule actions should remain reachable while reminder evaluation is off');
-  assert.ok(ruleList > ruleActions, 'the rule list should remain reachable while reminder evaluation is off');
-  assert.ok(reminderDefaults > ruleList, 'shared defaults should remain reachable while reminder evaluation is off');
-  assert.doesNotMatch(reminderPageSource.slice(disabledCallout, ruleActions), /\}\s*else\s*\{/);
-  assert.ok(
-    reminderPageSource.indexOf("'Snooze defaults'") > disabledCallout,
-    "snooze defaults should remain reachable after the disabled-reminders branch",
-  );
-  assert.match(reminderPageSource, /if \(presetSummary\) this\.renderRecommendedReminderSummary\(presetSummary\)/);
-
-  assert.match(displaySource, /this\.renderAutomationSelector\(containerEl\)/);
-  assert.match(displaySource, /if \(this\.activeAutomation === 'archive'\)/);
-  assert.match(displaySource, /if \(this\.activeAutomation === 'attachments'\)/);
-  assert.match(settingsTabSource, /role', 'group'/);
-  assert.match(settingsTabSource, /aria-label', 'Controller settings pages'/);
-  assert.match(settingsTabSource, /data-automation/);
-  assert.match(settingsStylesSource, /\.tps-settings-destination-hub \{[\s\S]*position: sticky/);
-  assert.match(settingsStylesSource, /\.tps-settings-inline-selector-button\[aria-pressed="true"\]/);
-  assert.match(settingsStylesSource, /\.tps-settings-destination-button:focus-visible/);
-  assert.match(settingsStylesSource, /\.tps-settings-destination-button \{[\s\S]*\n  height: auto;/);
-  assert.match(settingsStylesSource, /@media \(max-width: 900px\)[\s\S]*grid-template-columns: repeat\(7, minmax\(132px, 1fr\)\)[\s\S]*overflow-x: auto/);
-  assert.match(settingsStylesSource, /@media \(max-width: 520px\)[\s\S]*\.tps-settings-destination-description \{[\s\S]*display: none/);
+test('Controller settings keep accessible routes and retirement information', () => {
+for(const label of ['Overview','Connections','Calendar rules','Note rules','Reminders','Automations','Advanced'])assert.ok(settingsTabSource.includes("label: '"+label+"'"),label);
+assert.match(settingsTabSource,/aria-pressed/);assert.match(settingsTabSource,/navigateToPage/);assert.match(settingsTabSource,/Reminders retired/);
+assert.doesNotMatch(settingsTabSource,/renderReminderRules|Enable Reminders/);
 });
 
-test("notification delivery uses one provider selector and restarts the affected routes", () => {
-  const reminderPageSource = settingsTabSource.slice(
-    settingsTabSource.indexOf("private renderReminderSettingsPage"),
-    settingsTabSource.indexOf("private renderReminderRules"),
-  );
-  const providerSetting = reminderPageSource.indexOf(".setName('Notification Service')");
-  const deliverySection = reminderPageSource.indexOf("'Delivery'");
-  const reminderDefaults = reminderPageSource.indexOf("'Reminder defaults'");
-  const sortDirection = reminderPageSource.indexOf(".setName('Notification Sort Direction')");
-
-  assert.ok(providerSetting > deliverySection);
-  assert.ok(providerSetting < reminderDefaults);
-  assert.ok(providerSetting < sortDirection);
-  assert.match(
-    reminderPageSource,
-    /this\.plugin\.settings\.notificationDeliveryProvider = value;[\s\S]*await this\.plugin\.saveSettings\(\);[\s\S]*refreshTishOSCommandBridgeCatalogs\(\);[\s\S]*restartReminderLoop\(\);[\s\S]*restartTimeTrackingReminderLoop\(\)/,
-  );
-  assert.match(
-    reminderPageSource,
-    /this\.plugin\.settings\.enableReminders = value;[\s\S]*await this\.plugin\.saveSettings\(\);[\s\S]*this\.plugin\.restartReminderLoop\(\)/,
-  );
-  assert.match(
-    reminderPageSource,
-    /this\.plugin\.settings\.pollMinutes = value;[\s\S]*await this\.plugin\.saveSettings\(\);[\s\S]*this\.plugin\.restartReminderLoop\(\)/,
-  );
-  assert.match(
-    settingsTabSource,
-    /rem\.enabled = value;[\s\S]*await this\.plugin\.saveSettings\(\);[\s\S]*this\.plugin\.restartReminderLoop\(\)/,
-  );
-  assert.match(
-    settingsTabSource,
-    /rem\.repeatIntervalMinutes = num;[\s\S]*await this\.plugin\.saveSettings\(\);[\s\S]*this\.plugin\.restartReminderLoop\(\)/,
-  );
-  assert.match(settingsTabSource, /Paired Apple devices may publish TishOS schedules; Windows, Linux, and Android may run the local Obsidian fallback/);
-  assert.match(settingsTabSource, /await this\.plugin\.resetReminderDeliveryState\(\)/);
-  assert.doesNotMatch(reminderPageSource, /Local Notices on User Devices/);
-});
 
 test("TishOS notification settings handoff is explicit, scoped, and non-mutating", () => {
-  const reminderPageSource = settingsTabSource.slice(
-    settingsTabSource.indexOf("private renderReminderSettingsPage"),
-    settingsTabSource.indexOf("private renderReminderRules"),
-  );
-
-  assert.match(reminderPageSource, /'Delivery'/);
-  assert.match(reminderPageSource, /\.setName\('Notification Service'\)/);
-  assert.match(reminderPageSource, /selectedProvider\.id === 'tishos'/);
-  assert.match(reminderPageSource, /this\.plugin\.openTishOSNativeNotificationSettings\(\)/);
-  assert.match(reminderPageSource, /selectedProvider\.id === 'ntfy'/);
-  assert.match(reminderPageSource, /this\.plugin\.openNtfyNotificationSettings\(\)/);
-  assert.match(mainSource, /tishos:\/\/settings\?section=native-notifications/);
   assert.match(mainSource, /registerObsidianProtocolHandler\('tps-controller-settings'/);
   assert.match(mainSource, /params\.action !== 'tps-controller-settings'/);
   assert.match(mainSource, /params\.v !== '1'/);
@@ -577,7 +214,7 @@ test("TishOS notification settings handoff is explicit, scoped, and non-mutating
   assert.doesNotMatch(
     mainSource.slice(
       mainSource.indexOf("registerObsidianProtocolHandler('tps-controller'"),
-      mainSource.indexOf('this.startS3agleAttachmentAutomation()'),
+      mainSource.indexOf('    async onunload()'),
     ),
     /saveSettings\(|enableReminders\s*=|notificationDeliveryProvider\s*=/,
   );
@@ -585,15 +222,15 @@ test("TishOS notification settings handoff is explicit, scoped, and non-mutating
 
 test("command palette only exposes controller actions that are user-facing and complete", () => {
   for (const id of [
-    "force-calendar-sync",
     "run-two-stage-archive-now",
-    "force-reminder-check",
     "open-notifications",
   ]) {
     assert.match(mainSource, new RegExp(`id: "${id}"`));
   }
 
   for (const id of [
+    "force-calendar-sync",
+    "force-reminder-check",
     "set-device-role-controller",
     "set-device-role-user",
     "backfill-past-calendar-events",
@@ -614,90 +251,12 @@ test("controller logging keeps command and mutation flows traceable", () => {
   assert.match(loggerSource, /export async function timeAsync/);
   assert.match(mainSource, /private traceCommand\(commandId: string/);
   assert.match(mainSource, /logger\.timeAsync\("Command", commandId/);
-  assert.match(mainSource, /force-calendar-sync:controller-run/);
-  assert.match(mainSource, /force-calendar-sync:replica-request/);
-  assert.match(mainSource, /force-reminder-check:current-device-run/);
-  assert.match(mainSource, /deliveryMode === "local-obsidian"[\s\S]*this\.runReminderCheck\(deliveryMode\)/);
-  assert.match(mainSource, /force-reminder-check:replica-request/);
   assert.match(mainSource, /two-stage-archive:manual-result/);
 });
 
-test("periodic Controller reload stays opt-in, device-local, role-gated, and save-first", () => {
-  const reloadSettingStart = settingsTabSource.indexOf(".setName('Reload Controller every 15 minutes')");
-  const reloadSettingSource = settingsTabSource.slice(
-    reloadSettingStart,
-    settingsTabSource.indexOf(".setName('Enable Logging')", reloadSettingStart),
-  );
-  const preflightStart = mainSource.indexOf("private async prepareForPeriodicControllerReload()");
-  const preflightSource = mainSource.slice(
-    preflightStart,
-    mainSource.indexOf("private async executePeriodicControllerReload()", preflightStart),
-  );
-  const commandStart = mainSource.indexOf("private async executePeriodicControllerReload()");
-  const commandSource = mainSource.slice(
-    commandStart,
-    mainSource.indexOf("private warnBeforePeriodicControllerReload()", commandStart),
-  );
-  const unloadSource = mainSource.slice(
-    mainSource.indexOf("async onunload()"),
-    mainSource.indexOf("// Settings"),
-  );
-  const preferenceSetterStart = mainSource.indexOf("setPeriodicControllerReloadEnabled(enabled: boolean)");
-  const preferenceSetterSource = mainSource.slice(
-    preferenceSetterStart,
-    mainSource.indexOf("private isPeriodicControllerReloadEligible()", preferenceSetterStart),
-  );
-
-  assert.ok(reloadSettingStart >= 0);
-  assert.match(reloadSettingSource, /Device-local and off by default/);
-  assert.match(reloadSettingSource, /settings already synced to this device/);
-  assert.match(reloadSettingSource, /interrupt active automation/);
-  assert.match(reloadSettingSource, /isPeriodicControllerReloadEnabled\(\)/);
-  assert.match(reloadSettingSource, /setPeriodicControllerReloadEnabled\(value\)/);
-  assert.match(reloadSettingSource, /toggle\.setValue\(this\.plugin\.isPeriodicControllerReloadEnabled\(\)\)/);
-  assert.doesNotMatch(reloadSettingSource, /plugin\.settings|saveSettings\(/);
-
-  assert.match(mainSource, /new ControllerPeriodicReloadPreference\(this\.app\.vault\.getName\(\)\)/);
-  assert.match(mainSource, /new ControllerPeriodicReloadService\(\{[\s\S]*?isEligible: \(\) => this\.isPeriodicControllerReloadEligible\(\)/);
-  assert.match(controllerPeriodicReloadSource, /CONTROLLER_PERIODIC_RELOAD_INTERVAL_MS = 15 \* 60 \* 1000/);
-  assert.match(controllerPeriodicReloadSource, /STORAGE_KEY_PREFIX = "tps-controller-periodic-reload-"/);
-  assert.match(controllerPeriodicReloadSource, /getItem\(this\.storageKey\) === "enabled"/);
-  assert.match(controllerPeriodicReloadSource, /get\(\): boolean \{[\s\S]*?catch \{[\s\S]*?return false/);
-  assert.match(preferenceSetterSource, /const persisted = this\.controllerPeriodicReloadPreference\.set\(enabled\)/);
-  assert.match(preferenceSetterSource, /if \(!persisted\) \{[\s\S]*?controllerPeriodicReloadService\.stop\(\)[\s\S]*?remains disabled for this session/);
-  assert.match(mainSource, /private isPeriodicControllerReloadEligible\(\): boolean \{[\s\S]*?!Platform\.isMobile[\s\S]*?isController[\s\S]*?controllerPeriodicReloadPreference\?\.get\(\) === true/);
-  assert.match(mainSource, /private enterControllerMode\(\)[\s\S]*?controllerPeriodicReloadService\?\.start\(\)/);
-  assert.match(mainSource, /private exitControllerMode\(\)[\s\S]*?controllerPeriodicReloadService\?\.stop\(\)/);
-  assert.match(unloadSource, /controllerPeriodicReloadService\?\.dispose\(\)/);
-
-  assert.ok(preflightStart >= 0);
-  assert.match(preflightSource, /settingsSaveQueue\.waitForIdle\(\)/);
-  assert.match(preflightSource, /flushReminderStateNow\(\)/);
-  assert.match(preflightSource, /iterateAllLeaves/);
-  assert.match(preflightSource, /leaf\.view instanceof TextFileView/);
-  assert.match(preflightSource, /await view\.save\(\)/);
-  assert.match(preflightSource, /await this\.app\.workspace\.requestSaveLayout\(\)/);
-  assert.ok((preflightSource.match(/isPeriodicControllerReloadEligible\(\)/g) || []).length >= 2);
-  assert.doesNotMatch(preflightSource, /saveSettings\(/);
-
-  assert.ok(commandStart >= 0);
-  const finalDrainIndex = commandSource.indexOf("await this.settingsSaveQueue.waitForIdle()");
-  const commandInvocationIndex = commandSource.indexOf('executeCommandById(this.app, "app:reload")');
-  assert.ok(finalDrainIndex >= 0 && commandInvocationIndex > finalDrainIndex);
-  assert.doesNotMatch(
-    commandSource.slice(finalDrainIndex + "await this.settingsSaveQueue.waitForIdle()".length, commandInvocationIndex),
-    /\bawait\b/,
-    "no asynchronous gap may reopen the settings-save race before reload dispatch",
-  );
-  assert.match(commandSource, /waitForIdle\(\)[\s\S]*?isPeriodicControllerReloadEligible\(\)[\s\S]*?executeCommandById/);
-  assert.match(commandSource, /executeCommandById\(this\.app, "app:reload"\)/);
-  assert.match(commandSource, /return false/);
-  assert.match(coreTypeGuardsSource, /executeCommandById\?\.\(commandId\) \?\? false/);
-  assert.match(coreTypeGuardsSource, /export function executeCommandById[\s\S]*?catch \{[\s\S]*?return false/);
-  assert.equal((mainSource.match(/["']app:reload["']/g) || []).length, 1);
-  assert.doesNotMatch(mainSource, /window\.location\.reload|location\.reload/);
-  assert.doesNotMatch(controllerPeriodicReloadSource, /window\.location\.reload|location\.reload/);
-  assert.match(mainSource, /will reload Obsidian in one minute/);
+test("Controller has no automatic reload command or preference control", () => {
+  assert.doesNotMatch(mainSource, /PeriodicReload|PeriodicControllerReload|app:reload|window\.location\.reload/);
+  assert.doesNotMatch(settingsTabSource, /Reload Controller every 15 minutes/);
 });
 
 test("controller logging records settings causes and concise runtime outcomes", () => {
@@ -705,26 +264,11 @@ test("controller logging records settings causes and concise runtime outcomes", 
   assert.match(mainSource, /getChangedSettingKeys/);
   assert.match(mainSource, /logger\.flow\("Settings", "save:start"/);
   assert.match(mainSource, /logger\.flow\("Settings", "save:done"/);
-  assert.match(mainSource, /logger\.flow\("Automation", "start-all"/);
-  assert.match(mainSource, /logger\.flow\("ReminderEngine", "check:result"/);
-  assert.match(mainSource, /logger\.flow\("ReminderEngine", "delivery:prepared"/);
   assert.doesNotMatch(mainSource, /ParentChildMaintenance/);
 });
 
-test("calendar sync logs native outcomes and a paused legacy setting", () => {
-  assert.match(calendarAutomationSource, /logger\.flow\("CalendarSync", "readiness"/);
-  assert.match(calendarAutomationSource, /logger\.flow\("CalendarSync", "calendars:resolved"/);
-  assert.match(calendarAutomationSource, /logger\.flowWarn\("CalendarSync", "skip:legacy-mode-paused"/);
-  assert.match(calendarAutomationSource, /storage: "native-records"/);
-  assert.doesNotMatch(calendarAutomationSource, /checkAndCreateMeetingNotes\(/);
-  assert.match(autoCreateSource, /logger\.flow\("AutoCreate", "sync:start"/);
-  assert.match(autoCreateSource, /logger\.flow\("AutoCreate", "fetch-events:result"/);
-  assert.match(autoCreateSource, /logger\.flow\("AutoCreate", "vault-index:result"/);
-  assert.match(autoCreateSource, /logger\.flow\("AutoCreate", "sync:done"/);
-});
-
-test("two-stage archive logging records due checks, inputs, and outcomes", () => {
-  assert.match(twoStageArchiveSource, /logger\.flow\("TwoStageArchive", "due:checked"/);
+test("explicit archive logging records inputs and outcomes", () => {
+  assert.doesNotMatch(twoStageArchiveSource, /due:checked|runIfDue/);
   assert.match(twoStageArchiveSource, /logger\.flow\("TwoStageArchive", "run:resolved"/);
   assert.match(twoStageArchiveSource, /logger\.flow\("TwoStageArchive", "run:candidates"/);
   assert.match(twoStageArchiveSource, /logger\.flow\("TwoStageArchive", "run:done"/);
@@ -743,75 +287,4 @@ test("notification and overdue action logging records scan and mutation routes",
   assert.match(overdueServiceSource, /logger\.flowWarn\("OverdueAction", "task-line:snooze-disabled"/);
   assert.match(overdueServiceSource, /logger\.flowWarn\("OverdueAction", "task-line:resolve-disabled"/);
   assert.match(overdueServiceSource, /logger\.flow\("OverdueAction", "open-file:route"/);
-});
-
-test("external event note creation logging records reuse, creation, and recovery routes", () => {
-  assert.match(externalEventModalSource, /logger\.flow\("CreateMeetingNote", "start"/);
-  assert.match(externalEventModalSource, /logger\.flow\("CreateMeetingNote", "template:resolved"/);
-  assert.match(externalEventModalSource, /logger\.flow\("CreateMeetingNote", "reuse:external-id"/);
-  assert.match(externalEventModalSource, /logger\.flow\("CreateMeetingNote", "reuse:legacy-event-id"/);
-  assert.match(externalEventModalSource, /logger\.flow\("CreateMeetingNote", "reuse:uid-date"/);
-  assert.match(externalEventModalSource, /logger\.flow\("CreateMeetingNote", "reuse:title-day"/);
-  assert.match(externalEventModalSource, /logger\.flow\("CreateMeetingNote", "create:attempt"/);
-  assert.match(externalEventModalSource, /logger\.flow\("CreateMeetingNote", "create:done"/);
-  assert.match(externalEventModalSource, /logger\.flow\("CreateMeetingNote", "frontmatter:applied"/);
-  assert.match(externalEventModalSource, /logger\.flow\("CreateMeetingNote", "templater:done"/);
-  assert.match(externalEventModalSource, /logger\.flow\("CreateMeetingNote", "parent-link:done"/);
-});
-
-test("reminder evaluation logging records scan causes, skip reasons, and queued outcomes", () => {
-  assert.match(reminderEngineSource, /interface ReminderEvaluationStats/);
-  assert.match(reminderEngineSource, /logger\.flow\("ReminderEngine", "scan:start"/);
-  assert.match(reminderEngineSource, /logger\.flow\("ReminderEngine", "scan:done"/);
-  assert.match(reminderEngineSource, /summarizeSkipReasons\(stats\.skipReasons\)/);
-  assert.match(reminderEngineSource, /this\.countSkip\(params\.stats, "missing-property"\)/);
-  assert.match(reminderEngineSource, /this\.countSkip\(params\.stats, "future-trigger"\)/);
-  assert.match(reminderEngineSource, /this\.countSkip\(params\.stats, "already-sent"\)/);
-  assert.match(reminderEngineSource, /logger\.flow\("ReminderEngine", "notification:queued"/);
-  assert.match(reminderEngineSource, /logger\.flow\("ReminderEngine", "external-fetch:start"/);
-  assert.match(reminderEngineSource, /logger\.flow\("ReminderEngine", "external-fetch:done"/);
-  assert.match(reminderEngineSource, /logger\.flowWarn\("ReminderEngine", "external-fetch:failed"/);
-  assert.match(reminderEngineSource, /logger\.flowError\("ReminderEngine", "file:error"/);
-});
-
-test("sync request and conflict logging records cross-device causes and mutation outcomes", () => {
-  assert.match(syncRequestServiceSource, /logger\.flow\("SyncRequest", "write:start"/);
-  assert.match(syncRequestServiceSource, /logger\.flow\("SyncRequest", "write:done"/);
-  assert.match(syncRequestServiceSource, /logger\.flow\("SyncRequest", "write:create-raced"/);
-  assert.match(syncRequestServiceSource, /logger\.flow\("SyncRequest", "read:done"/);
-  assert.match(syncRequestServiceSource, /logger\.flowWarn\("SyncRequest", "read:invalid-shape"/);
-  assert.match(syncRequestServiceSource, /logger\.flowWarn\("SyncRequest", "read:parse-failed"/);
-  assert.match(syncRequestServiceSource, /logger\.flow\("SyncRequest", "ack:start"/);
-  assert.match(syncRequestServiceSource, /logger\.flow\("SyncRequest", "ack:done"/);
-  assert.match(syncRequestServiceSource, /"ack:stale-generation"/);
-
-  assert.match(syncConflictWatcherSource, /logger\.flow\("SyncConflictWatcher", "start"/);
-  assert.match(syncConflictWatcherSource, /logger\.flow\("SyncConflictWatcher", "sweep:start"/);
-  assert.match(syncConflictWatcherSource, /logger\.flow\("SyncConflictWatcher", "sweep:done"/);
-  assert.match(syncConflictWatcherSource, /logger\.flow\("SyncConflictWatcher", "check:start"/);
-  assert.match(syncConflictWatcherSource, /logger\.flow\("SyncConflictWatcher", "check:skip-calendar-identity"/);
-  assert.match(syncConflictWatcherSource, /logger\.flow\("SyncConflictWatcher", "check:canonical-resolved"/);
-  assert.match(syncConflictWatcherSource, /logger\.flow\("SyncConflictWatcher", "archive:start"/);
-  assert.match(syncConflictWatcherSource, /logger\.flowWarn\("SyncConflictWatcher", "archive:done"/);
-  assert.match(syncConflictWatcherSource, /logger\.flowError\("SyncConflictWatcher", "archive:failed"/);
-});
-
-test("external calendar fetch and parser logging records provider and event-shape outcomes", () => {
-  assert.match(externalCalendarServiceSource, /logger\.flowWarn\("ExternalCalendar", "fetch:invalid-url"/);
-  assert.match(externalCalendarServiceSource, /logger\.flow\("ExternalCalendar", "fetch:cache-hit"/);
-  assert.match(externalCalendarServiceSource, /logger\.flow\("ExternalCalendar", "fetch:start"/);
-  assert.match(externalCalendarServiceSource, /logger\.flowError\("ExternalCalendar", "fetch:bad-status"/);
-  assert.match(externalCalendarServiceSource, /logger\.flow\("ExternalCalendar", "fetch:done"/);
-  assert.match(externalCalendarServiceSource, /logger\.flowError\("ExternalCalendar", "fetch:failed"/);
-  assert.match(externalCalendarServiceSource, /logger\.flow\("ExternalCalendar", "cache:cleared"/);
-
-  assert.match(iCalParserServiceSource, /logger\.flow\("ICalParser", "parse:start"/);
-  assert.match(iCalParserServiceSource, /logger\.flow\("ICalParser", "parse:done"/);
-  assert.match(iCalParserServiceSource, /logger\.flowError\("ICalParser", "parse:failed"/);
-  assert.match(iCalParserServiceSource, /logger\.flowWarn\("ICalParser", "timezone:zone-unavailable"/);
-  assert.match(iCalParserServiceSource, /revisionsDiscarded/);
-  assert.match(iCalParserServiceSource, /recurringMasters/);
-  assert.match(iCalParserServiceSource, /durationMs: Date.now\(\) - startedAt/);
-  assert.match(iCalParserServiceSource, /incomplete: true/);
-
 });

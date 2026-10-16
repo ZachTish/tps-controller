@@ -61,13 +61,6 @@ test('unsafe or empty generated filenames are rejected',()=>{
   for(const title of ['../note','a/b','CON','ends.','bad\nname','']) assert.throws(()=>evaluate(rule({actions:[action('title',title)]})));
   assert.throws(()=>evaluate(rule({actions:[action('replace-title','','XYZ event')]})));
 });
-test('old calendar tag becomes an explicit command rule once',()=>{
-  const migrated=rules.migrateCalendarTagRules(undefined,[{id:'work',autoCreateTag:'#team'}]);
-  assert.equal(migrated.rules.length,1);assert.equal(migrated.rules[0].conditions[0].field,'calendar');
-  assert.deepEqual(rules.migrateCalendarTagRules(migrated,[{id:'work',autoCreateTag:'#changed'}]),migrated);
-  assert.deepEqual(rules.createNoteRuleSession(migrated).evaluate(input()).updates.tags,['keep','team']);
-  assert.deepEqual(rules.createNoteRuleSession(migrated).evaluate(input({calendar:''})).matched,[]);
-});
 test('frontmatter parsing preserves body, BOM, CRLF and empty/no frontmatter',()=>{
   for(const original of ['Body\n','---\n---\nBody','\ufeff---\r\ntype: event\r\n---\r\n\r\n# Body\r\n']) {
     const parsed=parseRuleNote(original),written=writeRuleNote(original,{...parsed.properties,tags:['new']});
@@ -143,14 +136,14 @@ test('single active run and unload guard',async()=>{
   await new Promise(resolve=>setTimeout(resolve,0));await assert.rejects(()=>preview(h),/running/);release();await first;
   h.runner.dispose();await assert.rejects(()=>preview(h),/reloaded/);
 });
-test('calendar source migration resolves canonical ID and preserves unrelated notes',async()=>{
+test('explicit calendar source rule resolves canonical ID and preserves unrelated notes',async()=>{
   const identity=await load('src/services/calendar-record-identity.ts');const id=await identity.deriveCalendarRecordId('work','event');
-  const h=harness({'Calendar.md':`---\nid: ${id}\n---\n`},rules.migrateCalendarTagRules(undefined,[{id:'work',autoCreateTag:'team'}]));h.state.externalCalendars=[{id:'work',url:'https://example.test/feed'}];
+  const h=harness({'Calendar.md':`---\nid: ${id}\n---\n`},config([rule({conditions:[condition('calendar','equals','work')],actions:[action('add-tag','team')]})]));h.state.externalCalendars=[{id:'work',url:'https://example.test/feed'}];
   const plan=await preview(h);assert.equal(plan.changes.length,1);assert.deepEqual(plan.changes[0].after.tags,['team']);
 });
 test('settings/actions inventory and command-only wiring',()=>{
   const settings=readFileSync('src/settings-tab.ts','utf8'), main=readFileSync('src/main.ts','utf8'), ui=readFileSync('src/services/note-rule-ui.ts','utf8'),css=readFileSync('styles.css','utf8');
-  for(const name of ['Overview','Calendar rules','Note rules','Reminder rules','Automations','Advanced'])assert.ok(settings.includes(`label: '${name}'`));
+  for(const name of ['Overview','Calendar rules','Note rules','Reminders','Automations','Advanced'])assert.ok(settings.includes(`label: '${name}'`));
   assert.doesNotMatch(settings,/setValue\(calendar\.autoCreateTag/);
   assert.ok(main.includes('run-note-rules-current-note'));assert.ok(main.includes('run-note-rules'));
   for(const name of ['Add rule','Save rules','Preview saved rules','Add condition','Add action','Select all','Select none'])assert.ok(ui.includes(name));
@@ -163,11 +156,6 @@ test('record identity tags are protected, including configured prefixes', () => 
   for (const [tag,prefixes] of [['tps/record/v1/task/id',[]],['records/v1/task/id',['records']]]) {
     assert.throws(()=>evaluate(rule({actions:[action('remove-tag',tag)]}),input({protectedTagPrefixes:prefixes})),/identity tags/);
   }
-});
-test('valid multiple legacy tags migrate; invalid legacy drafts are preserved disabled', () => {
-  const migrated=rules.migrateCalendarTagRules(undefined,[{id:'work',autoCreateTag:'one, two'},{id:'bad',autoCreateTag:'tag!'}]);
-  assert.equal(migrated.rules[0].actions.length,2);assert.equal(migrated.rules[1].enabled,false);
-  assert.equal(migrated.rules[1].actions[0].value,'tag!');
 });
 test('Unicode filenames cannot exceed portable byte limits', () => {
   assert.throws(()=>evaluate(rule({actions:[action('title','界'.repeat(90))]})),/unsafe/);

@@ -1,5 +1,5 @@
 /**
- * Utility functions needed by auto-create-service.
+ * Shared calendar formatting and parsing utilities.
  * Subset of Calendar-Base's utils.ts, containing only what the Controller needs.
  */
 

@@ -138,22 +138,3 @@ export function applyNoteRuleResult(properties: Record<string, unknown>, result:
     for (const key of result.removals) for (const existing of Object.keys(output)) if (existing.toLowerCase() === key.toLowerCase()) delete output[existing];
     return output;
 }
-export function migrateCalendarTagRules(settings: NoteRuleSettings | undefined, calendars: Array<{id: string; autoCreateTag?: string}>): NoteRuleSettings {
-    const next = JSON.parse(JSON.stringify(settings || emptyNoteRules())) as NoteRuleSettings;
-    validateNoteRules(next);
-    if (next.legacyCalendarTagsMigrated) return next;
-    for (const calendar of calendars) {
-        const tag = String(calendar.autoCreateTag || '').trim().replace(/^#/u, '');
-        if (!tag) continue;
-        const id = `calendar-tag:${calendar.id}`;
-        if (!next.rules.some(rule => rule.id === id)) {
-            const migrated: NoteRule = { id, name: `Calendar tag · ${tag}`, enabled: true, match: 'all', conditions: [{ field: 'calendar', operator: 'equals', value: calendar.id }], actions: tag.split(/[ ,]+/u).filter(Boolean).map(value => ({ kind: 'add-tag', key: '', value })), stop: false };
-            try { validateNoteRules({ version: 1, rules: [migrated] }); }
-            catch { migrated.enabled = false; migrated.name += ' (review)'; }
-            next.rules.push(migrated);
-        }
-    }
-    validateNoteRules(next);
-    next.legacyCalendarTagsMigrated = true;
-    return next;
-}

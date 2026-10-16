@@ -135,21 +135,13 @@ test('two-stage archive has safe Archive to _archive defaults', () => {
   assert.match(typesSource, /runTime:\s*"23:55"/);
 });
 
-test('two-stage archive runs only from Controller automation and can be triggered manually', () => {
+test('two-stage archive runs only from the explicit action', () => {
   assert.match(mainSource, /new TwoStageArchiveService\(this\.app, \(\) => this\.settings, \(\) => this\.saveSettings\(\)\)/);
-  assert.match(mainSource, /startTwoStageArchiveLoop\(\)/);
-  assert.match(mainSource, /stopTwoStageArchiveLoop\(\)/);
   assert.match(mainSource, /run-two-stage-archive-now/);
   assert.match(mainSource, /Two-stage archive runs on the Controller device/);
-  assert.match(mainSource, /this\.settings\.twoStageArchive\?\.enabled/);
-  assert.match(mainSource, /this\.twoStageArchiveService\.runIfDue\(\)/);
-  assert.match(mainSource, /this\.twoStageArchiveService\.getCheckIntervalMs\(\)/);
 });
 
 test('two-stage archive preserves folder structure and does not overwrite collisions', () => {
-  assert.match(serviceSource, /isDue\(rule: TwoStageArchiveRule/);
-  assert.match(serviceSource, /rule\.lastRunKey === runKey/);
-  assert.match(serviceSource, /now\.date\(\) === now\.daysInMonth\(\)/);
   assert.match(serviceSource, /file\.path\.slice\(sourceFolder\.length \+ 1\)/);
   assert.match(serviceSource, /normalizePath\(`\$\{destinationFolder\}\/\$\{relativePath\}`\)/);
   assert.match(serviceSource, /getAvailableTargetPath/);
@@ -199,15 +191,8 @@ test('two-stage archive normalizes each vault path once while preserving moves, 
   );
 });
 
-test('scheduled two-stage archive rechecks template protection while manual runs preserve explicit semantics', async () => {
-  const decision = async (_app, file) => !file.path.endsWith('File 010.md');
-  const automatic = createArchiveHarness({ canAutomaticallyMutate: decision });
-  const automaticResult = await automatic.service.runNow(0, { automatic: true });
-
-  assert.equal(automaticResult.movedCount, 79);
-  assert.equal(automaticResult.skippedCount, 21);
-  assert.equal(automatic.renamed.some(([path]) => path.endsWith('File 010.md')), false);
-
+test('explicit archive retains its manual semantics', async () => {
+  const decision = async () => { throw new Error('automatic gate must not run'); };
   const manual = createArchiveHarness({ canAutomaticallyMutate: decision });
   const manualResult = await manual.service.runNow(0);
   assert.equal(manualResult.movedCount, 80);
@@ -216,11 +201,14 @@ test('scheduled two-stage archive rechecks template protection while manual runs
 
 test('two-stage archive settings expose the monthly Archive to _archive workflow', () => {
   assert.match(settingsTabSource, /Two-Stage Archive/);
-  assert.match(settingsTabSource, /Enable Two-Stage Archive/);
   assert.match(settingsTabSource, /Source Folder/);
   assert.match(settingsTabSource, /Destination Folder/);
-  assert.match(settingsTabSource, /End of month/);
   assert.match(settingsTabSource, /Run Two-Stage Archive Now/);
   assert.match(settingsTabSource, /Two-stage archive runs on the Controller device/);
-  assert.match(settingsTabSource, /restartTwoStageArchiveLoop\(\)/);
+});
+
+test('archive scheduler, due checks and enable controls are deleted', () => {
+  assert.doesNotMatch(mainSource, /startTwoStageArchiveLoop|stopTwoStageArchiveLoop|restartTwoStageArchiveLoop|twoStageArchiveIntervalId/);
+  assert.doesNotMatch(serviceSource, /runIfDue|isDue\(|getCheckIntervalMs|canMoveAutomatically|automatic:/);
+  assert.doesNotMatch(settingsTabSource, /Enable Two-Stage Archive|archive-cadence|twoStageArchive\.(cadence|weeklyDay|runTime|checkIntervalMinutes)/);
 });

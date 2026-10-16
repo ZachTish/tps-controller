@@ -1,7 +1,6 @@
-import { App, TFile, normalizePath, moment } from "obsidian";
+import { App, normalizePath, moment } from "obsidian";
 import type { TPSControllerSettings, TwoStageArchiveRule } from "../types";
 import * as logger from "../logger";
-import { canAutomaticallyMutateViaGcm } from "../tps-gcm-api";
 
 export interface TwoStageArchiveResult {
     movedCount: number;
@@ -18,27 +17,8 @@ export class TwoStageArchiveService {
         private readonly saveSettings: () => Promise<void>,
     ) {}
 
-    async runIfDue(nowMs = Date.now()): Promise<TwoStageArchiveResult | null> {
-        const rule = this.getRule();
-        if (!rule.enabled) {
-            logger.flow("TwoStageArchive", "due:disabled");
-            return null;
-        }
-        const due = this.isDue(rule, nowMs);
-        logger.flow("TwoStageArchive", "due:checked", {
-            due,
-            cadence: rule.cadence,
-            runTime: rule.runTime,
-            lastRunKey: rule.lastRunKey || "",
-            runKey: this.getRunKey(rule, nowMs),
-        });
-        if (!due) return null;
-        return this.runNow(nowMs, { automatic: true });
-    }
-
     async runNow(
         nowMs = Date.now(),
-        options: { automatic?: boolean } = {},
     ): Promise<TwoStageArchiveResult> {
         const rule = this.getRule();
         const runKey = this.getRunKey(rule, nowMs);
@@ -95,10 +75,6 @@ export class TwoStageArchiveService {
                 continue;
             }
 
-            if (!(await this.canMoveAutomatically(file, options.automatic === true, "candidate"))) {
-                skippedCount += 1;
-                continue;
-            }
 
             const targetPath = await this.getAvailableTargetPath(
                 normalizePath(`${destinationFolder}/${relativePath}`),
@@ -106,10 +82,6 @@ export class TwoStageArchiveService {
             await this.ensureFolderExists(targetPath.substring(0, targetPath.lastIndexOf("/")));
 
             try {
-                if (!(await this.canMoveAutomatically(file, options.automatic === true, "mutation-boundary"))) {
-                    skippedCount += 1;
-                    continue;
-                }
                 await this.app.vault.rename(file, targetPath);
                 movedCount += 1;
             } catch (error) {
@@ -130,46 +102,11 @@ export class TwoStageArchiveService {
         return { movedCount, skippedCount, runKey, sourceFolder, destinationFolder };
     }
 
-    private async canMoveAutomatically(
-        file: TFile,
-        automatic: boolean,
-        stage: "candidate" | "mutation-boundary",
-    ): Promise<boolean> {
-        if (!automatic || file.extension.toLowerCase() !== "md") return true;
-        const allowed = await canAutomaticallyMutateViaGcm(this.app, file);
-        if (!allowed) {
-            logger.flowWarn("TwoStageArchive", "file:skip-template-protected", {
-                path: file.path,
-                stage,
-            });
-        }
-        return allowed;
-    }
-
-    isDue(rule: TwoStageArchiveRule, nowMs = Date.now()): boolean {
-        const runKey = this.getRunKey(rule, nowMs);
-        if (!runKey || rule.lastRunKey === runKey) return false;
-
-        const now = moment(nowMs);
-        const [hour, minute] = this.parseRunTime(rule.runTime);
-        const scheduled = now.clone().hour(hour).minute(minute).second(0).millisecond(0);
-        if (now.isBefore(scheduled)) return false;
-
-        if (rule.cadence === "daily") return true;
-        if (rule.cadence === "weekly") return now.day() === this.normalizeWeeklyDay(rule.weeklyDay);
-        return now.date() === now.daysInMonth();
-    }
-
     getRunKey(rule: TwoStageArchiveRule, nowMs = Date.now()): string {
         const now = moment(nowMs);
         if (rule.cadence === "daily") return now.format("YYYY-MM-DD");
         if (rule.cadence === "weekly") return now.format("GGGG-[W]WW");
         return now.format("YYYY-MM");
-    }
-
-    getCheckIntervalMs(): number {
-        const rule = this.getRule();
-        return Math.max(1, Number(rule.checkIntervalMinutes || 60)) * 60 * 1000;
     }
 
     private getRule(): TwoStageArchiveRule {

@@ -1,119 +1,28 @@
-import { migrateCalendarTagRules } from "./services/note-rules";
+
 import { NoteRuleRunner } from "./services/note-rule-runner";
 import { NoteRulePreviewModal } from "./services/note-rule-ui";
-import { FinanceRelayService } from "./services/finance-relay";
-import { PlaidConnectionService } from "./services/plaid-connection";
-﻿import { App, Plugin, Notice, Platform, TFile, TextFileView, moment, normalizePath } from "obsidian";
-import { AttachmentSyncService } from "./services/attachment-sync/service";
-import { normalizeAttachmentSyncSettings } from "./services/attachment-sync/settings";
+﻿import { App, Plugin, Notice, Platform, TFile, normalizePath } from "obsidian";
 import { DeviceRoleManager, DeviceRole } from "./device-role-manager";
 import { TPSControllerSettings, DEFAULT_CONTROLLER_SETTINGS } from "./types";
-import { AutoCreateService } from "./services/auto-create-service";
-import { ExternalCalendarService } from "./services/external-calendar-service";
-import { ReminderEngine, PendingNotification } from "./services/reminder-engine";
-import { SyncRequestService } from "./services/sync-request-service";
-import { executeSyncRequestGeneration, joinSyncRequestFulfillment } from "./services/sync-request-contract";
-import { SyncConflictWatcher } from "./services/sync-conflict-watcher";
 import { TPSControllerSettingTab, type ControllerSettingsPage } from "./settings-tab";
 import * as logger from "./logger";
-import { executeCommandById, getPluginById, isPluginEnabled } from "./core";
 import { NotificationView, NOTIFICATION_VIEW_TYPE } from "./views/notification-view";
-import type { AlertState, OverdueItem } from "./types";
+import type { OverdueItem } from "./types";
 import { OverdueService } from "./services/overdue-service";
-import { CalendarAutomationService } from "./services/calendar-automation";
-import { NativeCalendarRecordService } from "./services/native-calendar-record-service";
-import { migrateSettingsFromPlugins } from "./services/migration-service";
 import { TwoStageArchiveService } from "./services/two-stage-archive-service";
 import { TPS_EVENTS } from "./tps-events";
-import { shouldDeferCalendarSyncSettlementForPath } from "./services/calendar-sync-settlement-filter";
 import { normalizeReminderSettingsInPlace } from "./services/reminder-settings-service";
-import { isBaseViewReminder } from "./services/reminder-base-view-service";
-import {
-    migrateLegacyS3Credentials,
-    takeRetainedLegacyS3Credentials,
-    withRetainedLegacyS3Credentials,
-    type RetainedLegacyS3Credentials,
-    type S3CredentialMigrationResult,
-} from "./services/s3-credential-service";
 import {
     CoalescedSettingsSaveQueue,
-    countExternalCalendarsMissingId,
     mergeSettingsChangeSet,
-    normalizeExternalCalendarsInPlace,
-    normalizeNativeCalendarCancellationState,
 } from "./services/settings-persistence";
-import {
-    resolveReminderDeliveryMode,
-    supportsTishOSNotificationDelivery,
-    type ReminderDeliveryMode,
-} from "./services/reminder-runtime-policy";
-import { resolveNotificationDeliveryProvider } from "./services/notification-delivery-provider";
-import { hasCompleteMarkdownMetadataSnapshot } from "./services/metadata-index-readiness";
-import { portableVaultNamesMatch } from "./services/tishos-command-bridge-contract";
-import {
-    ControllerPeriodicReloadPreference,
-    ControllerPeriodicReloadService,
-} from "./services/controller-periodic-reload-service";
-import {
-    TISHOS_COMMAND_BRIDGE_PAIR_ROUTE,
-    TISHOS_COMMAND_BRIDGE_REVOKE_ROUTE,
-    TISHOS_COMMAND_BRIDGE_RUN_ROUTE,
-    TISHOS_NOTIFICATION_ACTION_ROUTE,
-    TishOSCommandBridgeService,
-    type TishOSCommandBridgeRefreshResult,
-    type TishOSCommandBridgeStatus,
-} from "./services/tishos-command-bridge-service";
-
-const normalizeTaskTargetPathSetting = (value: string): string => {
-    const normalized = normalizePath(String(value || "").trim().replace(/^\[\[|\]\]$/g, "").replace(/^\/+/, ""));
-    if (!normalized || normalized === "." || normalized === ".md" || normalized.endsWith("/.md")) return "";
-    return normalized.toLowerCase().endsWith(".md") ? normalized : `${normalized}.md`;
-};
-
-// ============================================================================
-// Plugin API Types
-// ============================================================================
-
-interface CalendarPluginAPI {
-    getSettings?(): any;
-}
-
-interface NotifierPluginAPI {
-    sendNotification?(title: string, body: string, file?: TFile): Promise<void>;
-    sendMessage?(text: string, file?: TFile, title?: string): Promise<void>;
-}
-
-interface ReminderNotificationBatch {
-    title: string;
-    body: string;
-    file?: TFile;
-    items: PendingNotification[];
-}
+import { portableVaultNamesMatch } from "./services/vault-name";
 
 interface ControllerSettingsSaveSnapshot {
     persisted: Record<string, unknown>;
     comparable: Record<string, unknown>;
     changedKeys: string[];
     summary: Record<string, unknown>;
-}
-
-interface GcmTimeTrackingSession {
-    id: string;
-    title: string;
-    start: string;
-    sourcePath?: string;
-    targetPath?: string;
-}
-
-interface GcmPluginAPI {
-    settings?: Record<string, any>;
-    services?: any;
-    timeTracking?: {
-        getActiveTimers?(): Promise<GcmTimeTrackingSession[]>;
-    };
-    bulkEditService?: {
-        checkMissingRecurrences?: (paths?: readonly string[]) => Promise<void>;
-    };
 }
 
 // ============================================================================
@@ -129,52 +38,15 @@ export default class TPSControllerPlugin extends Plugin {
     );
     deviceRoleManager: DeviceRoleManager;
     private statusBarEl: HTMLElement;
-    private readonly reminderStateSaveCooldownMs = 5 * 60 * 1000;
-    private reminderStateNextSaveAt = 0;
-    private reminderStateFlushTimer: number | null = null;
-    private reminderStateSaveDirty = false;
-    private reminderCheckPromise: Promise<void> | null = null;
-    private reminderRunGeneration = 0;
-
-    // Core services
-    private autoCreateService: AutoCreateService;
-    private externalCalendarService: ExternalCalendarService;
-    private reminderEngine: ReminderEngine;
-    private syncRequestService: SyncRequestService;
-    private syncConflictWatcher: SyncConflictWatcher;
 
     // Feature services
     private overdueService: OverdueService;
-    private calendarAutomation: CalendarAutomationService;
-    private nativeCalendarRecordService: NativeCalendarRecordService;
     private twoStageArchiveService: TwoStageArchiveService;
-    attachmentSyncService: AttachmentSyncService;
-    private tishOSCommandBridgeService: TishOSCommandBridgeService;
-
-    // Reminder interval
-    private reminderIntervalId: number | null = null;
-    private reminderStartupTimeoutId: number | null = null;
-    private timeTrackingReminderIntervalId: number | null = null;
-    private timeTrackingReminderStartupTimeoutId: number | null = null;
-    private syncRequestIntervalId: number | null = null;
-    private syncRequestFulfillmentPromise: Promise<void> | null = null;
     private unloading = false;
-    private automationRunning = false;
-    private automationGeneration = 0;
-    private twoStageArchiveIntervalId: number | null = null;
-    private tishOSNotificationRefreshTimeoutId: number | null = null;
-    private pendingReminderViewRefresh = false;
-    private metadataIndexResolved = false;
-    private pendingNoteMetadataResolution = true;
-    private calendarSyncSettledAt = Date.now() + 20_000;
-    private readonly calendarSyncSettleWindowMs = 20_000;
     private persistedSettingsSnapshot: Record<string, unknown> | null = null;
     private readonly uncertainSettingsSaveKeys = new Set<string>();
     private settingsSaveBatchChanged = false;
-    private retainedLegacyS3Credentials: RetainedLegacyS3Credentials = {};
     private settingsTab: TPSControllerSettingTab | null = null;
-    private controllerPeriodicReloadPreference: ControllerPeriodicReloadPreference;
-    private controllerPeriodicReloadService: ControllerPeriodicReloadService;
 
     noteRuleRunner: NoteRuleRunner;
 
@@ -184,106 +56,20 @@ export default class TPSControllerPlugin extends Plugin {
             version: this.manifest.version,
             isMobile: Platform.isMobile,
         });
-        // Register before the first await so a startup metadata resolution
-        // cannot pass while settings migration yields. Layout readiness is not
-        // metadata readiness; a late-enable fallback verifies the whole
-        // Markdown cache snapshot instead.
-        this.registerEvent(
-            this.app.metadataCache.on("resolved", () => this.handleMetadataIndexResolved())
-        );
 
         await this.loadSettings();
+        if (this.unloading) return;
         this.noteRuleRunner = new NoteRuleRunner(this.app, () => this.settings, async () => (await this.loadData())?.noteRules);
         this.register(() => this.noteRuleRunner.dispose());
         this.statusBarEl = this.addStatusBarItem();
         this.deviceRoleManager = new DeviceRoleManager(this.app, (role) => this.onRoleChanged(role));
-        this.controllerPeriodicReloadPreference = new ControllerPeriodicReloadPreference(this.app.vault.getName());
-        this.controllerPeriodicReloadService = new ControllerPeriodicReloadService({
-            isEligible: () => this.isPeriodicControllerReloadEligible(),
-            preflight: () => this.prepareForPeriodicControllerReload(),
-            executeReload: () => this.executePeriodicControllerReload(),
-            showWarning: () => this.warnBeforePeriodicControllerReload(),
-            onEvent: (event, data) => this.logPeriodicControllerReloadEvent(event, data),
-        });
         this.updateStatusBar(this.deviceRoleManager.role);
-
-        // Core services
-        this.autoCreateService = new AutoCreateService(this.app);
-        this.externalCalendarService = new ExternalCalendarService();
-        this.nativeCalendarRecordService = new NativeCalendarRecordService(
-            this.app,
-            this.externalCalendarService,
-            () => this.settings,
-            () => this.saveSettings(),
-        );
-        this.reminderEngine = new ReminderEngine(this.app, this.externalCalendarService);
-        this.syncRequestService = new SyncRequestService(this.app, this.manifest.dir);
-        this.syncConflictWatcher = new SyncConflictWatcher(this.app);
 
         // Feature services
         this.overdueService = new OverdueService(this.app, () => this.settings);
-        this.calendarAutomation = new CalendarAutomationService(
-            this.app,
-            this.autoCreateService,
-            this.nativeCalendarRecordService,
-            () => this.settings,
-            () => this.getCalendarPlugin(),
-            (paths) => this.runRecurrenceMaintenanceTick(paths),
-            () => this.getCalendarSyncReadiness()
-        );
         this.twoStageArchiveService = new TwoStageArchiveService(this.app, () => this.settings, () => this.saveSettings());
-        this.attachmentSyncService = new AttachmentSyncService(this.app, () => this.settings.attachmentSync, () => this.settings.s3agleAttachmentAutomation);
-        this.tishOSCommandBridgeService = new TishOSCommandBridgeService(this.app, this.manifest, {
-            notificationScheduleReadiness: () => (
-                this.settings.enableReminders === true
-                && this.settings.notificationDeliveryProvider === "tishos"
-                && !this.hasNativeNotificationMetadataReadiness()
-            )
-                ? { ready: false, reason: "metadata-index-not-ready" }
-                : { ready: true },
-            notificationScheduleProvider: () => this.settings.notificationDeliveryProvider === "tishos"
-                ? this.reminderEngine.projectScheduledNotifications(this.settings)
-                : Promise.resolve([]),
-            completeNotification: async (value) => {
-                const target = value.completionTarget;
-                if (!target) return false;
-                const completed = await this.overdueService.completeItemFromNativeNotification(target);
-                if (completed) {
-                    this.refreshNotificationViews();
-                    void this.tishOSCommandBridgeService.refreshNativeNotifications(
-                        "notification-complete",
-                    );
-                }
-                return completed;
-            },
-            snoozeNotification: async (value) => {
-                const target = value.completionTarget;
-                if (!target) return false;
-                const snoozed = await this.overdueService.snoozeItemFromNativeNotification(target, 10);
-                if (snoozed) {
-                    this.refreshNotificationViews();
-                    void this.tishOSCommandBridgeService.refreshNativeNotifications(
-                        "notification-snooze",
-                    );
-                }
-                return snoozed;
-            },
-        });
 
         // Commands
-        this.addCommand({
-            id: "force-calendar-sync",
-            name: "Force Calendar Sync Now",
-            callback: () => this.traceCommand("force-calendar-sync", async () => {
-                if (this.deviceRoleManager.isController()) {
-                    logger.flow("Command", "force-calendar-sync:controller-run", { force: true });
-                    await this.calendarAutomation.runSync(true);
-                } else {
-                    logger.flow("Command", "force-calendar-sync:replica-request", { scope: ["calendar"] });
-                    await this.requestSync(["calendar"]);
-                }
-            }),
-        });
         this.addCommand({
             id: "run-two-stage-archive-now",
             name: "Run Two-Stage Archive Now",
@@ -305,61 +91,9 @@ export default class TPSControllerPlugin extends Plugin {
             }),
         });
         this.addCommand({
-            id: "force-reminder-check",
-            name: "Run Reminder Check Now",
-            callback: () => this.traceCommand("force-reminder-check", async () => {
-                const deliveryMode = this.getReminderDeliveryMode();
-                if (this.deviceRoleManager.isController() || deliveryMode === "local-obsidian") {
-                    logger.flow("Command", "force-reminder-check:current-device-run", { deliveryMode });
-                    await this.runReminderCheck(deliveryMode);
-                } else {
-                    logger.flow("Command", "force-reminder-check:replica-request", { scope: ["reminders"] });
-                    await this.requestSync(["reminders"]);
-                }
-            }),
-        });
-        this.addCommand({
             id: "open-notifications",
             name: "View Notifications",
             callback: () => this.traceCommand("open-notifications", () => this.overdueService.openNotificationModal()),
-        });
-        this.addCommand({
-            id: "sync-attachments-now",
-            name: "Sync Attachments Now",
-            callback: () => this.traceCommand("sync-attachments-now", () => this.runS3agleAttachmentAutomationNow()),
-        });
-        this.addCommand({
-            id: "run-s3agle-attachment-automation-now",
-            name: "Sync Attachments Now (legacy shortcut)",
-            callback: () => this.traceCommand("run-s3agle-attachment-automation-now", () => this.runS3agleAttachmentAutomationNow()),
-        });
-        this.addCommand({
-            id: "run-s3-bucket-archive-now",
-            name: "S3 Bucket Archive (retired)",
-            callback: () => this.traceCommand("run-s3-bucket-archive-now", async () => { await this.runS3BucketArchiveNow(); }),
-        });
-        this.addCommand({
-            id: "test-attachment-sync-mobile",
-            name: "Test Attachment Sync on This Device",
-            callback: () => this.traceCommand("test-attachment-sync-mobile", () => this.attachmentSyncService.runDiagnostic()),
-        });
-        this.addCommand({
-            id: "refresh-tishos-command-bridge",
-            name: "Refresh TishOS Shortcut Commands",
-            callback: () => this.traceCommand("refresh-tishos-command-bridge", async () => {
-                const result = await this.refreshTishOSCommandBridgeCatalogs();
-                if (result.unavailableReason === "not-paired") {
-                    new Notice("No TishOS command bridge is paired on this device.");
-                    return;
-                }
-                if (result.unavailableReason) {
-                    new Notice("TishOS command catalog is temporarily unavailable; the last valid catalog was preserved.");
-                    return;
-                }
-                new Notice(result.publishedClients > 0
-                    ? `Refreshed ${result.commandCount} TishOS Shortcut commands.`
-                    : `TishOS Shortcut commands are current (${result.commandCount}).`);
-            }),
         });
 
         this.addCommand({
@@ -379,16 +113,7 @@ export default class TPSControllerPlugin extends Plugin {
         // View + Ribbon
         this.registerView(NOTIFICATION_VIEW_TYPE, (leaf) => new NotificationView(leaf, this));
         this.addRibbonIcon('bell', 'View Notifications', () => { void this.overdueService.openNotificationModal(); });
-
-        // API
-        this.plaidConnection = new PlaidConnectionService(this.app);
-        this.financeRelay = new FinanceRelayService(this.app, () => this.deviceRoleManager.isController(), () => (this.app as any).plugins?.plugins?.["tps-finances"]?.api?.controllerFinanceBackend);
-        let financeRelayLoaded = true;
-        this.register(() => { financeRelayLoaded = false; });
-        this.app.workspace.onLayoutReady(() => { if (financeRelayLoaded) this.financeRelay.start(); });
         (this as any).api = {
-            plaid: this.plaidConnection,
-            financeRelay: this.financeRelay,
             openConnectionSettings: (section?: unknown) => {
                 const settings = (this.app as any).setting;
                 settings?.open(); settings?.openTabById(this.manifest.id);
@@ -433,61 +158,21 @@ export default class TPSControllerPlugin extends Plugin {
                 });
                 return;
             }
-            new Notice('Opening TPS Controller reminder rules…');
+            new Notice('Opening Controller reminder retirement information…');
             this.openSettingsPage('reminders');
         });
-        this.registerObsidianProtocolHandler(TISHOS_COMMAND_BRIDGE_PAIR_ROUTE, (params) => {
-            void this.tishOSCommandBridgeService.handlePairRoute(params);
+        this.registerObsidianProtocolHandler('tps-controller-command-bridge-pair', () => {
+            new Notice('Controller reminder and command bridges are retired. No action was performed.');
         });
-        this.registerObsidianProtocolHandler(TISHOS_COMMAND_BRIDGE_RUN_ROUTE, (params) => {
-            void this.tishOSCommandBridgeService.handleRunRoute(params);
+        this.registerObsidianProtocolHandler('tps-controller-run-command', () => {
+            new Notice('Controller reminder and command bridges are retired. No action was performed.');
         });
-        this.registerObsidianProtocolHandler(TISHOS_COMMAND_BRIDGE_REVOKE_ROUTE, (params) => {
-            void this.tishOSCommandBridgeService.handleRevokeRoute(params);
+        this.registerObsidianProtocolHandler('tps-controller-command-bridge-revoke', () => {
+            new Notice('Controller reminder and command bridges are retired. No action was performed.');
         });
-        this.registerObsidianProtocolHandler(TISHOS_NOTIFICATION_ACTION_ROUTE, (params) => {
-            void this.tishOSCommandBridgeService.handleNotificationActionRoute(params);
+        this.registerObsidianProtocolHandler('tps-controller-native-notification-action', () => {
+            new Notice('Controller reminder and command bridges are retired. No action was performed.');
         });
-        this.tishOSCommandBridgeService.start();
-        this.startS3agleAttachmentAutomation();
-
-        if (this.deviceRoleManager.isController()) {
-            this.enterControllerMode();
-        } else {
-            this.restartReminderLoop();
-            if (!Platform.isMobile) {
-                void this.requestSync(["calendar"]).catch((error) => {
-                    logger.flowError("SyncRequest", "startup-write:failed", error, { scope: ["calendar"] });
-                });
-            } else {
-                logger.log("Skipping automatic startup sync request on mobile replica.");
-            }
-        }
-
-        this.registerEvent(this.app.vault.on("create", (file) => {
-            if (this.handleReminderBaseChange(file, "base-create")) return;
-            if (!this.isNoteSourceFile(file)) return;
-            this.deferCalendarSyncSettlementForFile(file, "file create");
-            this.scheduleTishOSNativeNotificationRefresh("file-create");
-        }));
-        this.registerEvent(this.app.vault.on("modify", (file) => {
-            if (this.handleReminderBaseChange(file, "base-modify")) return;
-            if (!this.isNoteSourceFile(file)) return;
-            this.deferCalendarSyncSettlementForFile(file, "file modify");
-            this.scheduleTishOSNativeNotificationRefresh("file-modify");
-        }));
-        this.registerEvent(this.app.vault.on("delete", (file) => {
-            if (this.handleReminderBaseChange(file, "base-delete")) return;
-            if (!this.isNoteSourceFile(file)) return;
-            this.deferCalendarSyncSettlementForFile(file, "file delete");
-            this.scheduleTishOSNativeNotificationRefresh("file-delete");
-        }));
-        this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
-            if (this.handleReminderBaseChange(file, "base-rename", oldPath)) return;
-            if (!this.isNoteSourceFile(file)) return;
-            this.deferCalendarSyncSettlementForFile(file, "file rename");
-            this.scheduleTishOSNativeNotificationRefresh("file-rename");
-        }));
 
         logger.flow("Lifecycle", "loaded", {
             role: this.deviceRoleManager.role,
@@ -495,55 +180,6 @@ export default class TPSControllerPlugin extends Plugin {
             remindersEnabled: this.settings.enableReminders,
             calendarCount: this.settings.externalCalendars?.length || 0,
         });
-    }
-
-    openTishOSNativeNotificationSettings(): void {
-        const target = 'tishos://settings?section=native-notifications';
-        logger.flow('TishOSIntegration', 'native-notification-settings:open');
-        window.open(target);
-    }
-
-    openNtfyNotificationSettings(): void {
-        const notifier = getPluginById(this.app, "tps-messager")
-            || getPluginById(this.app, "tps-notifier");
-        const pluginID = String((notifier as { manifest?: { id?: string } } | null)?.manifest?.id || "tps-messager");
-        const settingManager = (this.app as App & {
-            setting?: {
-                open?: () => void;
-                openTabById?: (id: string) => void;
-            };
-        }).setting;
-        logger.flow("NotificationDelivery", "provider-settings:open", { provider: "ntfy", pluginAvailable: !!notifier });
-        settingManager?.open?.();
-        settingManager?.openTabById?.(pluginID);
-    }
-
-    getTishOSCommandBridgeStatus(): TishOSCommandBridgeStatus {
-        return this.tishOSCommandBridgeService.getStatus();
-    }
-
-    getReminderDeliveryAuditStatus(): {
-        remindersEnabled: boolean;
-        notificationDeliveryProvider: "tishos" | "ntfy";
-        localDeliveryMode: ReminderDeliveryMode | null;
-        tishOSNativeNotificationsSupported: boolean;
-        commandBridge: TishOSCommandBridgeStatus;
-    } {
-        return {
-            remindersEnabled: this.settings.enableReminders === true,
-            notificationDeliveryProvider: this.settings.notificationDeliveryProvider,
-            localDeliveryMode: this.getReminderDeliveryMode(),
-            tishOSNativeNotificationsSupported: supportsTishOSNotificationDelivery(Platform),
-            commandBridge: this.getTishOSCommandBridgeStatus(),
-        };
-    }
-
-    refreshTishOSCommandBridgeCatalogs(): Promise<TishOSCommandBridgeRefreshResult> {
-        return this.tishOSCommandBridgeService.refreshCatalogs("manual");
-    }
-
-    requestRevokeTishOSCommandBridgeClient(clientID: string): Promise<boolean> {
-        return this.tishOSCommandBridgeService.requestLocalRevoke(clientID);
     }
 
     private openSettingsPage(page: ControllerSettingsPage): void {
@@ -577,31 +213,9 @@ export default class TPSControllerPlugin extends Plugin {
         this.unloading = true;
         delete (this as any).api;
         delete (window as any).TPS;
-        // Invalidate every producer before awaiting any asynchronous drain.
-        const financeRelayStop = this.financeRelay?.stop();
-        const calendarStop = this.calendarAutomation?.stop();
         logger.flow("Lifecycle", "unload");
-        this.controllerPeriodicReloadService?.dispose();
-        if (this.tishOSNotificationRefreshTimeoutId !== null) {
-            window.clearTimeout(this.tishOSNotificationRefreshTimeoutId);
-            this.tishOSNotificationRefreshTimeoutId = null;
-        }
-        this.pendingReminderViewRefresh = false;
-        const commandBridgeStop = this.tishOSCommandBridgeService?.stop();
-        this.stopS3agleAttachmentAutomation();
-        this.stopAllAutomation();
-        this.stopReminderStateFlushTimer();
-        await Promise.all([financeRelayStop, calendarStop, commandBridgeStop]);
         await this.settingsSaveQueue.waitForIdle();
-        await this.flushReminderStateNow();
     }
-
-    // ========================================================================
-    // Settings
-    // ========================================================================
-
-    plaidConnection!: PlaidConnectionService;
-    financeRelay!: FinanceRelayService;
 
     async loadSettings() {
         logger.flow("Settings", "load:start");
@@ -609,242 +223,25 @@ export default class TPSControllerPlugin extends Plugin {
         const data = loaded && typeof loaded === "object" && !Array.isArray(loaded)
             ? loaded as Record<string, unknown>
             : {};
-        const calendarIdMigrationChanged = countExternalCalendarsMissingId(data.externalCalendars) > 0;
-        const inlineCalendarSettingChanged = Array.isArray(data.externalCalendars)
-            && data.externalCalendars.some((calendar) => calendar?.autoCreateMode === "task");
-        const inlineReminderSettingChanged = data.inlineTaskReminders !== undefined
-            && data.inlineTaskReminders !== "none";
-        const externalCalendarsBeforeNormalization = calendarIdMigrationChanged || inlineCalendarSettingChanged
-            ? JSON.parse(JSON.stringify(data.externalCalendars || []))
-            : null;
-        this.settings = {
-            ...DEFAULT_CONTROLLER_SETTINGS,
-            ...data,
-        };
-        this.cleanLegacySettings();
-        // Establish local intent before any migration mutates settings. Migration
-        // saves can then merge only their changed fields into the latest data.
-        this.persistedSettingsSnapshot = this.snapshotSettingsForDiff();
-        if (externalCalendarsBeforeNormalization) {
-            this.persistedSettingsSnapshot.externalCalendars = externalCalendarsBeforeNormalization;
-        }
-        if (inlineReminderSettingChanged) {
-            this.persistedSettingsSnapshot.inlineTaskReminders = data.inlineTaskReminders;
-        }
-        const resolvedNotificationProvider = resolveNotificationDeliveryProvider(
-            data.notificationDeliveryProvider,
-            Object.keys(data).length > 0,
-            !Platform.isMobile
-                && window.localStorage.getItem(`tps-device-role-${this.app.vault.getName()}`) === "controller",
-        );
-        const notificationProviderMigrationChanged =
-            data.notificationDeliveryProvider !== resolvedNotificationProvider
-            || Object.prototype.hasOwnProperty.call(data, "enableLocalReminderNoticesOnUserDevices");
-        if (notificationProviderMigrationChanged) {
-            this.persistedSettingsSnapshot.notificationDeliveryProvider = data.notificationDeliveryProvider;
-            if (Object.prototype.hasOwnProperty.call(data, "enableLocalReminderNoticesOnUserDevices")) {
-                this.persistedSettingsSnapshot.enableLocalReminderNoticesOnUserDevices =
-                    data.enableLocalReminderNoticesOnUserDevices;
-            }
-        }
-        this.settings.notificationDeliveryProvider = resolvedNotificationProvider;
-        delete (this.settings as unknown as Record<string, unknown>).enableLocalReminderNoticesOnUserDevices;
-        const importedS3agleSettings = await this.migrateS3agleSettingsIfNeeded(data || {});
-        const s3CredentialMigration = this.migrateS3CredentialsFromSettings();
-        const attachmentSyncMigrationChanged = !data.attachmentSync
-            || this.settings.s3agleAttachmentAutomation?.enabled === true
-            || this.settings.s3agleAttachmentAutomation?.archiveUnreferencedBucketObjects === true;
-        if (attachmentSyncMigrationChanged) this.persistedSettingsSnapshot.attachmentSync = data.attachmentSync;
-        try {
-            this.settings.attachmentSync = normalizeAttachmentSyncSettings(data.attachmentSync, this.settings.s3agleAttachmentAutomation);
-        } catch {
-            // Preserve a newer device's configuration byte-for-value. Only this feature pauses.
-            this.settings.attachmentSync = data.attachmentSync as TPSControllerSettings["attachmentSync"];
-            logger.flowWarn("AttachmentSync", "configuration:newer-schema", { paused: true });
-        }
-        if (!this.settings._migratedFromPlugins) {
-            await migrateSettingsFromPlugins(this.app, this.settings, data, () => this.saveSettings());
-            this.cleanLegacySettings();
-        }
-        let noteRulesMigrationChanged = false;
-        try {
-            const migrated = migrateCalendarTagRules(this.settings.noteRules, this.settings.externalCalendars);
-            noteRulesMigrationChanged = JSON.stringify(migrated) !== JSON.stringify(this.settings.noteRules);
-            this.settings.noteRules = migrated;
-        } catch (error) {
-            new Notice("Note rules could not be migrated. Existing configuration was preserved; review Note rules in Controller settings.");
-        }
-        const localAlertState = this.loadAlertStateFromLocalStorage();
-        if (this.hasAlertStateEntries(localAlertState)) {
-            this.settings.alertState = localAlertState;
-        } else if (this.hasAlertStateEntries(this.settings.alertState)) {
-            this.persistAlertStateToLocalStorage(this.settings.alertState);
-        } else {
-            this.settings.alertState = {};
-        }
+        this.settings = { ...DEFAULT_CONTROLLER_SETTINGS, ...data };
+        this.settings.reminders = normalizeReminderSettingsInPlace(this.settings.reminders || []);
         this.sanitizeFrontmatterKeySettings();
         this.sanitizeTwoStageArchiveSettings();
-        this.sanitizeS3agleAttachmentAutomationSettings();
+        this.persistedSettingsSnapshot = this.snapshotSettingsForDiff();
         logger.setLoggingEnabled(this.settings.enableLogging);
-        let finalMigrationSaveSucceeded = true;
-        if (noteRulesMigrationChanged
-            || attachmentSyncMigrationChanged
-            || importedS3agleSettings
-            || s3CredentialMigration.changed
-            || notificationProviderMigrationChanged
-            || calendarIdMigrationChanged
-            || inlineCalendarSettingChanged
-            || inlineReminderSettingChanged) {
-            try {
-                await this.saveSettings();
-            } catch (error) {
-                finalMigrationSaveSucceeded = false;
-                if (importedS3agleSettings || s3CredentialMigration.changed) {
-                    logger.flowError("S3AttachmentAutomation", "credentials:migration-save-failed", error, {
-                        retainedLegacyFields: Object.keys(this.retainedLegacyS3Credentials).length,
-                    });
-                    new Notice("TPS Controller could not finish saving the S3 credential migration. Legacy values were retained and the migration will retry.", 12000);
-                }
-                if (notificationProviderMigrationChanged) {
-                    logger.flowError("NotificationDelivery", "provider:migration-save-failed", error);
-                    new Notice("TPS Controller could not save the notification service migration. Existing settings were left available for retry.", 12000);
-                }
-                if (calendarIdMigrationChanged) {
-                    logger.flowError("CalendarIdentity", "configuration-id-migration-save-failed", error);
-                    new Notice("TPS Controller could not save stable calendar configuration IDs. Calendar record sync will retry after settings can be saved.", 12000);
-                }
-            }
-        }
-        if (finalMigrationSaveSucceeded) {
-            this.persistedSettingsSnapshot = this.snapshotSettingsForDiff();
-        }
         logger.flow("Settings", "load:done", this.summarizeSettingsForLog());
     }
 
-    private cleanLegacySettings(): void {
-        const legacyTopLevelKeys = [
-            "kanbanTaskReminders",
-            "lineItemSourceTaskFiles",
-            "archiveNotePath",
-            "orphanArchiveGraceCycles",
-            "syncBackfillDays",
-            "scheduledDateProperty",
-            "scheduledStartProperty",
-            "scheduledEndProperty",
-            "notificationPresentationMode",
-            "editorDropLinkEnabled",
-            "editorDropLinkHeadingLevel",
-            "editorDropLinkTemplate",
-            "autoCreateConfigs",
-            "companionStartupScanEnabled",
-            "companionStartupDelayMs",
-            "companionUpstreamPropagation",
-            "enableLocalReminderNoticesOnUserDevices",
-        ];
-        for (const key of legacyTopLevelKeys) {
-            delete (this.settings as any)[key];
-        }
-
-        // A saved legacy mode is retained as a paused migration marker. Calendar
-        // automation never enters its former line writer from this mode.
-        this.settings.calendarStorageMode = this.settings.calendarStorageMode === "legacy"
-            ? "legacy"
-            : "native-records";
-        this.settings.inlineTaskReminders = "none";
-
-        this.settings.externalCalendars = normalizeExternalCalendarsInPlace(
-            this.settings.externalCalendars,
-            normalizeTaskTargetPathSetting,
-        );
-
-        this.settings.nativeCalendarCancellationState = normalizeNativeCalendarCancellationState(
-            this.settings.nativeCalendarCancellationState,
-        );
-
-        this.settings.reminders = normalizeReminderSettingsInPlace(this.settings.reminders || []);
-        this.settings.globalIgnoreCheckboxStates = [];
-    }
-
     async saveSettings() {
-        this.cleanLegacySettings();
         this.sanitizeTwoStageArchiveSettings();
-        this.sanitizeS3agleAttachmentAutomationSettings();
-        this.retryRetainedS3CredentialMigration();
-        this.persistAlertStateToLocalStorage(this.settings.alertState);
         await this.settingsSaveQueue.requestSave();
-    }
-
-    private scheduleTishOSNativeNotificationRefresh(reason: string, refreshViews = false): void {
-        if (this.unloading) return;
-        // Layout publication covers the initial file burst. Disabled/unused
-        // reminder routes have no note-driven schedule work, while a real
-        // settings change must still clear a previously published schedule.
-        const refreshNative = (reason === "settings-save" || (this.settings.notificationDeliveryProvider === "tishos"
-            && this.settings.enableReminders && this.settings.reminders.some(reminder => reminder.enabled)))
-            && this.tishOSCommandBridgeService?.canRefreshNativeNotifications() === true;
-        if (refreshViews && this.app.workspace.getLeavesOfType(NOTIFICATION_VIEW_TYPE).length > 0) {
-            this.pendingReminderViewRefresh = true;
-        }
-        if (!refreshNative && !this.pendingReminderViewRefresh) return;
-        if (this.tishOSNotificationRefreshTimeoutId !== null) {
-            window.clearTimeout(this.tishOSNotificationRefreshTimeoutId);
-        }
-        this.tishOSNotificationRefreshTimeoutId = window.setTimeout(() => {
-            this.tishOSNotificationRefreshTimeoutId = null;
-            if (this.pendingReminderViewRefresh) {
-                this.pendingReminderViewRefresh = false;
-                this.refreshNotificationViews();
-            }
-            if (refreshNative) void this.tishOSCommandBridgeService.refreshNativeNotifications(`native-notifications:${reason}`);
-        }, 1_000);
-    }
-
-    private handleReminderBaseChange(file: unknown, reason: string, oldPath?: string): boolean {
-        if (this.unloading || this.settings.enableReminders === false || !(file instanceof TFile)) return false;
-        const paths = [file.path, oldPath]
-            .filter((path): path is string => typeof path === "string" && path.toLowerCase().endsWith(".base"))
-            .map((path) => normalizePath(path));
-        if (!paths.length || !this.settings.reminders.some((reminder) => reminder.enabled
-            && isBaseViewReminder(reminder)
-            && paths.includes(normalizePath(String(reminder.basePath || "").trim())))) return false;
-        // Reuse the reminder publication debounce for mounted lists too. Base
-        // filters do not represent note writes or calendar settlement work.
-        this.scheduleTishOSNativeNotificationRefresh(reason, true);
-        return true;
-    }
-
-    private handleMetadataIndexResolved(): void {
-        const firstResolution = !this.metadataIndexResolved;
-        const noteMetadataPending = this.pendingNoteMetadataResolution;
-        // Consume before callbacks: a new note event during publication keeps
-        // its own obligation for the next core resolution.
-        this.pendingNoteMetadataResolution = false;
-        this.metadataIndexResolved = true;
-        if (firstResolution) this.deferCalendarSyncSettlement("metadata cache resolved");
-        if ((firstResolution || noteMetadataPending) && this.tishOSCommandBridgeService) {
-            this.scheduleTishOSNativeNotificationRefresh("metadata-resolved");
-        }
-    }
-
-
-    private hasNativeNotificationMetadataReadiness(): boolean {
-        if (this.metadataIndexResolved) return true;
-        if (!hasCompleteMarkdownMetadataSnapshot(this.app)) return false;
-        this.metadataIndexResolved = true;
-        logger.flow("TishOSCommandBridge", "metadata-readiness:verified-cache-snapshot");
-        return true;
     }
 
     private captureSettingsSaveSnapshot(): ControllerSettingsSaveSnapshot {
         const comparable = this.snapshotSettingsForDiff();
         const persisted = {
             ...JSON.parse(JSON.stringify(this.settings)),
-            alertState: {},
         } as Record<string, unknown>;
-        persisted.s3agleAttachmentAutomation = withRetainedLegacyS3Credentials(
-            (persisted.s3agleAttachmentAutomation as Record<string, unknown>) || {},
-            this.retainedLegacyS3Credentials,
-        );
         const changedKeys = new Set(this.getChangedSettingKeys(comparable));
         for (const key of this.uncertainSettingsSaveKeys) changedKeys.add(key);
         return {
@@ -878,7 +275,6 @@ export default class TPSControllerPlugin extends Plugin {
     private finishSettingsSaveBatch(): void {
         if (!this.settingsSaveBatchChanged) return;
         this.settingsSaveBatchChanged = false;
-        this.scheduleTishOSNativeNotificationRefresh("settings-save");
         logger.setLoggingEnabled(this.settings.enableLogging);
         this.app.workspace.trigger(TPS_EVENTS.CONTROLLER_SETTINGS_CHANGED as any, {
             sourcePluginId: this.manifest.id,
@@ -890,8 +286,7 @@ export default class TPSControllerPlugin extends Plugin {
         try {
             return JSON.parse(JSON.stringify({
                 ...this.settings,
-                alertState: {},
-            }));
+                }));
         } catch {
             return {};
         }
@@ -918,8 +313,6 @@ export default class TPSControllerPlugin extends Plugin {
             noLossSyncMode: this.settings.noLossSyncMode !== false,
             syncOnEventDelete: this.settings.syncOnEventDelete,
             archiveFolder: this.settings.archiveFolder || "",
-            twoStageArchiveEnabled: this.settings.twoStageArchive?.enabled === true,
-            attachmentSyncEnabled: this.settings.attachmentSync?.enabled === true,
         };
     }
 
@@ -977,140 +370,6 @@ export default class TPSControllerPlugin extends Plugin {
         };
     }
 
-    private sanitizeS3agleAttachmentAutomationSettings(): void {
-        const defaults = DEFAULT_CONTROLLER_SETTINGS.s3agleAttachmentAutomation;
-        const raw = this.settings.s3agleAttachmentAutomation || defaults;
-        const debounceSeconds = Number(raw.debounceSeconds);
-        const cooldownMinutes = Number(raw.cooldownMinutes);
-        const hashSeed = Number(raw.hashSeed);
-        const bucketArchiveCheckIntervalMinutes = Number(raw.bucketArchiveCheckIntervalMinutes);
-        const bucketArchiveOrphanDelayMinutes = Number(raw.bucketArchiveOrphanDelayMinutes);
-        const bucketArchiveLastRunAt = Number(raw.bucketArchiveLastRunAt);
-        const normalizeExtensionList = (value: unknown): string[] => {
-            const items = Array.isArray(value)
-                ? value
-                : String(value || "").split(",");
-            return Array.from(new Set(items
-                .map((item) => String(item || "").trim().toLowerCase().replace(/^\./, ""))
-                .filter(Boolean)))
-                .sort();
-        };
-        this.settings.s3agleAttachmentAutomation = {
-            enabled: false,
-            runOnActiveNoteOpen: raw.runOnActiveNoteOpen !== false,
-            runOnActiveNoteModify: raw.runOnActiveNoteModify !== false,
-            runOnPaste: raw.runOnPaste !== false,
-            runAfterCommandIds: Array.isArray(raw.runAfterCommandIds)
-                ? raw.runAfterCommandIds.map((id) => String(id || "").trim()).filter(Boolean)
-                : [],
-            debounceSeconds: Number.isFinite(debounceSeconds) && debounceSeconds >= 1
-                ? Math.floor(debounceSeconds)
-                : defaults.debounceSeconds,
-            cooldownMinutes: Number.isFinite(cooldownMinutes) && cooldownMinutes >= 1
-                ? Math.floor(cooldownMinutes)
-                : defaults.cooldownMinutes,
-            archiveUploadedSources: false,
-            allowedAttachmentExtensions: normalizeExtensionList(raw.allowedAttachmentExtensions),
-            ignoredAttachmentExtensions: normalizeExtensionList(raw.ignoredAttachmentExtensions),
-            makeUploadedObjectsPublic: false,
-            accessKeySecretName: typeof raw.accessKeySecretName === "string"
-                ? raw.accessKeySecretName.trim()
-                : defaults.accessKeySecretName,
-            secretKeySecretName: typeof raw.secretKeySecretName === "string"
-                ? raw.secretKeySecretName.trim()
-                : defaults.secretKeySecretName,
-            region: String(raw.region || defaults.region).trim() || defaults.region,
-            bucket: String(raw.bucket || "").trim(),
-            folder: normalizePath(String(raw.folder || "").trim().replace(/^\/+|\/+$/g, "")),
-            endpoint: String(raw.endpoint || "").trim().replace(/\/+$/g, ""),
-            useBucketSubdomain: raw.useBucketSubdomain === true,
-            contentUrl: String(raw.contentUrl || "").trim().replace(/\/+$/g, ""),
-            hashFileName: raw.hashFileName === true,
-            hashSeed: Number.isFinite(hashSeed) ? Math.floor(hashSeed) : defaults.hashSeed,
-            archiveUnreferencedBucketObjects: false,
-            bucketArchivePrefix: normalizePath(String(raw.bucketArchivePrefix || defaults.bucketArchivePrefix).trim().replace(/^\/+|\/+$/g, "")) || defaults.bucketArchivePrefix,
-            bucketArchiveCheckIntervalMinutes: Number.isFinite(bucketArchiveCheckIntervalMinutes) && bucketArchiveCheckIntervalMinutes >= 1
-                ? Math.floor(bucketArchiveCheckIntervalMinutes)
-                : defaults.bucketArchiveCheckIntervalMinutes,
-            bucketArchiveOrphanDelayMinutes: Number.isFinite(bucketArchiveOrphanDelayMinutes)
-                ? Math.max(5, Math.floor(bucketArchiveOrphanDelayMinutes))
-                : defaults.bucketArchiveOrphanDelayMinutes,
-            bucketArchiveLastRunAt: Number.isFinite(bucketArchiveLastRunAt) && bucketArchiveLastRunAt > 0
-                ? Math.floor(bucketArchiveLastRunAt)
-                : defaults.bucketArchiveLastRunAt,
-        };
-    }
-
-    private async migrateS3agleSettingsIfNeeded(rawControllerData: Record<string, unknown>): Promise<boolean> {
-        const existing = (rawControllerData as any)?.s3agleAttachmentAutomation || {};
-        if (existing.bucket || existing.endpoint) return false;
-        try {
-            const content = await this.app.vault.adapter.read(".obsidian/plugins/s3agle/data.json");
-            const s3agle = JSON.parse(content || "{}");
-            const migrated: Record<string, unknown> = {
-                ...DEFAULT_CONTROLLER_SETTINGS.s3agleAttachmentAutomation,
-                ...(this.settings.s3agleAttachmentAutomation || {}),
-                region: String(s3agle.s3Region || DEFAULT_CONTROLLER_SETTINGS.s3agleAttachmentAutomation.region),
-                bucket: String(s3agle.bucket || ""),
-                folder: String(s3agle.s3Folder || ""),
-                endpoint: String(s3agle.s3Url || ""),
-                useBucketSubdomain: s3agle.useBucketSubdomain === true,
-                contentUrl: String(s3agle.useCustomContentUrl && s3agle.customContentUrl ? s3agle.customContentUrl : ""),
-                hashFileName: s3agle.hashFileName === true,
-                hashSeed: Number(s3agle.hashSeed || 0),
-            };
-            if (existing.accessKey || s3agle.accessKey) migrated.accessKey = String(existing.accessKey || s3agle.accessKey || "");
-            if (existing.secretKey || s3agle.secretKey) migrated.secretKey = String(existing.secretKey || s3agle.secretKey || "");
-            this.settings.s3agleAttachmentAutomation = migrated as any;
-            logger.flow("S3AttachmentAutomation", "settings:migrated-from-s3agle", {
-                hasAccessKey: !!s3agle.accessKey,
-                hasSecretKey: !!s3agle.secretKey,
-                hasBucket: !!s3agle.bucket,
-            });
-            return true;
-        } catch (error) {
-            logger.flow("S3AttachmentAutomation", "settings:migrate-s3agle-skipped", {
-                error: logger.errorSummary(error),
-            });
-            return false;
-        }
-    }
-
-    private migrateS3CredentialsFromSettings(): S3CredentialMigrationResult {
-        const rule = this.settings.s3agleAttachmentAutomation as unknown as Record<string, unknown>;
-        const result = migrateLegacyS3Credentials(rule, this.app.secretStorage);
-        this.retainedLegacyS3Credentials = takeRetainedLegacyS3Credentials(rule);
-        logger.flow("S3AttachmentAutomation", "credentials:migration", {
-            migrated: result.migrated,
-            reusedExisting: result.reusedExisting,
-            retainedLegacy: result.retainedLegacy,
-            failedFields: result.failedFields.length,
-        });
-        if (result.failedFields.length) {
-            new Notice("TPS Controller could not move all S3 credentials into device-local SecretStorage. Legacy values were retained; select populated secrets in settings and reload.", 12000);
-        }
-        return result;
-    }
-
-    private retryRetainedS3CredentialMigration(): void {
-        if (!Object.keys(this.retainedLegacyS3Credentials).length) return;
-        const rule: Record<string, unknown> = {
-            ...(this.settings.s3agleAttachmentAutomation as unknown as Record<string, unknown>),
-            ...this.retainedLegacyS3Credentials,
-        };
-        const result = migrateLegacyS3Credentials(rule, this.app.secretStorage);
-        this.settings.s3agleAttachmentAutomation.accessKeySecretName = String(rule.accessKeySecretName || "").trim();
-        this.settings.s3agleAttachmentAutomation.secretKeySecretName = String(rule.secretKeySecretName || "").trim();
-        this.retainedLegacyS3Credentials = takeRetainedLegacyS3Credentials(rule);
-        if (result.migrated || result.reusedExisting) {
-            logger.flow("S3AttachmentAutomation", "credentials:migration-retry", {
-                migrated: result.migrated,
-                reusedExisting: result.reusedExisting,
-                retainedLegacy: result.retainedLegacy,
-            });
-        }
-    }
-
     // ========================================================================
     // Role Management
     // ========================================================================
@@ -1123,130 +382,6 @@ export default class TPSControllerPlugin extends Plugin {
             timestamp: Date.now(),
             role,
         });
-        if (role === "controller") void this.enterControllerMode();
-        else void this.exitControllerMode();
-    }
-
-    private enterControllerMode() {
-        logger.flow("Automation", "enter-controller-mode", { isMobile: Platform.isMobile });
-        if (Platform.isMobile) {
-            this.controllerPeriodicReloadService?.stop();
-            this.stopAllAutomation();
-            this.restartReminderLoop();
-            new Notice("Controller automation is disabled on mobile. This device will behave as a passive user device.", 4000);
-            logger.warn("Controller role is set, but mobile devices do not run background automation.");
-            return;
-        }
-        new Notice("Controller mode activated. Running background automation.", 3000);
-        this.startAllAutomation();
-        this.controllerPeriodicReloadService?.start();
-    }
-
-    private exitControllerMode() {
-        logger.flow("Automation", "exit-controller-mode");
-        this.controllerPeriodicReloadService?.stop();
-        this.stopAllAutomation();
-        this.restartReminderLoop();
-        new Notice("User mode activated.", 3000);
-    }
-
-    isPeriodicControllerReloadEnabled(): boolean {
-        return this.controllerPeriodicReloadPreference?.get() === true;
-    }
-
-    setPeriodicControllerReloadEnabled(enabled: boolean): boolean {
-        if (!enabled) this.controllerPeriodicReloadService.stop();
-        const persisted = this.controllerPeriodicReloadPreference.set(enabled);
-        if (!persisted) {
-            this.controllerPeriodicReloadService.stop();
-            logger.flowWarn("ControllerPeriodicReload", "preference:write-failed", { enabled });
-            new Notice("TPS Controller could not save this device-local preference. Periodic reload remains disabled for this session.");
-            return false;
-        }
-        logger.flow("ControllerPeriodicReload", "preference:changed", {
-            enabled,
-            role: this.deviceRoleManager?.role || "unknown",
-            isMobile: Platform.isMobile,
-        });
-        if (enabled && this.isPeriodicControllerReloadEligible()) {
-            this.controllerPeriodicReloadService.start();
-        } else {
-            this.controllerPeriodicReloadService.stop();
-        }
-        return true;
-    }
-
-    private isPeriodicControllerReloadEligible(): boolean {
-        if (this.noteRuleRunner?.busy) return false;
-        return !Platform.isMobile
-            && this.deviceRoleManager?.isController?.() === true
-            && this.controllerPeriodicReloadPreference?.get() === true;
-    }
-
-    private async prepareForPeriodicControllerReload(): Promise<void> {
-        if (!this.isPeriodicControllerReloadEligible()) {
-            throw new Error("Periodic Controller reload is no longer eligible before save preflight.");
-        }
-
-        logger.flow("ControllerPeriodicReload", "preflight:start");
-        // Drain only writes that the user already requested. Saving the current
-        // in-memory object here could overwrite a newer settings payload that
-        // just synced to disk and is waiting for this reload to load it.
-        await this.settingsSaveQueue.waitForIdle();
-        await this.flushReminderStateNow();
-
-        const openTextViews: TextFileView[] = [];
-        this.app.workspace.iterateAllLeaves((leaf) => {
-            if (leaf.view instanceof TextFileView) openTextViews.push(leaf.view);
-        });
-        for (const view of openTextViews) {
-            await view.save();
-        }
-        await this.app.workspace.requestSaveLayout();
-
-        if (!this.isPeriodicControllerReloadEligible()) {
-            throw new Error("Periodic Controller reload is no longer eligible after save preflight.");
-        }
-        logger.flow("ControllerPeriodicReload", "preflight:done", {
-            savedTextViews: openTextViews.length,
-        });
-    }
-
-    private async executePeriodicControllerReload(): Promise<boolean> {
-        // A settings control or background policy can request another save while
-        // text views/layout are being persisted. Drain that late write here, then
-        // keep the last eligibility check and synchronous command invocation in
-        // one turn so a queued save is never knowingly abandoned by the reload.
-        await this.settingsSaveQueue.waitForIdle();
-        if (!this.isPeriodicControllerReloadEligible()) {
-            logger.flowWarn("ControllerPeriodicReload", "command:blocked-ineligible");
-            return false;
-        }
-        // Obsidian has no public whole-app reload API. Keep this one exact
-        // command behind the shared typed, fail-closed compatibility adapter.
-        const executed = executeCommandById(this.app, "app:reload");
-        if (executed) {
-            logger.flow("ControllerPeriodicReload", "command:accepted");
-        } else {
-            logger.flowWarn("ControllerPeriodicReload", "command:unavailable");
-        }
-        return executed;
-    }
-
-    private warnBeforePeriodicControllerReload(): void {
-        new Notice(
-            "TPS Controller will reload Obsidian in one minute so settings already synced to this device can take effect. Save any non-file plugin work now.",
-            15_000,
-        );
-        logger.flow("ControllerPeriodicReload", "warning:shown", { minutesUntilReload: 1 });
-    }
-
-    private logPeriodicControllerReloadEvent(event: string, data: Record<string, unknown> = {}): void {
-        if (event.includes("failed") || event.includes("blocked") || event.includes("unavailable")) {
-            logger.flowWarn("ControllerPeriodicReload", event, data);
-            return;
-        }
-        logger.flow("ControllerPeriodicReload", event, data);
     }
 
     private updateStatusBar(role: DeviceRole) {
@@ -1259,844 +394,8 @@ export default class TPSControllerPlugin extends Plugin {
         }
     }
 
-    // ========================================================================
-    // Automation Control
-    // ========================================================================
-
-    private startAllAutomation() {
-        if (this.unloading || Platform.isMobile || !this.deviceRoleManager.isController()) {
-            this.stopAllAutomation();
-            logger.warn("Skipping automation startup on mobile.");
-            return;
-        }
-        logger.flow("Automation", "start-all", {
-            remindersEnabled: this.settings.enableReminders,
-            timeTrackingRemindersEnabled: this.settings.enableTimeTrackingHourlyReminders !== false,
-            twoStageArchiveEnabled: this.settings.twoStageArchive?.enabled === true,
-            syncIntervalMinutes: this.settings.syncIntervalMinutes,
-            calendarCount: this.settings.externalCalendars?.length || 0,
-        });
-        this.automationRunning = true;
-        this.automationGeneration += 1;
-        this.calendarAutomation.start();
-        void this.checkAndFulfillSyncRequests("controller-startup");
-        this.startSyncRequestLoop();
-        this.startReminderLoop();
-        this.startTimeTrackingReminderLoop();
-        this.startTwoStageArchiveLoop();
-        this.syncConflictWatcher.updateConfig(this.settings.archiveFolder, this.settings.eventIdKey);
-        this.syncConflictWatcher.start();
-        logger.flow("Automation", "start-all:done");
-    }
-
-    private stopAllAutomation() {
-        this.automationRunning = false;
-        this.automationGeneration += 1;
-        logger.flow("Automation", "stop-all");
-        this.calendarAutomation.stop();
-        this.stopSyncRequestLoop();
-        this.stopReminderLoop();
-        this.stopTimeTrackingReminderLoop();
-        this.stopTwoStageArchiveLoop();
-        this.syncConflictWatcher.stop();
-    }
-
-    restartS3agleAttachmentAutomation(): void {
-        this.attachmentSyncService?.start();
-    }
-
-    async runS3agleAttachmentAutomationNow(): Promise<void> {
-        await this.attachmentSyncService.runNow();
-    }
-
-    /** Compatibility only: orphan cleanup was retired with public-link offloading. */
-    restartS3BucketArchiveLoop(): void {}
-
-    async runS3BucketArchiveNow() {
-        new Notice("S3 bucket archiving is retired. Attachment sync now follows file changes and keeps local copies.");
-        return { archivedCount: 0, skippedCount: 0, lastSkipReason: "retired" };
-    }
-
-    restartTwoStageArchiveLoop(): void {
-        if (!this.deviceRoleManager?.isController?.()) return;
-        this.startTwoStageArchiveLoop();
-    }
-
     async runTwoStageArchiveNow() {
         return logger.timeAsync("TwoStageArchive", "manual-run", {}, () => this.twoStageArchiveService.runNow());
-    }
-
-    private startTwoStageArchiveLoop(): void {
-        this.stopTwoStageArchiveLoop();
-        if (!this.settings.twoStageArchive?.enabled) {
-            logger.flow("TwoStageArchive", "loop:not-enabled");
-            return;
-        }
-        logger.flow("TwoStageArchive", "loop:start", {
-            checkIntervalMs: this.twoStageArchiveService.getCheckIntervalMs(),
-            sourceFolder: this.settings.twoStageArchive.sourceFolder,
-            destinationFolder: this.settings.twoStageArchive.destinationFolder,
-            cadence: this.settings.twoStageArchive.cadence,
-            runTime: this.settings.twoStageArchive.runTime,
-        });
-
-        const tick = () => {
-            void this.twoStageArchiveService.runIfDue().catch((error) => {
-                logger.flowError("TwoStageArchive", "scheduled-run:failed", error);
-            });
-        };
-        tick();
-        this.twoStageArchiveIntervalId = window.setInterval(tick, this.twoStageArchiveService.getCheckIntervalMs());
-    }
-
-    private stopTwoStageArchiveLoop(): void {
-        if (this.twoStageArchiveIntervalId !== null) {
-            window.clearInterval(this.twoStageArchiveIntervalId);
-            this.twoStageArchiveIntervalId = null;
-            logger.flow("TwoStageArchive", "loop:stopped");
-        }
-    }
-
-    private startS3agleAttachmentAutomation(): void {
-        this.attachmentSyncService.start();
-    }
-
-    private stopS3agleAttachmentAutomation(): void {
-        this.attachmentSyncService.stop();
-    }
-
-    private deferCalendarSyncSettlement(reason: string): void {
-        const nextReadyAt = Date.now() + this.calendarSyncSettleWindowMs;
-        if (nextReadyAt > this.calendarSyncSettledAt) {
-            this.calendarSyncSettledAt = nextReadyAt;
-        }
-        logger.flow("CalendarSync", "settlement:deferred", {
-            reason,
-            readyInMs: Math.max(0, this.calendarSyncSettledAt - Date.now()),
-        });
-    }
-
-    private isNoteSourceFile(file: unknown): boolean {
-        const path = (file as { path?: unknown } | null)?.path;
-        if (typeof path !== "string" || !(file instanceof TFile) || !path.toLowerCase().endsWith(".md")) return false;
-        const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "").toLowerCase();
-        if ([".obsidian", ".tps", ".trash", ".tishos"].includes(normalized.split("/", 1)[0])) return false;
-        const relayFolder = this.financeRelay?.getRequestFolder?.();
-        const relayRoot = relayFolder?.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").toLowerCase();
-        return !relayRoot || (normalized !== relayRoot && !normalized.startsWith(`${relayRoot}/`));
-    }
-
-    private deferCalendarSyncSettlementForFile(file: unknown, reason: string): void {
-        if (!this.isNoteSourceFile(file)) return;
-        this.pendingNoteMetadataResolution = true;
-        const path = (file as { path?: unknown } | null)?.path;
-        if (typeof path === "string" && !shouldDeferCalendarSyncSettlementForPath(path, reason, file instanceof TFile)) return;
-        this.deferCalendarSyncSettlement(reason);
-    }
-
-    private getCalendarSyncReadiness(): { ready: boolean; reason: string } {
-        if (!this.metadataIndexResolved) {
-            return { ready: false, reason: "metadata cache/index not resolved yet" };
-        }
-        const remainingMs = this.calendarSyncSettledAt - Date.now();
-        if (remainingMs > 0) {
-            const remainingSec = Math.ceil(remainingMs / 1000);
-            return { ready: false, reason: `vault sync not settled yet (${remainingSec}s remaining)` };
-        }
-        return { ready: true, reason: "ready" };
-    }
-
-    // ========================================================================
-    // Sync Requests
-    // ========================================================================
-
-    async runCalendarSync(force = true): Promise<void> {
-        if (this.deviceRoleManager?.isController?.()) {
-            logger.flow("CalendarSync", "run-calendar-sync:controller", { force });
-            await this.calendarAutomation.runSync(force);
-            return;
-        }
-        logger.flow("CalendarSync", "run-calendar-sync:replica-request", { force, scope: ["calendar"] });
-        await this.requestSync(["calendar"]);
-    }
-
-    private async requestSync(scope: ("calendar" | "reminders" | "s3agle-archive")[]) {
-        logger.flow("SyncRequest", "write:start", { scope, role: this.deviceRoleManager?.role || "unknown" });
-        await this.syncRequestService.writeRequest(scope);
-        logger.flow("SyncRequest", "write:done", { scope });
-        new Notice(`Sync requested (${scope.join(", ")}). Will be processed by Controller.`);
-    }
-
-    private checkAndFulfillSyncRequests(cause: "controller-startup" | "poll-interval"): Promise<void> {
-        const flight = joinSyncRequestFulfillment(this.syncRequestFulfillmentPromise, () => (
-            this.fulfillOneSyncRequest(cause).catch((error) => {
-                logger.flowError("SyncRequest", "fulfill:failed", error, { cause });
-            })
-        ));
-        if (flight.joined) {
-            logger.flow("SyncRequest", "fulfill:join-active", { cause });
-            return flight.promise;
-        }
-        const run = flight.promise;
-        this.syncRequestFulfillmentPromise = run;
-        void run.finally(() => {
-            if (this.syncRequestFulfillmentPromise === run) this.syncRequestFulfillmentPromise = null;
-        });
-        return run;
-    }
-
-    private async fulfillOneSyncRequest(cause: "controller-startup" | "poll-interval"): Promise<void> {
-        const lifecycle = this.automationGeneration;
-        const isCurrent = () => this.automationRunning && lifecycle === this.automationGeneration
-            && !Platform.isMobile && this.deviceRoleManager.isController();
-        if (!isCurrent()) return;
-        await this.calendarAutomation.fulfillStartupSync();
-        if (!isCurrent()) return;
-        const request = await this.syncRequestService.readRequest();
-        if (!request || !isCurrent()) return;
-        await logger.timeAsync("SyncRequest", "fulfill", {
-            cause,
-            requestId: request.requestId,
-            scope: request.scope,
-        }, async () => {
-            const acknowledged = await executeSyncRequestGeneration(async () => {
-                if (request.scope.includes("calendar")) {
-                    const outcome = await this.calendarAutomation.runSync();
-                    if (outcome !== "completed") return false;
-                }
-                if (!isCurrent()) return false;
-                if (request.scope.includes("reminders")) await this.runReminderCheck();
-                if (request.scope.includes("s3agle-archive")) {
-                    // Acknowledge old requests without removing local content.
-                    logger.flow("AttachmentSync", "legacy-source-archive:retired", {
-                        requests: request.s3agleArchiveRequests?.length || 0,
-                    });
-                }
-                return isCurrent();
-            }, () => isCurrent() ? this.syncRequestService.acknowledgeRequest(request) : Promise.resolve(false));
-            logger.flow("SyncRequest", "fulfill:acknowledged", {
-                requestId: request.requestId,
-                acknowledged,
-            });
-        });
-    }
-
-    private startSyncRequestLoop() {
-        this.stopSyncRequestLoop();
-        // Keep request fulfillment responsive for user-device manual sync commands.
-        const lifecycle = this.automationGeneration;
-        this.syncRequestIntervalId = window.setInterval(() => {
-            if (!this.automationRunning || lifecycle !== this.automationGeneration
-                || Platform.isMobile || !this.deviceRoleManager.isController()) return;
-            void this.checkAndFulfillSyncRequests("poll-interval");
-        }, 4000);
-    }
-
-    private stopSyncRequestLoop() {
-        if (this.syncRequestIntervalId !== null) {
-            window.clearInterval(this.syncRequestIntervalId);
-            this.syncRequestIntervalId = null;
-        }
-    }
-
-    // ========================================================================
-    // Reminder Loop
-    // ========================================================================
-
-    restartTimeTrackingReminderLoop(): void {
-        if (this.deviceRoleManager.isController()) this.startTimeTrackingReminderLoop();
-        else this.stopTimeTrackingReminderLoop();
-    }
-
-    restartReminderLoop(): void {
-        this.startReminderLoop();
-    }
-
-    refreshReminderPolicy(): void {
-        logger.flow("ReminderPolicy", "settings-changed");
-        this.restartReminderLoop();
-        this.refreshNotificationViews();
-    }
-
-    private getReminderDeliveryMode(): ReminderDeliveryMode | null {
-        return resolveReminderDeliveryMode({
-            enableReminders: this.settings.enableReminders,
-            notificationDeliveryProvider: this.settings.notificationDeliveryProvider,
-            isController: this.deviceRoleManager?.isController?.() === true,
-            isMobile: Platform.isMobile,
-            supportsTishOSNativeNotifications: supportsTishOSNotificationDelivery(Platform),
-        });
-    }
-
-    private startReminderLoop() {
-        this.stopReminderLoop();
-        const deliveryMode = this.getReminderDeliveryMode();
-        if (!deliveryMode) {
-            logger.flow("ReminderLoop", "start:not-enabled", {
-                role: this.deviceRoleManager?.role || "unknown",
-                remindersEnabled: this.settings.enableReminders === true,
-                notificationDeliveryProvider: this.settings.notificationDeliveryProvider,
-                isMobile: Platform.isMobile,
-            });
-            return;
-        }
-        const runGeneration = this.reminderRunGeneration;
-        this.reminderStartupTimeoutId = window.setTimeout(() => {
-            this.reminderStartupTimeoutId = null;
-            void this.runReminderCheck(deliveryMode, runGeneration);
-        }, 10000);
-        const pollMs = Math.max(30000, this.settings.pollMinutes * 60 * 1000);
-        const activeRepeatMs = (this.settings.reminders || [])
-            .filter((reminder) => reminder.enabled && reminder.repeatUntilComplete && Number(reminder.repeatIntervalMinutes) > 0)
-            .map((reminder) => Number(reminder.repeatIntervalMinutes) * 60 * 1000);
-        const ms = Math.max(30000, Math.min(pollMs, ...activeRepeatMs));
-        logger.flow("ReminderLoop", "start", {
-            deliveryMode,
-            pollMs,
-            intervalMs: ms,
-            reminderRules: this.settings.reminders?.length || 0,
-            activeRepeatingRules: activeRepeatMs.length,
-        });
-        this.reminderIntervalId = window.setInterval(() => {
-            void this.runReminderCheck(deliveryMode, runGeneration);
-        }, ms);
-    }
-
-    private stopReminderLoop() {
-        this.reminderRunGeneration++;
-        if (this.reminderStartupTimeoutId !== null) {
-            window.clearTimeout(this.reminderStartupTimeoutId);
-            this.reminderStartupTimeoutId = null;
-        }
-        if (this.reminderIntervalId !== null) {
-            window.clearInterval(this.reminderIntervalId);
-            this.reminderIntervalId = null;
-            logger.flow("ReminderLoop", "stopped");
-        }
-    }
-
-    private startTimeTrackingReminderLoop(): void {
-        this.stopTimeTrackingReminderLoop();
-        if (this.settings.notificationDeliveryProvider !== "ntfy") {
-            logger.flow("TimeTrackingReminder", "loop:provider-not-selected", {
-                notificationDeliveryProvider: this.settings.notificationDeliveryProvider,
-            });
-            return;
-        }
-        if (this.settings.enableTimeTrackingHourlyReminders === false) {
-            logger.flow("TimeTrackingReminder", "loop:not-enabled");
-            return;
-        }
-        logger.flow("TimeTrackingReminder", "loop:start");
-
-        this.timeTrackingReminderStartupTimeoutId = window.setTimeout(() => {
-            this.timeTrackingReminderStartupTimeoutId = null;
-            void this.runTimeTrackingReminderCheck();
-        }, 10000);
-        this.timeTrackingReminderIntervalId = window.setInterval(() => {
-            void this.runTimeTrackingReminderCheck();
-        }, 60000);
-    }
-
-    private stopTimeTrackingReminderLoop(): void {
-        if (this.timeTrackingReminderStartupTimeoutId !== null) {
-            window.clearTimeout(this.timeTrackingReminderStartupTimeoutId);
-            this.timeTrackingReminderStartupTimeoutId = null;
-        }
-        if (this.timeTrackingReminderIntervalId !== null) {
-            window.clearInterval(this.timeTrackingReminderIntervalId);
-            this.timeTrackingReminderIntervalId = null;
-        }
-    }
-
-    private async runTimeTrackingReminderCheck(): Promise<void> {
-        if (!this.deviceRoleManager.isController()) {
-            logger.flow("TimeTrackingReminder", "check:skip-role", { role: this.deviceRoleManager.role });
-            return;
-        }
-        if (this.settings.enableTimeTrackingHourlyReminders === false) {
-            logger.flow("TimeTrackingReminder", "check:skip-disabled");
-            return;
-        }
-        if (this.settings.notificationDeliveryProvider !== "ntfy") {
-            logger.flow("TimeTrackingReminder", "check:skip-provider", {
-                notificationDeliveryProvider: this.settings.notificationDeliveryProvider,
-            });
-            return;
-        }
-
-        const now = new Date();
-        if (now.getMinutes() > 2) return;
-
-        const hourStart = new Date(now);
-        hourStart.setMinutes(0, 0, 0);
-        const hourKey = moment(hourStart).format("YYYY-MM-DDTHH");
-
-        const gcm = this.getGcmPlugin();
-        const timeTracking = gcm?.timeTracking;
-        if (typeof timeTracking?.getActiveTimers !== "function") {
-            logger.flowWarn("TimeTrackingReminder", "check:no-gcm-timers");
-            return;
-        }
-
-        const messager = this.getNotifierPlugin();
-        if (!messager?.sendNotification && !messager?.sendMessage) {
-            logger.flowWarn("TimeTrackingReminder", "check:no-notifier");
-            return;
-        }
-
-        let activeSessions: GcmTimeTrackingSession[] = [];
-        try {
-            activeSessions = await timeTracking.getActiveTimers();
-        } catch (error) {
-            logger.warn("Failed to read active time tracking sessions for hourly reminders.", error);
-            return;
-        }
-
-        logger.flow("TimeTrackingReminder", "check:sessions", { activeSessions: activeSessions.length, hourKey });
-        if (!activeSessions.length) return;
-
-        const state = this.loadTimeTrackingReminderState();
-        const cutoff = Date.now() - 48 * 60 * 60 * 1000;
-        let changed = false;
-        for (const key of Object.keys(state)) {
-            if (state[key] < cutoff) {
-                delete state[key];
-                changed = true;
-            }
-        }
-
-        for (const session of activeSessions) {
-            const start = this.parseTimeTrackingSessionDate(session.start);
-            if (!start || start.getTime() >= hourStart.getTime()) continue;
-
-            const dedupeKey = `${session.id}:${hourKey}`;
-            if (state[dedupeKey]) continue;
-
-            const title = String(session.title || "this note").trim() || "this note";
-            const file = this.resolveTimeTrackingSessionFile(session);
-            try {
-                const body = `Still working "${title}"?`;
-                if (messager.sendNotification) {
-                    await messager.sendNotification("Time tracking reminder", body, file ?? undefined);
-                } else if (messager.sendMessage) {
-                    await messager.sendMessage(body, file ?? undefined, "Time tracking reminder");
-                }
-                state[dedupeKey] = Date.now();
-                changed = true;
-            } catch (error) {
-                logger.warn(`Failed to send time tracking reminder for ${title}.`, error);
-            }
-        }
-
-        logger.flow("TimeTrackingReminder", "check:done", { activeSessions: activeSessions.length, changed });
-        if (changed) this.persistTimeTrackingReminderState(state);
-    }
-
-    private parseTimeTrackingSessionDate(value: string): Date | null {
-        const raw = String(value || "").trim();
-        if (!raw) return null;
-        const parsed = moment(raw, [moment.ISO_8601, "YYYY-MM-DD HH:mm:ss", "YYYY-MM-DD HH:mm"], true);
-        if (parsed.isValid()) return parsed.toDate();
-        const fallback = new Date(raw);
-        return Number.isFinite(fallback.getTime()) ? fallback : null;
-    }
-
-    private resolveTimeTrackingSessionFile(session: GcmTimeTrackingSession): TFile | null {
-        const candidates = [session.targetPath, session.sourcePath]
-            .map((path) => String(path || "").trim())
-            .filter(Boolean);
-        for (const path of candidates) {
-            const file = this.app.vault.getAbstractFileByPath(normalizePath(path));
-            if (file instanceof TFile) return file;
-        }
-        return null;
-    }
-
-    private getTimeTrackingReminderStateStorageKey(): string {
-        return `tps-controller-time-tracking-reminder-state-${this.app.vault.getName()}`;
-    }
-
-    private loadTimeTrackingReminderState(): Record<string, number> {
-        try {
-            const raw = window.localStorage.getItem(this.getTimeTrackingReminderStateStorageKey());
-            if (!raw) return {};
-            const parsed = JSON.parse(raw);
-            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-            const output: Record<string, number> = {};
-            for (const [key, value] of Object.entries(parsed)) {
-                const timestamp = Number(value);
-                if (key && Number.isFinite(timestamp)) output[key] = timestamp;
-            }
-            return output;
-        } catch (error) {
-            logger.warn("Failed to read local time tracking reminder state; resetting state.", error);
-            return {};
-        }
-    }
-
-    private persistTimeTrackingReminderState(state: Record<string, number>): void {
-        try {
-            window.localStorage.setItem(this.getTimeTrackingReminderStateStorageKey(), JSON.stringify(state || {}));
-        } catch (error) {
-            logger.warn("Failed to persist local time tracking reminder state.", error);
-        }
-    }
-
-    private runReminderCheck(
-        deliveryMode: ReminderDeliveryMode | null = this.getReminderDeliveryMode(),
-        runGeneration: number = this.reminderRunGeneration,
-    ): Promise<void> {
-        if (!deliveryMode) {
-            if (
-                this.settings.enableReminders === true
-                && this.settings.notificationDeliveryProvider === "tishos"
-            ) {
-                logger.flow("ReminderEngine", "check:tishos-schedule-refresh");
-                return this.tishOSCommandBridgeService
-                    .refreshNativeNotifications("manual-reminder-check")
-                    .then(() => undefined);
-            }
-            logger.flow("ReminderEngine", "check:skip-disabled");
-            return Promise.resolve();
-        }
-
-        if (this.reminderCheckPromise) {
-            logger.flow("ReminderEngine", "check:join-active", { deliveryMode });
-            return this.reminderCheckPromise;
-        }
-
-        const promise = this.executeReminderCheck(deliveryMode, runGeneration).finally(() => {
-            if (this.reminderCheckPromise === promise) this.reminderCheckPromise = null;
-        });
-        this.reminderCheckPromise = promise;
-        return promise;
-    }
-
-    private async executeReminderCheck(
-        deliveryMode: ReminderDeliveryMode,
-        runGeneration?: number,
-    ): Promise<void> {
-        const alertStateBeforeRun = this.cloneAlertState(this.settings.alertState);
-        const evaluationAlertState = this.cloneAlertState(this.settings.alertState);
-        const evaluationSettings: TPSControllerSettings = {
-            ...this.settings,
-            alertState: evaluationAlertState,
-        };
-        const result = await logger.timeAsync("ReminderEngine", "check", {
-            deliveryMode,
-            rules: this.settings.reminders?.length || 0,
-            batchNotifications: this.settings.batchNotifications === true,
-        }, () => this.reminderEngine.evaluateReminders(evaluationSettings));
-
-        if (runGeneration !== this.reminderRunGeneration) {
-            logger.flow("ReminderEngine", "check:discarded-stopped-run", { deliveryMode });
-            return;
-        }
-
-        if (result.stateChanged) {
-            this.settings.alertState = evaluationAlertState;
-            this.scheduleReminderStateSave();
-        }
-        this.app.workspace.trigger(TPS_EVENTS.REMINDERS_UPDATED as any, {
-            sourcePluginId: this.manifest.id,
-            timestamp: Date.now(),
-            deliveryMode,
-            notificationCount: result.notifications.length,
-            stateChanged: result.stateChanged,
-        });
-        logger.flow("ReminderEngine", "check:result", {
-            deliveryMode,
-            notifications: result.notifications.length,
-            stateChanged: result.stateChanged,
-        });
-        this.scheduleTishOSNativeNotificationRefresh("reminder-check");
-        if (!result.notifications.length) return;
-
-        const externalNotifications = result.notifications.filter((n) => n.sourceType === "external-event");
-        const allDayNotifications = result.notifications.filter((n) => n.isAllDay && n.sourceType !== "external-event");
-        const nonAllDayNotifications = result.notifications.filter((n) => !n.isAllDay && n.sourceType !== "external-event");
-        const batches = this.buildReminderNotificationBatches(nonAllDayNotifications, allDayNotifications, externalNotifications);
-        logger.flow("ReminderEngine", "delivery:prepared", {
-            deliveryMode,
-            notifications: result.notifications.length,
-            batches: batches.length,
-            nonAllDay: nonAllDayNotifications.length,
-            allDay: allDayNotifications.length,
-            external: externalNotifications.length,
-        });
-
-        this.showLocalReminderNotices(batches);
-
-        if (deliveryMode === "local-obsidian") {
-            logger.flow("ReminderEngine", "delivery:done", {
-                batches: batches.length,
-                route: "local-obsidian",
-            });
-            return;
-        }
-
-        if (!this.deviceRoleManager.isController() || Platform.isMobile) {
-            logger.flowWarn("ReminderEngine", "delivery:messager-skipped-role-change", {
-                role: this.deviceRoleManager.role,
-                isMobile: Platform.isMobile,
-            });
-            return;
-        }
-
-        const notifier = this.getNotifierPlugin();
-        if (!notifier) {
-            logger.warn("[ReminderEngine] TPS Notifier plugin not found. Local system notices were shown.");
-            return;
-        }
-        if (!notifier.sendNotification && !notifier.sendMessage) {
-            logger.warn("[ReminderEngine] Notifier plugin has no send API. Local system notices were shown.");
-            return;
-        }
-
-        try {
-            for (const batch of batches) {
-                if (notifier.sendNotification) await notifier.sendNotification(batch.title, batch.body, batch.file);
-                else if (notifier.sendMessage) await notifier.sendMessage(batch.body, batch.file, batch.title);
-            }
-            logger.flow("ReminderEngine", "delivery:done", {
-                batches: batches.length,
-                route: notifier.sendNotification ? "sendNotification" : "sendMessage",
-            });
-        } catch (error) {
-            this.restoreAlertStateAfterDeliveryFailure(alertStateBeforeRun, "Reminder delivery failed.", error);
-        }
-    }
-
-    private buildReminderNotificationBatches(
-        nonAllDayNotifications: PendingNotification[],
-        allDayNotifications: PendingNotification[],
-        externalNotifications: PendingNotification[],
-    ): ReminderNotificationBatch[] {
-        const notifications = [
-            ...nonAllDayNotifications,
-            ...allDayNotifications,
-            ...externalNotifications,
-        ];
-
-        if (this.settings.batchNotifications && notifications.length > 1) {
-            const count = notifications.length;
-            const items = notifications.slice(0, 8);
-            let body = items.map((p: PendingNotification) => ` ${p.title}`).join('\n');
-            if (count > 8) body += `\n...and ${count - 8} more`;
-            return [{ title: `${count} Reminder${count === 1 ? "" : "s"}`, body, items: notifications }];
-        }
-
-        return notifications.map((p) => ({ title: p.title, body: p.body, file: p.file, items: [p] }));
-    }
-
-    private showLocalReminderNotices(batches: ReminderNotificationBatch[]): void {
-        for (const batch of batches) {
-            const notice = new Notice(this.buildLocalReminderNoticeFragment(batch), 10000);
-            notice.messageEl.classList.add("tps-controller-reminder-notice");
-            notice.messageEl.style.cursor = "pointer";
-            notice.messageEl.addEventListener("click", () => {
-                void this.openReminderNoticeTarget(batch);
-                notice.hide();
-            });
-        }
-    }
-
-    private buildLocalReminderNoticeFragment(batch: ReminderNotificationBatch): DocumentFragment {
-        const fragment = document.createDocumentFragment();
-        const container = document.createElement("div");
-        container.className = "tps-controller-reminder-notice-content";
-        container.style.display = "flex";
-        container.style.flexDirection = "column";
-        container.style.gap = "4px";
-        fragment.appendChild(container);
-
-        const title = document.createElement("div");
-        title.className = "tps-controller-reminder-notice-title";
-        title.textContent = String(batch.title || "TPS Reminder").trim() || "TPS Reminder";
-        title.style.fontWeight = "600";
-        container.appendChild(title);
-
-        const items = batch.items || [];
-        if (items.length > 1) {
-            const list = document.createElement("div");
-            list.className = "tps-controller-reminder-notice-list";
-            list.style.display = "flex";
-            list.style.flexDirection = "column";
-            list.style.gap = "2px";
-            container.appendChild(list);
-
-            for (const item of items.slice(0, 5)) {
-                const row = document.createElement("div");
-                row.className = "tps-controller-reminder-notice-row";
-                row.textContent = `• ${String(item.title || item.file?.basename || "Reminder").trim()}`;
-                row.style.whiteSpace = "nowrap";
-                row.style.overflow = "hidden";
-                row.style.textOverflow = "ellipsis";
-                if (item.file) {
-                    row.style.textDecoration = "underline";
-                    row.addEventListener("click", (event) => {
-                        event.stopPropagation();
-                        void this.openReminderFile(item.file);
-                    });
-                }
-                list.appendChild(row);
-            }
-
-            if (items.length > 5) {
-                const more = document.createElement("div");
-                more.className = "tps-controller-reminder-notice-more";
-                more.textContent = `+${items.length - 5} more`;
-                more.style.color = "var(--text-muted)";
-                list.appendChild(more);
-            }
-        } else {
-            const body = String(batch.body || "").trim();
-            if (body) {
-                const detail = document.createElement("div");
-                detail.className = "tps-controller-reminder-notice-detail";
-                detail.textContent = body.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, 2).join(" · ");
-                detail.style.color = "var(--text-muted)";
-                detail.style.whiteSpace = "nowrap";
-                detail.style.overflow = "hidden";
-                detail.style.textOverflow = "ellipsis";
-                container.appendChild(detail);
-            }
-        }
-
-        const hint = document.createElement("div");
-        hint.className = "tps-controller-reminder-notice-hint";
-        hint.textContent = batch.file ? "Click to open note" : "Click to view notifications";
-        hint.style.color = "var(--text-faint)";
-        hint.style.fontSize = "var(--font-ui-smaller)";
-        container.appendChild(hint);
-
-        return fragment;
-    }
-
-    private async openReminderNoticeTarget(batch: ReminderNotificationBatch): Promise<void> {
-        if (batch.file) {
-            await this.openReminderFile(batch.file);
-            return;
-        }
-
-        const firstFile = (batch.items || []).map((item) => item.file).find((file): file is TFile => file instanceof TFile);
-        if (firstFile && batch.items.length === 1) {
-            await this.openReminderFile(firstFile);
-            return;
-        }
-
-        await this.overdueService.openNotificationModal();
-    }
-
-    private async openReminderFile(file: TFile): Promise<void> {
-        const leaf = this.app.workspace.getLeaf(false);
-        await leaf.openFile(file);
-    }
-
-    private cloneAlertState(state: AlertState): AlertState {
-        try {
-            return JSON.parse(JSON.stringify(state || {})) as AlertState;
-        } catch {
-            return {};
-        }
-    }
-
-    private restoreAlertStateAfterDeliveryFailure(previousState: AlertState, message: string, error?: unknown): void {
-        logger.warn(`[ReminderEngine] ${message}`, error);
-        new Notice(`TPS reminders not sent: ${message}`);
-        this.settings.alertState = previousState;
-        this.persistAlertStateToLocalStorage(this.settings.alertState);
-        this.reminderStateSaveDirty = false;
-    }
-
-    private scheduleReminderStateSave(): void {
-        this.reminderStateSaveDirty = true;
-        const now = Date.now();
-        if (now >= this.reminderStateNextSaveAt) {
-            void this.flushReminderStateNow();
-            return;
-        }
-
-        if (this.reminderStateFlushTimer !== null) {
-            return;
-        }
-
-        const delay = Math.max(50, this.reminderStateNextSaveAt - now);
-        this.reminderStateFlushTimer = window.setTimeout(() => {
-            this.reminderStateFlushTimer = null;
-            void this.flushReminderStateNow();
-        }, delay);
-    }
-
-    private async flushReminderStateNow(): Promise<void> {
-        if (!this.reminderStateSaveDirty) return;
-        this.reminderStateSaveDirty = false;
-        this.reminderStateNextSaveAt = Date.now() + this.reminderStateSaveCooldownMs;
-        this.persistAlertStateToLocalStorage(this.settings.alertState);
-    }
-
-    private stopReminderStateFlushTimer(): void {
-        if (this.reminderStateFlushTimer !== null) {
-            window.clearTimeout(this.reminderStateFlushTimer);
-            this.reminderStateFlushTimer = null;
-        }
-    }
-
-    private getAlertStateStorageKey(): string {
-        return `tps-controller-alert-state-${this.app.vault.getName()}`;
-    }
-
-    private hasAlertStateEntries(state: AlertState | null | undefined): boolean {
-        return !!state && Object.keys(state).length > 0;
-    }
-
-    private loadAlertStateFromLocalStorage(): AlertState {
-        return this.loadAlertStateStorage(
-            this.getAlertStateStorageKey(),
-            "Controller reminder alert state",
-        );
-    }
-
-    private loadAlertStateStorage(storageKey: string, label: string): AlertState {
-        try {
-            const raw = window.localStorage.getItem(storageKey);
-            if (!raw) return {};
-            const parsed = JSON.parse(raw);
-            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-            return parsed as AlertState;
-        } catch (error) {
-            logger.warn(`Failed to read ${label}; resetting state.`, error);
-            return {};
-        }
-    }
-
-    private persistAlertStateToLocalStorage(state: AlertState): void {
-        this.persistAlertStateStorage(
-            this.getAlertStateStorageKey(),
-            state,
-            "Controller reminder alert state",
-        );
-    }
-
-    private persistAlertStateStorage(
-        storageKey: string,
-        state: AlertState,
-        label: string,
-    ): void {
-        try {
-            window.localStorage.setItem(storageKey, JSON.stringify(state || {}));
-        } catch (error) {
-            logger.warn(`Failed to persist ${label}.`, error);
-        }
-    }
-
-    async resetReminderDeliveryState(): Promise<void> {
-        this.restartReminderLoop();
-        this.settings.alertState = {};
-        this.reminderStateSaveDirty = false;
-        this.persistAlertStateToLocalStorage(this.settings.alertState);
-        await this.saveSettings();
     }
 
     // ========================================================================
@@ -2119,62 +418,6 @@ export default class TPSControllerPlugin extends Plugin {
         for (const leaf of this.app.workspace.getLeavesOfType(NOTIFICATION_VIEW_TYPE)) {
             const view = leaf.view as NotificationView;
             void view.refresh?.();
-        }
-    }
-
-    // ========================================================================
-    // Plugin API Lookups
-    // ========================================================================
-
-    private getCalendarPlugin(): CalendarPluginAPI | null {
-        const plugin = getPluginById(this.app, "tps-calendar-base")
-                    || getPluginById(this.app, "TPS-Calendar-Base (Dev)");
-        return (plugin as any)?.api || null;
-    }
-
-    private getNotifierPlugin(): NotifierPluginAPI | null {
-        const plugin = getPluginById(this.app, "tps-messager")
-                    || getPluginById(this.app, "tps-notifier");
-        return (plugin as any)?.api || plugin || null;
-    }
-
-    private getGcmPlugin(): GcmPluginAPI | null {
-        const enabled = isPluginEnabled(this.app, "tps-global-context-menu")
-                     || isPluginEnabled(this.app, "TPS-Global-Context-Menu (Dev)");
-        if (!enabled) return null;
-        const plugin = (getPluginById(this.app, "tps-global-context-menu")
-                    || getPluginById(this.app, "TPS-Global-Context-Menu (Dev)")) as any;
-        if (!plugin) return null;
-        const api = plugin.api;
-        if (!api) return null;
-        return {
-            settings: plugin.settings ?? api.settings,
-            services: api.services ?? plugin.sharedServices,
-            timeTracking: api.timeTracking ?? api.services?.timeTracking ?? plugin.timeTrackingService,
-            bulkEditService: plugin.bulkEditService ?? api.bulkEditService,
-        } as GcmPluginAPI;
-    }
-
-    private async runRecurrenceMaintenanceTick(paths?: readonly string[]): Promise<void> {
-        if (paths !== undefined && paths.length === 0) return;
-        if (!this.deviceRoleManager.isController()) {
-            logger.flow("Maintenance", "recurrence:skip-role", { role: this.deviceRoleManager.role });
-            return;
-        }
-        const gcm = this.getGcmPlugin();
-        const checkMissing = gcm?.services?.recurrence?.checkMissingRecurrences
-            || gcm?.bulkEditService?.checkMissingRecurrences;
-        if (typeof checkMissing !== "function") {
-            logger.flowWarn("Maintenance", "recurrence:unavailable");
-            return;
-        }
-        try {
-            logger.flow("Maintenance", "recurrence:start", { scope: paths === undefined ? "full" : "changed", paths: paths?.length });
-            await checkMissing.call(gcm?.services?.recurrence || gcm?.bulkEditService, paths);
-            logger.flow("Maintenance", "recurrence:done");
-        } catch (error) {
-            logger.flowError("Maintenance", "recurrence:failed", error);
-            throw error;
         }
     }
 

@@ -47,7 +47,6 @@ function loadServices(events) {
       if (id === 'obsidian') return obsidian;
       if (id.endsWith('/logger')) return { flow() {}, flowWarn() {}, flowError() {}, log() {}, warn() {} };
       if (id === '../views/notification-view') return { NOTIFICATION_VIEW_TYPE: 'synthetic-notifications' };
-      if (id === './external-calendar-service') return { ExternalCalendarService: class {} };
       if (id === '../tps-gcm-api') return {
         emitFilesUpdated: (_app, paths) => events.push([...paths]),
         getGcmApi: () => null,
@@ -63,14 +62,13 @@ function loadServices(events) {
   }
   return {
     ...loadModule('services/overdue-service.ts'),
-    ...loadModule('services/reminder-engine.ts'),
     ...loadModule('types.ts'),
   };
 }
 
 function fixture({ status = 'working', metadataStatus = status } = {}) {
   const events = [];
-  const { OverdueService, ReminderEngine, DEFAULT_CONTROLLER_SETTINGS } = loadServices(events);
+  const { OverdueService, DEFAULT_CONTROLLER_SETTINGS } = loadServices(events);
   const file = new SyntheticFile('Inbox/Synthetic overdue note.md');
   const files = new Map([[file.path, file]]);
   const content = new Map();
@@ -111,7 +109,6 @@ function fixture({ status = 'working', metadataStatus = status } = {}) {
     fileManager: { processFrontMatter: async () => { counters.fallback++; throw new Error('Unexpected fallback'); } },
   };
   const service = new OverdueService(app, () => settings);
-  const engine = new ReminderEngine(app, null);
   settings.reminders = [{
     id: 'synthetic-repeat', enabled: true, property: 'scheduled', sourceTypes: ['file'],
     title: '{filename}', body: '{time}', mode: 'timeblock', triggerAtEnd: false,
@@ -120,7 +117,7 @@ function fixture({ status = 'working', metadataStatus = status } = {}) {
   }];
   const item = { file, targetKind: 'note', reminder: settings.reminders[0] };
   return {
-    file, files, content, metadata, counters, events, service, engine, settings, now, properties, item,
+    file, files, content, metadata, counters, events, service, settings, now, properties, item,
     save, bulkEdit,
     setStatusOperation: value => { statusOperation = value; },
     setUpdateOperation: value => { updateOperation = value; },
@@ -225,92 +222,6 @@ test('invalid GCM result does not count as a committed completion', async () => 
   await assert.rejects(f.service.completeItemFromNativeNotification(f.item), /not applied/i);
 });
 
-test('committed completion plus rename removes the original reminder from the actual projection', async () => {
-  const f = fixture();
-  const originalPath = f.file.path;
-  const before = await f.engine.projectScheduledNotifications(f.settings, f.now, 30 * 60 * 1000);
-  assert.ok(before.length > 0);
-  assert.ok(before.every(item => item.sourcePath === originalPath));
-  f.setStatusOperation(async next => {
-    f.save({ ...f.properties, status: next });
-    f.rename('Inbox/2026-10-05 Synthetic overdue note.md');
-    return 1;
-  });
-  assert.equal(await f.service.completeItemFromNativeNotification(f.item), true);
-  const after = await f.engine.projectScheduledNotifications(f.settings, f.now, 30 * 60 * 1000);
-  assert.deepEqual(after, []);
-  assert.equal(f.files.size, 1);
-  assert.equal(f.files.has(originalPath), false);
-  assert.match(f.content.get(f.file), /Preserve this body\./);
-});
-
-test('a refused completion does not remove the original source from reminder projection', async () => {
-  const f = fixture();
-  const before = await f.engine.projectScheduledNotifications(f.settings, f.now, 30 * 60 * 1000);
-  assert.ok(before.length > 0);
-  await assert.rejects(f.service.completeItemFromNativeNotification(f.item), /not applied/i);
-  const after = await f.engine.projectScheduledNotifications(f.settings, f.now, 30 * 60 * 1000);
-  assert.deepEqual(after, before);
-  assert.equal(f.files.size, 1);
-});
-
-test('the first projection after saved completion ignores still-working metadata', async () => {
-  const f = fixture({ status: 'complete', metadataStatus: 'working' });
-  const schedule = await f.engine.projectScheduledNotifications(f.settings, f.now, 30 * 60 * 1000);
-  assert.deepEqual(schedule, []);
-  assert.equal(f.counters.read, 1);
-  assert.equal(f.counters.cachedRead, 0);
-  assert.equal(f.counters.scans, 1);
-});
-
-test('the first projection after authored reopening ignores still-complete metadata', async () => {
-  const f = fixture({ status: 'working', metadataStatus: 'complete' });
-  const schedule = await f.engine.projectScheduledNotifications(f.settings, f.now, 30 * 60 * 1000);
-  assert.ok(schedule.length > 0);
-  assert.equal(f.counters.read, 1);
-  assert.equal(f.counters.cachedRead, 0);
-  assert.equal(f.counters.scans, 1);
-});
-
-for (const removedFrontmatter of [false, true]) {
-  test(`current source ${removedFrontmatter ? 'without frontmatter' : 'without scheduled'} removes a cached reminder`, async () => {
-    const f = fixture();
-    f.content.set(f.file, removedFrontmatter ? 'Only the preserved body.\n' : '---\ntitle: Still a note\n---\nPreserved body.\n');
-    assert.deepEqual(await f.engine.projectScheduledNotifications(f.settings, f.now, 30 * 60 * 1000), []);
-    assert.equal(f.counters.read, 1);
-    assert.equal(f.counters.cachedRead, 0);
-    assert.equal(f.counters.scans, 1);
-  });
-}
-
-for (const [invalidSource, source] of [
-  ['malformed YAML', 'status: [unterminated'],
-  ['incomplete frontmatter', null],
-  ['read failure', null],
-  ['scalar timestamp', '2026-10-05'],
-  ['scalar null', 'null'],
-  ['scalar string', 'complete'],
-  ['list', '- complete'],
-]) {
-  test(`projection refuses uncertain ${invalidSource} rather than stale reminders or authoritative empty`, async () => {
-    const f = fixture();
-    if (invalidSource === 'read failure') f.app.vault.read = async () => { throw new Error('Synthetic disk failure'); };
-    else f.content.set(f.file, invalidSource === 'incomplete frontmatter' ? '---\nstatus: complete\n' : `---\n${source}\n---\nBody\n`);
-    await assert.rejects(f.engine.projectScheduledNotifications(f.settings, f.now, 30 * 60 * 1000));
-    assert.equal(f.counters.scans, 1);
-    assert.equal(f.counters.cachedRead, 0);
-  });
-}
-
-for (const source of ['', '# Empty property map', '{}']) {
-  test(`an intentionally empty property map removes a cached reminder: ${JSON.stringify(source)}`, async () => {
-    const f = fixture();
-    f.content.set(f.file, `---\n${source}\n---\nPreserved body.\n`);
-    assert.deepEqual(await f.engine.projectScheduledNotifications(f.settings, f.now, 30 * 60 * 1000), []);
-    assert.equal(f.counters.read, 1);
-  });
-}
-
 test('status clear accepts an authored no-op only when a valid map actually omits the status', async () => {
   const f = fixture();
   f.content.set(f.file, '---\ntitle: Still a note\n---\nBody\n');
@@ -321,48 +232,14 @@ test('status clear accepts an authored no-op only when a valid map actually omit
   await assert.rejects(f.service.setItemStatus(f.item, null), /not applied/i);
 });
 
-test('fresh source title and tags replace cached values in one authoritative candidate read', async () => {
-  const f = fixture();
-  f.metadata.set(f.file, { ...f.properties, kind: 'calendar-event', eventTitle: 'Stale title', tags: ['blocked'] });
-  f.content.set(f.file, `---\n${stringifyYaml({ ...f.properties, kind: 'calendar-event', eventTitle: 'Current title', tags: ['allowed'] })}---\nBody #current-tag.\n`);
-  f.settings.globalIgnoreTags = ['blocked'];
-  const schedule = await f.engine.projectScheduledNotifications(f.settings, f.now, 30 * 60 * 1000);
-  assert.ok(schedule.length > 0);
-  assert.ok(schedule.every(item => item.title === 'Current title'));
-  assert.equal(f.counters.read, 1);
-  assert.equal(f.counters.cachedRead, 0);
-});
-
-test('authoritative projection does not read unrelated notes or add a second vault scan', async () => {
-  const f = fixture();
-  for (let index = 0; index < 1000; index++) {
-    const file = new SyntheticFile(`Ordinary/Unrelated ${index}.md`);
-    f.files.set(file.path, file);
-    f.metadata.set(file, {});
-  }
-  for (let index = 0; index < 3; index++) {
-    assert.ok((await f.engine.projectScheduledNotifications(f.settings, f.now, 30 * 60 * 1000)).length > 0);
-    assert.equal(f.counters.read, index + 1);
-    assert.equal(f.counters.cachedRead, 0);
-    assert.equal(f.counters.scans, index + 1);
-  }
-});
-
-test('display-only overdue calculation reuses cached body content with its current frontmatter', async () => {
+test('display-only overdue calculation follows metadata updates without body reads', async () => {
   const f = fixture({ status: 'complete', metadataStatus: 'working' });
+  assert.equal((await f.service.getOverdueItems()).length, 1, 'display initially reflects indexed evidence');
+  f.metadata.set(f.file, { ...f.properties, status: 'complete' });
   assert.deepEqual(await f.service.getOverdueItems(), []);
   assert.equal(f.counters.read, 0);
-  assert.equal(f.counters.cachedRead, 1);
-  assert.equal(f.counters.scans, 1);
-});
-
-test('authoritative projection rejects a file that is replaced during its current source read', async () => {
-  const f = fixture();
-  f.app.vault.read = async target => {
-    f.files.set(target.path, new SyntheticFile(target.path));
-    return f.content.get(target);
-  };
-  await assert.rejects(f.engine.projectScheduledNotifications(f.settings, f.now, 30 * 60 * 1000));
+  assert.equal(f.counters.cachedRead, 0);
+  assert.equal(f.counters.scans, 2);
 });
 
 function attachReminderBase(f) {
@@ -390,7 +267,7 @@ function attachReminderBase(f) {
   return { base, members, counts };
 }
 
-test('Base overdue selection shares one query and reads only matching note bodies, replacing rule filters', async () => {
+test('Base overdue selection shares one query without reading note bodies, replacing rule filters', async () => {
   const f = fixture();
   const b = attachReminderBase(f);
   const reminder = Object.assign(f.settings.reminders[0], {
@@ -414,7 +291,7 @@ test('Base overdue selection shares one query and reads only matching note bodie
     assert.equal(items[0].nextRuleLabel, reminder.id, 'the same selected repeating reminder supplies its next trigger');
     assert.equal(items[0].isRepeating, true);
     assert.deepEqual(b.counts, { baseReads: 1, queries: 1 });
-    assert.deepEqual({ raw: f.counters.read, bodyReads: f.counters.cachedRead, scans: f.counters.scans }, { raw: 0, bodyReads: 1, scans: 0 },
+    assert.deepEqual({ raw: f.counters.read, bodyReads: f.counters.cachedRead, scans: f.counters.scans }, { raw: 0, bodyReads: 0, scans: 0 },
       'the native query owns discovery; Controller uses its matching paths without another vault inventory');
     assert.equal(reminder.requiredStatuses[0], 'never', 'saved custom filters are retained when selection mode changes');
   } finally { Date.now = oldNow; }

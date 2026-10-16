@@ -153,3 +153,20 @@ test('a view closed during initial refresh does not register a post-close interv
     assert.equal(h.view.contentEl.querySelector('.tps-notification-list'), h.list);
   } finally { globalThis.window = oldWindow; }
 });
+
+test('opening the sidebar performs one explicit evaluation and installs no automatic refresh owners', async () => {
+  const h=loadView(); let evaluations=0; let refreshAction;
+  h.plugin.getOverdueItems=async()=>{evaluations++;return [h.item];};
+  h.view.addAction=(_icon,_label,callback)=>{refreshAction=callback;};
+  h.view.registerEvent=()=>assert.fail('No automatic event owner');
+  h.view.registerInterval=()=>assert.fail('No automatic timer owner');
+  for(const owner of [h.view.app.vault,h.view.app.metadataCache,h.view.app.workspace])owner.on=()=>assert.fail('No automatic refresh subscription');
+  await h.view.onOpen();
+  assert.equal(evaluations,1);
+  assert.equal(h.scheduled.length,0);
+  await refreshAction();
+  assert.equal(evaluations,2,'Explicit Refresh remains available');
+  await h.view.onClose();
+  await refreshAction();
+  assert.equal(evaluations,2,'A closed view cannot reevaluate');
+});
