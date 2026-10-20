@@ -197,14 +197,8 @@ export interface TPSControllerSettings {
     noteRules: NoteRuleSettings;
     // Calendar Sync
     calendarStorageMode: CalendarStorageMode;
-    syncIntervalMinutes: number;
-    calendarImportHorizonDays: number;
-    noLossSyncMode: boolean;
-    syncOnEventDelete: "delete" | "archive" | "nothing";
     archiveFolder: string;
     canceledStatusValue: string;
-    /** Optional status for an inferred missing event when No-Loss is disabled. */
-    missingEventStatusValue: string;
     /** Controller-owned reconciliation state. Keys are canonical calendar-record IDs. */
     nativeCalendarCancellationState: Record<string, NativeCalendarCancellationState>;
     externalCalendarFilter: string;
@@ -219,7 +213,6 @@ export interface TPSControllerSettings {
     uidKey: string;
     titleKey: string;
     statusKey: string;
-    previousStatusKey: string;
     startProperty: string;
     endProperty: string;
     /** End datetime for native external-calendar records; endProperty is a duration field. */
@@ -228,11 +221,8 @@ export interface TPSControllerSettings {
     // Notification Rules
     pollMinutes: number;
     enableReminders: boolean;
-    inlineTaskReminders: "gcm" | "none" | "scheduled" | "all";
-    enableTimeTrackingHourlyReminders: boolean;
     reminders: PropertyReminder[];
     alertState: AlertState;
-    batchNotifications: boolean;
     notificationDeliveryProvider: NotificationDeliveryProvider;
     globalIgnorePaths: string[];
     globalIgnoreTags: string[];
@@ -269,13 +259,8 @@ export const DEFAULT_CONTROLLER_SETTINGS: TPSControllerSettings = {
     noteRules: emptyNoteRules(),
     // Calendar Sync
     calendarStorageMode: "native-records",
-    syncIntervalMinutes: 5,
-    calendarImportHorizonDays: 60,
-    noLossSyncMode: true,
-    syncOnEventDelete: "nothing",
     archiveFolder: "",
     canceledStatusValue: "cancelled",
-    missingEventStatusValue: "",
     nativeCalendarCancellationState: {},
     externalCalendarFilter: "",
     externalCalendars: [],
@@ -325,7 +310,6 @@ export const DEFAULT_CONTROLLER_SETTINGS: TPSControllerSettings = {
     uidKey: "tpsCalendarUid",
     titleKey: "title",
     statusKey: "status",
-    previousStatusKey: "tpsCalendarPrevStatus",
     startProperty: "scheduled",
     endProperty: "timeEstimate",
     calendarEndDateTimeProperty: "end",
@@ -333,11 +317,8 @@ export const DEFAULT_CONTROLLER_SETTINGS: TPSControllerSettings = {
     // Notification Rules
     pollMinutes: 0.5,
     enableReminders: true,
-    inlineTaskReminders: "none",
-    enableTimeTrackingHourlyReminders: true,
     reminders: [],
     alertState: {},
-    batchNotifications: true,
     notificationDeliveryProvider: "tishos",
     globalIgnorePaths: ["System/"],
     globalIgnoreTags: ["archive", "template"],

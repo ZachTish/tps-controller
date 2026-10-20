@@ -1,5 +1,16 @@
 # TPS Controller
 
+## 6.0.0 — Remove retired automation options
+
+Nine inactive automatic-import/reminder options are removed from typed settings and defaults: `syncIntervalMinutes`, `calendarImportHorizonDays`, `missingEventStatusValue`, `inlineTaskReminders`, `enableTimeTrackingHourlyReminders`, `batchNotifications`, `previousStatusKey`, `noLossSyncMode` and `syncOnEventDelete`. Their only remaining behavior was retaining, normalizing or logging values for owners removed in 5.0.0. Diagnostic summaries no longer imply that the retired policies execute.
+
+The existing change-set merge omits those keys during in-memory loading and ordinary fresh settings saves. Reminder definitions and manual review, Note Rules, Two-Stage Archive, source feeds, connection handoffs, alert/cancellation ledgers, credentials, migration markers and unknown extension state remain. There is no startup settings save. The seven existing destinations remain Overview (default), Connections, Calendar rules, Note rules, Reminders, Automations and Advanced; retained handoffs and retirement explanations are unchanged.
+
+This is a major release because persisted configuration keys are retired. No note cleanup, provider request, new scheduler, watcher, scan, cache, retry or repair system is added. Retiring fields on disk uses the existing settings-save owner; this release adds no startup save. Existing native accessible controls, focus behavior and plugin-scoped mobile styles are reused. Focused regression coverage exercises settings omission and preservation at the existing persistence boundaries. Minimum Obsidian remains **1.12.3**. Tests, build/deploy/reload evidence, limitations and artifact hashes are recorded in [the 6.0.0 release notes](release-notes/6.0.0.md). The public release is the BRAT handoff; this task does not install it in production or claim physical iPhone acceptance.
+
+
+Final validation: **179 passed; three existing optional notification-comparison skips (182 total)**. A separate final stable build deploys only to this test vault. Targeted unload/manifest-refresh/reload confirms **6.0.0** with enabled states unchanged and Sync disabled. All seven top-level destinations inspected without invoking rule, archive, connection or outbound actions. Explicit Note Rules actions, manual archive controls and retirement handoffs remain reachable. No preference toggle or outbound automation was enabled. The final explicit reload left each affected settings file byte-identical; settings omission/concurrent-state preservation is exercised through the real persistence owner in isolated tests.
+
 ## 5.0.0 — explicit actions without background integrations
 
 This major release removes automatic reminder delivery/publication, command catalogs, calendar importing, Finance relay execution, attachment synchronization, conflict sweeping, scheduled archiving, parent maintenance, and periodic application reload. Their startup hooks, timers, file listeners, settings controls, transport dependencies, and unreachable helpers are deleted. No replacement scheduler, mailbox, repair loop, or fallback delivery is introduced.

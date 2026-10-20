@@ -1,7 +1,7 @@
 {
   "id": "tps-controller",
   "name": "TPS Controller",
-  "version": "5.0.0",
+  "version": "6.0.0",
   "minAppVersion": "1.12.3",
   "description": "Explicit note rules, notification review, and manual archive tools for TPS.",
   "author": "Zach Tisherman",

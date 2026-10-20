@@ -25,6 +25,7 @@ export function mergeSettingsChangeSet(
         if (hasOwn(local, key)) merged[key] = cloneSettingValue(local[key]);
         else delete merged[key];
     }
+    for (const key of ["syncIntervalMinutes", "calendarImportHorizonDays", "missingEventStatusValue", "inlineTaskReminders", "enableTimeTrackingHourlyReminders", "batchNotifications", "previousStatusKey", "noLossSyncMode", "syncOnEventDelete"]) delete merged[key];
     return merged;
 }
 

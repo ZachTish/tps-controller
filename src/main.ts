@@ -223,7 +223,7 @@ export default class TPSControllerPlugin extends Plugin {
         const data = loaded && typeof loaded === "object" && !Array.isArray(loaded)
             ? loaded as Record<string, unknown>
             : {};
-        this.settings = { ...DEFAULT_CONTROLLER_SETTINGS, ...data };
+        this.settings = { ...DEFAULT_CONTROLLER_SETTINGS, ...mergeSettingsChangeSet(data, {}, []) };
         this.settings.reminders = normalizeReminderSettingsInPlace(this.settings.reminders || []);
         this.sanitizeFrontmatterKeySettings();
         this.sanitizeTwoStageArchiveSettings();
@@ -310,8 +310,6 @@ export default class TPSControllerPlugin extends Plugin {
             notificationDeliveryProvider: this.settings.notificationDeliveryProvider,
             externalCalendars: this.settings.externalCalendars?.length || 0,
             enabledExternalCalendars: (this.settings.externalCalendars || []).filter((calendar) => calendar.enabled !== false).length,
-            noLossSyncMode: this.settings.noLossSyncMode !== false,
-            syncOnEventDelete: this.settings.syncOnEventDelete,
             archiveFolder: this.settings.archiveFolder || "",
         };
     }
@@ -328,7 +326,6 @@ export default class TPSControllerPlugin extends Plugin {
         s.uidKey = normalizeKey(s.uidKey, d.uidKey);
         s.titleKey = normalizeKey(s.titleKey, d.titleKey);
         s.statusKey = normalizeKey(s.statusKey, d.statusKey);
-        s.previousStatusKey = normalizeKey(s.previousStatusKey, d.previousStatusKey);
         s.startProperty = normalizeKey(s.startProperty, d.startProperty);
         s.endProperty = normalizeKey(s.endProperty, d.endProperty);
         s.calendarEndDateTimeProperty = normalizeKey(s.calendarEndDateTimeProperty, d.calendarEndDateTimeProperty);
@@ -337,7 +334,6 @@ export default class TPSControllerPlugin extends Plugin {
         const ensureNotIdentity = (v: string, fb: string) => identity.has(v.toLowerCase()) ? fb : v;
         s.titleKey = ensureNotIdentity(s.titleKey, d.titleKey);
         s.statusKey = ensureNotIdentity(s.statusKey, d.statusKey);
-        s.previousStatusKey = ensureNotIdentity(s.previousStatusKey, d.previousStatusKey);
         s.startProperty = ensureNotIdentity(s.startProperty, d.startProperty);
         s.endProperty = ensureNotIdentity(s.endProperty, d.endProperty);
         s.calendarEndDateTimeProperty = ensureNotIdentity(s.calendarEndDateTimeProperty, d.calendarEndDateTimeProperty);

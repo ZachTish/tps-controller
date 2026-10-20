@@ -8,6 +8,8 @@ const readSource=path=>process.env.TPS_STARTUP_BASELINE_REF
   ? execFileSync('git',['show',`${process.env.TPS_STARTUP_BASELINE_REF}:${path}`],{encoding:'utf8'})
   :readFileSync(new URL(`../${path}`,import.meta.url),'utf8');
 const main=readSource('src/main.ts');
+const settingsPersistence={exports:{}};
+new Function('module','exports',ts.transpileModule(readSource('src/services/settings-persistence.ts'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText)(settingsPersistence,settingsPersistence.exports);
 class TFile {constructor(path){this.path=path;}}
 const Platform={isMobile:false};
 const logger={flow(){},flowWarn(){},flowError(){},setLoggingEnabled(){},timeAsync:(_a,_b,_c,run)=>run()};
@@ -17,7 +19,7 @@ function owner(names,bindings={}){
   const klass=ast.statements.find(n=>ts.isClassDeclaration(n)&&n.name?.text==='TPSControllerPlugin');
   const methods=names.map(name=>{const n=klass.members.find(n=>ts.isMethodDeclaration(n)&&n.name.getText(ast)===name);assert.ok(n,`actual ${name}`);return n.getText(ast);});
   const js=ts.transpileModule(`class Owner {${methods.join('\n')}}`,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;
-  return new Function('logger','TPS_EVENTS','Platform','TFile','mergeSettingsChangeSet',...Object.keys(bindings),`${js};return Owner;`)(logger,events,Platform,TFile,(old,next,keys)=>Object.fromEntries([...Object.entries(old),...keys.map(k=>[k,next[k]])]),...Object.values(bindings));
+  return new Function('logger','TPS_EVENTS','Platform','TFile','mergeSettingsChangeSet',...Object.keys(bindings),`${js};return Owner;`)(logger,events,Platform,TFile,settingsPersistence.exports.mergeSettingsChangeSet,...Object.values(bindings));
 }
 
 test('unchanged settings save batches perform zero reads/writes/events/notification refreshes',async()=>{
@@ -103,7 +105,7 @@ test('retired startup migrations neither save nor inspect other plugins, local s
    snapshotSettingsForDiff(){return structuredClone(this.settings);},summarizeSettingsForLog:()=>({})});
   for(let n=0;n<20;n++)await h.loadSettings();
   assert.equal(reads,20);assert.deepEqual(sample,expected);
-  for(const key of Object.keys(sample||{}))assert.deepEqual(h.settings[key],expected[key]);
+  for(const key of Object.keys(sample||{})){if(key==='inlineTaskReminders')assert.equal(Object.hasOwn(h.settings,key),false);else assert.deepEqual(h.settings[key],expected[key]);}
  }
  assert.doesNotMatch(main,/migrateSettingsFromPlugins|migrateCalendarTagRules|countExternalCalendarsMissingId|notificationProviderMigrationChanged|cleanLegacySettings/);
 });
@@ -131,4 +133,16 @@ test('unload during settings initialization prevents all later owner registratio
     assert.equal(registrations, 0);
     assert.equal(h.api, undefined);
   } finally { globalThis.window = oldWindow; }
+});
+
+
+test('retired automatic options are omitted without changing current preferences, credentials or execution state',()=>{
+ const retired=['syncIntervalMinutes','calendarImportHorizonDays','missingEventStatusValue','inlineTaskReminders','enableTimeTrackingHourlyReminders','batchNotifications','previousStatusKey','noLossSyncMode','syncOnEventDelete'];
+ const stored={...Object.fromEntries(retired.map(key=>[key,'unused'])),alertState:{existing:{lastAt:123}},_migratedFromPlugins:true,nativeCalendarCancellationState:{record:{pendingApplication:true}},attachmentSync:{enabled:true,recoveryKeySecretName:'existing-reference'},extensionOwned:{future:true},enableLogging:false};
+ const original=structuredClone(stored);
+ const merged=settingsPersistence.exports.mergeSettingsChangeSet(stored,{enableLogging:true},['enableLogging']);
+ for(const key of retired)assert.equal(Object.hasOwn(merged,key),false,key);
+ assert.equal(merged.enableLogging,true);
+ for(const key of ['alertState','_migratedFromPlugins','nativeCalendarCancellationState','attachmentSync','extensionOwned'])assert.deepEqual(merged[key],stored[key],key);
+ assert.deepEqual(stored,original,'normalization cannot mutate the source object');
 });
