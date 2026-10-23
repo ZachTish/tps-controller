@@ -1,3 +1,5 @@
+import { nativeSettingsSearch, focusSettingsSearchResult, type SettingsSearchEntry } from "./native-settings-search";
+import { SETTINGS_SEARCH_ENTRIES, SETTINGS_SEARCH_ROUTES } from "./settings-search-catalog";
 import { CONNECTION_SECTIONS, ConnectionSection, connectionSection, mountConnectionSettings } from "./services/connection-settings";
 import { validateNoteRules } from "./services/note-rules";
 import { NoteRuleEditor, NoteRulePreviewModal } from "./services/note-rule-ui";
@@ -45,6 +47,36 @@ const createSettingsSection = (
 // ============================================================================
 
 export class TPSControllerSettingTab extends PluginSettingTab {
+  private searchContentEl: HTMLElement | null = null;
+  private get settingsContentEl(): HTMLElement {
+    return this.searchContentEl?.isConnected ? this.searchContentEl : this.containerEl;
+  }
+
+  getSettingDefinitions() {
+    return nativeSettingsSearch(SETTINGS_SEARCH_ENTRIES, SETTINGS_SEARCH_ROUTES,
+      container => {
+        this.searchContentEl = container;
+        this.display();
+        return () => { this.hide(); if (this.searchContentEl === container) this.searchContentEl = null; };
+      }, entry => this.openSearchResult(entry));
+  }
+
+  private openSearchResult(entry: SettingsSearchEntry): void {
+    this.activePage = entry.route as ControllerSettingsPage;
+    const manager = (this.app as App & { setting?: { openTabById?: (id: string) => void } }).setting;
+    manager?.openTabById?.(this.plugin.manifest.id);
+    this.display();
+    if (!focusSettingsSearchResult(this.settingsContentEl, entry.name)) {
+      const message = this.settingsContentEl.createDiv({
+        text: `“${entry.name}” is in this area. Its control appears when the relevant feature or saved item is selected.`,
+        attr: { role: 'status', tabindex: '-1' },
+      });
+      this.settingsContentEl.prepend(message);
+      message.focus();
+      message.scrollIntoView({ block: 'start' });
+    }
+  }
+
     plugin: TPSControllerPlugin;
     private activePage: ControllerSettingsPage = 'overview';
     private activeConnection: ConnectionSection = 'finance';
@@ -78,7 +110,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
 
     display(): void {
         this.hide();
-        const { containerEl } = this;
+        const containerEl = this.settingsContentEl;
         containerEl.empty();
 
         containerEl.createEl('h2', { text: 'TPS Controller Settings' });
@@ -157,7 +189,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                 button.addEventListener('click', () => {
                     this.activeConnection = section.id;
                     this.display();
-                    this.containerEl.querySelector<HTMLElement>('.tps-controller-connections-selector [aria-pressed="true"]')?.focus({ preventScroll: true });
+                    this.settingsContentEl.querySelector<HTMLElement>('.tps-controller-connections-selector [aria-pressed="true"]')?.focus({ preventScroll: true });
                 });
             }
             const content = containerEl.createDiv({ cls: 'tps-controller-connections-content' });
@@ -304,7 +336,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
                         if (await api.changeKey('tps-controller', fk.key, value)) {
                             this.display();
                             this.containerEl.scrollTop = scrollTop;
-                            this.containerEl.querySelector<HTMLInputElement>(`[data-tps-mapping-key="${String(fk.key)}"]`)?.focus({preventScroll:true});
+                            this.settingsContentEl.querySelector<HTMLInputElement>(`[data-tps-mapping-key="${String(fk.key)}"]`)?.focus({preventScroll:true});
                         }
                     } catch (error) { new Notice(error instanceof Error ? error.message : String(error)); }
                     finally { button.setDisabled(false); }
@@ -390,7 +422,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
     private navigateToPage(destination: ControllerSettingsPage): void {
         this.activePage = destination;
         this.display();
-        const heading = this.containerEl.querySelector<HTMLElement>('.tps-settings-page-heading h2');
+        const heading = this.settingsContentEl.querySelector<HTMLElement>('.tps-settings-page-heading h2');
         heading?.focus({ preventScroll: false });
     }
 
@@ -399,7 +431,7 @@ export class TPSControllerSettingTab extends PluginSettingTab {
         this.display();
         this.containerEl.scrollTop = scrollTop;
         if (focusSelector) {
-            this.containerEl.querySelector<HTMLElement>(focusSelector)?.focus({ preventScroll: true });
+            this.settingsContentEl.querySelector<HTMLElement>(focusSelector)?.focus({ preventScroll: true });
         }
     }
 
